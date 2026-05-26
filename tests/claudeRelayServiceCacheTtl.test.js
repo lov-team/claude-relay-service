@@ -216,8 +216,7 @@ describe('Claude relay cache_control ttl handling', () => {
     const headers = {
       'user-agent': 'claude-cli/2.1.150 (external, sdk-cli)',
       'x-app': 'cli',
-      'anthropic-beta': 'claude-code-20250219,context-management-2025-06-27',
-      'anthropic-version': '2023-06-01'
+      'anthropic-beta': 'claude-code-20250219,context-management-2025-06-27'
     }
 
     expect(claudeRelayService._isActualClaudeCodeRequest(requestBody, headers)).toBe(true)

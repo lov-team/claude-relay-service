@@ -187,15 +187,12 @@ class ClaudeRelayService {
   _hasClaudeCodeIdentityHeaders(requestBody, clientHeaders) {
     const xApp = this._getHeaderValueCaseInsensitive(clientHeaders, 'x-app')
     const anthropicBeta = this._getHeaderValueCaseInsensitive(clientHeaders, 'anthropic-beta')
-    const anthropicVersion = this._getHeaderValueCaseInsensitive(clientHeaders, 'anthropic-version')
 
     if (
       typeof xApp !== 'string' ||
       !xApp.trim() ||
       typeof anthropicBeta !== 'string' ||
-      !anthropicBeta.trim() ||
-      typeof anthropicVersion !== 'string' ||
-      !anthropicVersion.trim()
+      !anthropicBeta.trim()
     ) {
       return false
     }
