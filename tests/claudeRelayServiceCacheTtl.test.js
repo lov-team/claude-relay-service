@@ -215,4 +215,35 @@ describe('Claude relay cache_control ttl handling', () => {
 
     expect(claudeRelayService._isActualClaudeCodeRequest(requestBody, headers)).toBe(true)
   })
+
+  test('rebuilds Claude Code user agent when NewAPI replaces it', () => {
+    const requestBody = {
+      system: [
+        {
+          type: 'text',
+          text: 'x-anthropic-billing-header: cc_version=2.1.150.00f; cc_entrypoint=sdk-cli; cch=7ec52;'
+        }
+      ]
+    }
+
+    expect(
+      claudeRelayService._resolveClaudeUserAgent(
+        { 'user-agent': 'Go-http-client/2.0' },
+        requestBody,
+        true,
+        null
+      )
+    ).toBe('claude-cli/2.1.150 (external, sdk-cli)')
+  })
+
+  test('keeps real Claude Code user agent when present', () => {
+    expect(
+      claudeRelayService._resolveClaudeUserAgent(
+        { 'user-agent': 'claude-cli/2.1.150 (external, cli)' },
+        {},
+        true,
+        null
+      )
+    ).toBe('claude-cli/2.1.150 (external, cli)')
+  })
 })

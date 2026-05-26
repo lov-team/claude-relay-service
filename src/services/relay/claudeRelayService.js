@@ -184,6 +184,51 @@ class ClaudeRelayService {
     return typeof userAgent === 'string' && /^claude-cli\/[^\s]+\s+\(/i.test(userAgent)
   }
 
+  _extractClaudeCodeUserAgentFromBillingHeader(requestPayload) {
+    const system = Array.isArray(requestPayload?.system) ? requestPayload.system : []
+    const billingItem = system.find(
+      (item) =>
+        item &&
+        item.type === 'text' &&
+        typeof item.text === 'string' &&
+        item.text.trim().startsWith('x-anthropic-billing-header:')
+    )
+
+    if (!billingItem) {
+      return null
+    }
+
+    const versionMatch = billingItem.text.match(/\bcc_version=(\d+\.\d+\.\d+)/)
+    if (!versionMatch) {
+      return null
+    }
+
+    const entrypointMatch = billingItem.text.match(/\bcc_entrypoint=([^;]+)/)
+    const entrypoint =
+      entrypointMatch && entrypointMatch[1].trim() ? entrypointMatch[1].trim() : 'cli'
+    return `claude-cli/${versionMatch[1]} (external, ${entrypoint})`
+  }
+
+  _resolveClaudeUserAgent(headers, requestPayload, isRealClaudeCode, unifiedUA) {
+    if (unifiedUA) {
+      return unifiedUA
+    }
+
+    const userAgent = headers?.['user-agent'] || headers?.['User-Agent']
+    if (typeof userAgent === 'string' && /^claude-cli\/[^\s]+\s+\(/i.test(userAgent)) {
+      return userAgent
+    }
+
+    if (isRealClaudeCode) {
+      return (
+        this._extractClaudeCodeUserAgentFromBillingHeader(requestPayload) ||
+        'claude-cli/1.0.119 (external, cli)'
+      )
+    }
+
+    return userAgent || 'claude-cli/1.0.119 (external, cli)'
+  }
+
   _hasClaudeCodeIdentityHeaders(clientHeaders) {
     const xApp = this._getHeaderValueCaseInsensitive(clientHeaders, 'x-app')
     const anthropicBeta = this._getHeaderValueCaseInsensitive(clientHeaders, 'anthropic-beta')
@@ -1960,10 +2005,17 @@ class ClaudeRelayService {
 
     // 强制 identity 编码：finalHeaders 可能携带客户端或 Redis 缓存中的 accept-encoding（如 zstd），
     // 必须在 spread 后覆盖回 identity，因为 https.request 的手动解压只支持 gzip/deflate
+    headers.connection = 'keep-alive'
+    headers['content-type'] = 'application/json'
     headers['accept-encoding'] = 'identity'
+    headers['anthropic-version'] = this.apiVersion
 
-    // 使用统一 User-Agent 或客户端提供的，最后使用默认值
-    const userAgent = unifiedUA || headers['user-agent'] || 'claude-cli/1.0.119 (external, cli)'
+    const userAgent = this._resolveClaudeUserAgent(
+      headers,
+      requestPayload,
+      isRealClaudeCode,
+      unifiedUA
+    )
     const acceptHeader = headers['accept'] || 'application/json'
     delete headers['user-agent']
     delete headers['accept']
