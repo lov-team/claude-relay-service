@@ -24,6 +24,9 @@ const {
   getPricingData
 } = require('../../utils/performanceOptimizer')
 
+const EXTENDED_CACHE_TTL_BETA = 'extended-cache-ttl-2025-04-11'
+const VALID_CACHE_CONTROL_TTLS = new Set(['5m', '1h'])
+
 // structuredClone polyfill for Node < 17
 const safeClone =
   typeof structuredClone === 'function' ? structuredClone : (obj) => JSON.parse(JSON.stringify(obj))
@@ -44,7 +47,7 @@ class ClaudeRelayService {
   }
 
   // 🔧 根据模型ID和客户端传递的 anthropic-beta 获取最终的 header
-  _getBetaHeader(modelId, clientBetaHeader) {
+  _getBetaHeader(modelId, clientBetaHeader, requestPayload = null) {
     const OAUTH_BETA = 'oauth-2025-04-20'
     const CLAUDE_CODE_BETA = 'claude-code-20250219'
     const INTERLEAVED_THINKING_BETA = 'interleaved-thinking-2025-05-14'
@@ -73,6 +76,10 @@ class ClaudeRelayService {
         .map((p) => p.trim())
         .filter(Boolean)
         .forEach(addBeta)
+    }
+
+    if (this._hasExtendedCacheTtl(requestPayload)) {
+      addBeta(EXTENDED_CACHE_TTL_BETA)
     }
 
     return betaList.join(',')
@@ -1147,8 +1154,8 @@ class ClaudeRelayService {
     // 验证并限制max_tokens参数
     this._validateAndLimitMaxTokens(processedBody)
 
-    // 移除cache_control中的ttl字段
-    this._stripTtlFromCacheControl(processedBody)
+    // 保留 Anthropic 支持的 cache_control.ttl（如 1h 扩展缓存），清理非法值
+    this._normalizeCacheControlTtl(processedBody)
 
     // 判断是否是真实的 Claude Code 请求
     // 优先使用调用方传入的值（基于 UA + system prompt 综合判断），
@@ -1369,8 +1376,7 @@ class ClaudeRelayService {
     }
   }
 
-  // 🧹 移除TTL字段
-  _stripTtlFromCacheControl(body) {
+  _forEachCacheControl(body, visitor) {
     if (!body || typeof body !== 'object') {
       return
     }
@@ -1382,10 +1388,7 @@ class ClaudeRelayService {
 
       contentArray.forEach((item) => {
         if (item && typeof item === 'object' && item.cache_control) {
-          if (item.cache_control.ttl) {
-            delete item.cache_control.ttl
-            logger.debug('🧹 Removed ttl from cache_control')
-          }
+          visitor(item.cache_control)
         }
       })
     }
@@ -1401,6 +1404,132 @@ class ClaudeRelayService {
         }
       })
     }
+  }
+
+  // 🧹 规范化 cache_control.ttl，保留合法 TTL 以支持 Anthropic 扩展缓存
+  _normalizeCacheControlTtl(body) {
+    this._forEachCacheControl(body, (cacheControl) => {
+      if (!cacheControl || cacheControl.ttl === undefined || cacheControl.ttl === null) {
+        return
+      }
+
+      const ttl = String(cacheControl.ttl).trim().toLowerCase()
+      if (VALID_CACHE_CONTROL_TTLS.has(ttl)) {
+        cacheControl.ttl = ttl
+        return
+      }
+
+      logger.debug(`🧹 Removed unsupported cache_control ttl: ${cacheControl.ttl}`)
+      delete cacheControl.ttl
+    })
+  }
+
+  _hasExtendedCacheTtl(body) {
+    let hasExtendedTtl = false
+
+    this._forEachCacheControl(body, (cacheControl) => {
+      if (
+        String(cacheControl?.ttl || '')
+          .trim()
+          .toLowerCase() === '1h'
+      ) {
+        hasExtendedTtl = true
+      }
+    })
+
+    return hasExtendedTtl
+  }
+
+  _toTokenNumber(value) {
+    if (value === undefined || value === null || value === '') {
+      return undefined
+    }
+
+    const numberValue = Number(value)
+    if (!Number.isFinite(numberValue) || numberValue < 0) {
+      return undefined
+    }
+
+    return numberValue
+  }
+
+  _firstTokenValue(...values) {
+    for (const value of values) {
+      const tokenValue = this._toTokenNumber(value)
+      if (tokenValue !== undefined) {
+        return tokenValue
+      }
+    }
+
+    return undefined
+  }
+
+  _mergeClaudeUsageData(target, usage, options = {}) {
+    if (!target || !usage || typeof usage !== 'object') {
+      return false
+    }
+
+    const { includeOutput = true } = options
+    const inputDetails = usage.input_tokens_details || {}
+    let updated = false
+
+    const inputTokens = this._firstTokenValue(usage.input_tokens, usage.inputTokens)
+    if (inputTokens !== undefined) {
+      target.input_tokens = inputTokens
+      updated = true
+    }
+
+    if (includeOutput) {
+      const outputTokens = this._firstTokenValue(usage.output_tokens, usage.outputTokens)
+      if (outputTokens !== undefined) {
+        target.output_tokens = outputTokens
+        updated = true
+      }
+    }
+
+    const cacheCreationTokens = this._firstTokenValue(
+      usage.cache_creation_input_tokens,
+      usage.cacheCreateTokens,
+      usage.cacheCreationInputTokens,
+      inputDetails.cache_creation_input_tokens,
+      inputDetails.cacheCreateTokens,
+      inputDetails.cacheCreationInputTokens
+    )
+    if (cacheCreationTokens !== undefined) {
+      target.cache_creation_input_tokens = cacheCreationTokens
+      updated = true
+    }
+
+    const cacheReadTokens = this._firstTokenValue(
+      usage.cache_read_input_tokens,
+      usage.cacheReadTokens,
+      usage.cacheReadInputTokens,
+      inputDetails.cache_read_input_tokens,
+      inputDetails.cacheReadTokens,
+      inputDetails.cacheReadInputTokens,
+      inputDetails.cached_tokens
+    )
+    if (cacheReadTokens !== undefined) {
+      target.cache_read_input_tokens = cacheReadTokens
+      updated = true
+    }
+
+    if (usage.cache_creation && typeof usage.cache_creation === 'object') {
+      target.cache_creation = {
+        ephemeral_5m_input_tokens:
+          this._toTokenNumber(usage.cache_creation.ephemeral_5m_input_tokens) || 0,
+        ephemeral_1h_input_tokens:
+          this._toTokenNumber(usage.cache_creation.ephemeral_1h_input_tokens) || 0
+      }
+      updated = true
+    }
+
+    if (typeof usage.speed === 'string' && usage.speed.trim()) {
+      target.speed = usage.speed.trim().toLowerCase()
+      updated = true
+    }
+
+    return updated
   }
 
   // ⚖️ 限制带缓存控制的内容数量
@@ -1624,7 +1753,7 @@ class ClaudeRelayService {
     // 根据模型和客户端传递的 anthropic-beta 动态设置 header
     const modelId = requestPayload?.model || body?.model
     const clientBetaHeader = this._getHeaderValueCaseInsensitive(clientHeaders, 'anthropic-beta')
-    headers['anthropic-beta'] = this._getBetaHeader(modelId, clientBetaHeader)
+    headers['anthropic-beta'] = this._getBetaHeader(modelId, clientBetaHeader, requestPayload)
     return {
       requestPayload,
       bodyString,
@@ -2669,25 +2798,13 @@ class ClaudeRelayService {
                       currentUsageData = {}
                     }
 
-                    // message_start包含input tokens、cache tokens和模型信息
-                    currentUsageData.input_tokens = data.message.usage.input_tokens || 0
-                    currentUsageData.cache_creation_input_tokens =
-                      data.message.usage.cache_creation_input_tokens || 0
-                    currentUsageData.cache_read_input_tokens =
-                      data.message.usage.cache_read_input_tokens || 0
+                    // message_start通常包含input tokens、cache tokens和模型信息
+                    this._mergeClaudeUsageData(currentUsageData, data.message.usage, {
+                      includeOutput: false
+                    })
                     currentUsageData.model = data.message.model
 
-                    // 检查是否有详细的 cache_creation 对象
-                    if (
-                      data.message.usage.cache_creation &&
-                      typeof data.message.usage.cache_creation === 'object'
-                    ) {
-                      currentUsageData.cache_creation = {
-                        ephemeral_5m_input_tokens:
-                          data.message.usage.cache_creation.ephemeral_5m_input_tokens || 0,
-                        ephemeral_1h_input_tokens:
-                          data.message.usage.cache_creation.ephemeral_1h_input_tokens || 0
-                      }
+                    if (currentUsageData.cache_creation) {
                       logger.debug(
                         '📊 Collected detailed cache creation data:',
                         JSON.stringify(currentUsageData.cache_creation)
@@ -2700,16 +2817,13 @@ class ClaudeRelayService {
                     )
                   }
 
-                  // message_delta包含最终的output tokens
-                  if (
-                    data.type === 'message_delta' &&
-                    data.usage &&
-                    data.usage.output_tokens !== undefined
-                  ) {
-                    currentUsageData.output_tokens = data.usage.output_tokens || 0
+                  // message_delta通常包含output tokens，新格式也可能携带最终完整usage
+                  if (data.type === 'message_delta' && (data.usage || data.delta?.usage)) {
+                    const deltaUsage = data.usage || data.delta.usage
+                    this._mergeClaudeUsageData(currentUsageData, deltaUsage)
 
                     logger.debug(
-                      '📊 Collected output data from message_delta:',
+                      '📊 Collected usage data from message_delta:',
                       JSON.stringify(currentUsageData)
                     )
 
