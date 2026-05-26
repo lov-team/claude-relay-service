@@ -25,6 +25,8 @@ const {
 } = require('../../utils/performanceOptimizer')
 
 const EXTENDED_CACHE_TTL_BETA = 'extended-cache-ttl-2025-04-11'
+const PROMPT_CACHING_SCOPE_BETA = 'prompt-caching-scope-2026-01-05'
+const CONTEXT_MANAGEMENT_BETA = 'context-management-2025-06-27'
 const VALID_CACHE_CONTROL_TTLS = new Set(['5m', '1h'])
 
 // structuredClone polyfill for Node < 17
@@ -80,6 +82,17 @@ class ClaudeRelayService {
 
     if (this._hasExtendedCacheTtl(requestPayload)) {
       addBeta(EXTENDED_CACHE_TTL_BETA)
+    }
+
+    if (this._hasCacheControl(requestPayload)) {
+      addBeta(PROMPT_CACHING_SCOPE_BETA)
+    }
+
+    if (
+      requestPayload?.context_management &&
+      typeof requestPayload.context_management === 'object'
+    ) {
+      addBeta(CONTEXT_MANAGEMENT_BETA)
     }
 
     return betaList.join(',')
@@ -1440,6 +1453,33 @@ class ClaudeRelayService {
     return hasExtendedTtl
   }
 
+  _hasCacheControl(body) {
+    let hasCacheControl = false
+
+    this._forEachCacheControl(body, () => {
+      hasCacheControl = true
+    })
+
+    return hasCacheControl
+  }
+
+  _applyClaudeCodeSessionHeaders(headers, requestPayload) {
+    const existingSessionId = this._getHeaderValueCaseInsensitive(
+      headers,
+      'x-claude-code-session-id'
+    )
+    if (existingSessionId) {
+      return
+    }
+
+    const sessionId = metadataUserIdHelper.extractSessionId(requestPayload?.metadata?.user_id)
+    if (!sessionId) {
+      return
+    }
+
+    headers['X-Claude-Code-Session-Id'] = sessionId
+  }
+
   _toTokenNumber(value) {
     if (value === undefined || value === null || value === '') {
       return undefined
@@ -1754,6 +1794,7 @@ class ClaudeRelayService {
     const modelId = requestPayload?.model || body?.model
     const clientBetaHeader = this._getHeaderValueCaseInsensitive(clientHeaders, 'anthropic-beta')
     headers['anthropic-beta'] = this._getBetaHeader(modelId, clientBetaHeader, requestPayload)
+    this._applyClaudeCodeSessionHeaders(headers, requestPayload)
     return {
       requestPayload,
       bodyString,

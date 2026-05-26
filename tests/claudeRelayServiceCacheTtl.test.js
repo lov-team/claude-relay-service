@@ -123,6 +123,50 @@ describe('Claude relay cache_control ttl handling', () => {
     expect(betaHeader.split(',')).toContain('extended-cache-ttl-2025-04-11')
   })
 
+  test('adds prompt caching scope beta when request uses cache_control', () => {
+    const betaHeader = claudeRelayService._getBetaHeader('claude-opus-4-7', '', {
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: 'cached prompt',
+              cache_control: { type: 'ephemeral' }
+            }
+          ]
+        }
+      ]
+    })
+
+    expect(betaHeader.split(',')).toContain('prompt-caching-scope-2026-01-05')
+  })
+
+  test('adds context management beta when request uses context_management', () => {
+    const betaHeader = claudeRelayService._getBetaHeader('claude-opus-4-7', '', {
+      context_management: { edits: [] },
+      messages: []
+    })
+
+    expect(betaHeader.split(',')).toContain('context-management-2025-06-27')
+  })
+
+  test('adds Claude Code session header from metadata user id when missing', () => {
+    const headers = {}
+
+    claudeRelayService._applyClaudeCodeSessionHeaders(headers, {
+      metadata: {
+        user_id: JSON.stringify({
+          device_id: 'device-1',
+          account_uuid: '',
+          session_id: 'session-123'
+        })
+      }
+    })
+
+    expect(headers['X-Claude-Code-Session-Id']).toBe('session-123')
+  })
+
   test('merges standard Anthropic cache usage fields from delta usage', () => {
     const target = { model: 'claude-opus-4-7' }
 
