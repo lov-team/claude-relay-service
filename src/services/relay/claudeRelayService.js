@@ -184,8 +184,35 @@ class ClaudeRelayService {
     return typeof userAgent === 'string' && /^claude-cli\/[^\s]+\s+\(/i.test(userAgent)
   }
 
+  _hasClaudeCodeIdentityHeaders(requestBody, clientHeaders) {
+    const xApp = this._getHeaderValueCaseInsensitive(clientHeaders, 'x-app')
+    const anthropicBeta = this._getHeaderValueCaseInsensitive(clientHeaders, 'anthropic-beta')
+    const anthropicVersion = this._getHeaderValueCaseInsensitive(clientHeaders, 'anthropic-version')
+
+    if (
+      typeof xApp !== 'string' ||
+      !xApp.trim() ||
+      typeof anthropicBeta !== 'string' ||
+      !anthropicBeta.trim() ||
+      typeof anthropicVersion !== 'string' ||
+      !anthropicVersion.trim()
+    ) {
+      return false
+    }
+
+    return metadataUserIdHelper.isValid(requestBody?.metadata?.user_id)
+  }
+
   _isActualClaudeCodeRequest(requestBody, clientHeaders) {
-    return this.isRealClaudeCodeRequest(requestBody) && this._isClaudeCodeUserAgent(clientHeaders)
+    if (!this._isClaudeCodeUserAgent(clientHeaders)) {
+      return false
+    }
+
+    if (this.isRealClaudeCodeRequest(requestBody)) {
+      return true
+    }
+
+    return this._hasClaudeCodeIdentityHeaders(requestBody, clientHeaders)
   }
 
   _getHeaderValueCaseInsensitive(headers, key) {

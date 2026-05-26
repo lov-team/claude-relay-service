@@ -46,8 +46,13 @@ jest.mock('../src/validators/clients/claudeCodeValidator', () => ({
 }))
 
 const claudeRelayService = require('../src/services/relay/claudeRelayService')
+const ClaudeCodeValidator = require('../src/validators/clients/claudeCodeValidator')
 
 describe('Claude relay cache_control ttl handling', () => {
+  beforeEach(() => {
+    ClaudeCodeValidator.includesClaudeCodeSystemPrompt.mockReturnValue(true)
+  })
+
   test('preserves supported cache_control ttl values for Claude Code requests', () => {
     const body = {
       model: 'claude-opus-4-7',
@@ -192,5 +197,29 @@ describe('Claude relay cache_control ttl handling', () => {
         ephemeral_1h_input_tokens: 241
       }
     })
+  })
+
+  test('recognizes modern Claude Code requests by headers and metadata when prompt templates change', () => {
+    ClaudeCodeValidator.includesClaudeCodeSystemPrompt.mockReturnValueOnce(false)
+
+    const requestBody = {
+      model: 'claude-opus-4-7',
+      metadata: {
+        user_id: JSON.stringify({
+          device_id: 'device-1',
+          account_uuid: '',
+          session_id: '22222222-3333-4444-8555-666666666666'
+        })
+      },
+      messages: [{ role: 'user', content: 'hello' }]
+    }
+    const headers = {
+      'user-agent': 'claude-cli/2.1.150 (external, sdk-cli)',
+      'x-app': 'cli',
+      'anthropic-beta': 'claude-code-20250219,context-management-2025-06-27',
+      'anthropic-version': '2023-06-01'
+    }
+
+    expect(claudeRelayService._isActualClaudeCodeRequest(requestBody, headers)).toBe(true)
   })
 })
