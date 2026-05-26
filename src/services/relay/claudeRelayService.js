@@ -1607,8 +1607,7 @@ class ClaudeRelayService {
         this._getHeaderValueCaseInsensitive(headers, 'x-client-request-id') || ''
       const bodyString = JSON.stringify(requestPayload)
       logger.info(
-        '🧩 Claude cache debug summary:',
-        JSON.stringify({
+        `🧩 Claude cache debug summary: ${JSON.stringify({
           accountId: context.accountId || null,
           accountType: context.accountType || null,
           stream: context.isStream === true,
@@ -1630,7 +1629,7 @@ class ClaudeRelayService {
             clientRequestIdHash: clientRequestId ? this._hashCacheDebugValue(clientRequestId) : null
           },
           breakpoints: this._collectCacheDebugBreakpoints(requestPayload)
-        })
+        })}`
       )
     } catch (error) {
       logger.warn('⚠️ Failed to build Claude cache debug summary:', error.message)
