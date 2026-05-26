@@ -199,18 +199,11 @@ describe('Claude relay cache_control ttl handling', () => {
     })
   })
 
-  test('recognizes modern Claude Code requests by headers and metadata when prompt templates change', () => {
+  test('recognizes modern Claude Code requests by CLI headers when prompt templates change', () => {
     ClaudeCodeValidator.includesClaudeCodeSystemPrompt.mockReturnValueOnce(false)
 
     const requestBody = {
       model: 'claude-opus-4-7',
-      metadata: {
-        user_id: JSON.stringify({
-          device_id: 'device-1',
-          account_uuid: '',
-          session_id: '22222222-3333-4444-8555-666666666666'
-        })
-      },
       messages: [{ role: 'user', content: 'hello' }]
     }
     const headers = {

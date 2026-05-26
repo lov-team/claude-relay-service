@@ -184,7 +184,7 @@ class ClaudeRelayService {
     return typeof userAgent === 'string' && /^claude-cli\/[^\s]+\s+\(/i.test(userAgent)
   }
 
-  _hasClaudeCodeIdentityHeaders(requestBody, clientHeaders) {
+  _hasClaudeCodeIdentityHeaders(clientHeaders) {
     const xApp = this._getHeaderValueCaseInsensitive(clientHeaders, 'x-app')
     const anthropicBeta = this._getHeaderValueCaseInsensitive(clientHeaders, 'anthropic-beta')
 
@@ -197,7 +197,7 @@ class ClaudeRelayService {
       return false
     }
 
-    return metadataUserIdHelper.isValid(requestBody?.metadata?.user_id)
+    return true
   }
 
   _isActualClaudeCodeRequest(requestBody, clientHeaders) {
@@ -209,7 +209,7 @@ class ClaudeRelayService {
       return true
     }
 
-    return this._hasClaudeCodeIdentityHeaders(requestBody, clientHeaders)
+    return this._hasClaudeCodeIdentityHeaders(clientHeaders)
   }
 
   _getHeaderValueCaseInsensitive(headers, key) {
