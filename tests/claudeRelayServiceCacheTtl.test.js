@@ -207,8 +207,9 @@ describe('Claude relay cache_control ttl handling', () => {
       messages: [{ role: 'user', content: 'hello' }]
     }
     const headers = {
-      'user-agent': 'claude-cli/2.1.150 (external, sdk-cli)',
+      'user-agent': 'Go-http-client/2.0',
       'x-app': 'cli',
+      'x-claude-code-session-id': 'session-123',
       'anthropic-beta': 'claude-code-20250219,context-management-2025-06-27'
     }
 
