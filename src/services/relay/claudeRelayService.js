@@ -1,6 +1,7 @@
 const https = require('https')
 const zlib = require('zlib')
 const path = require('path')
+const crypto = require('crypto')
 const ProxyHelper = require('../../utils/proxyHelper')
 const { filterForClaude } = require('../../utils/headerFilter')
 const claudeAccountService = require('../account/claudeAccountService')
@@ -28,6 +29,7 @@ const EXTENDED_CACHE_TTL_BETA = 'extended-cache-ttl-2025-04-11'
 const PROMPT_CACHING_SCOPE_BETA = 'prompt-caching-scope-2026-01-05'
 const CONTEXT_MANAGEMENT_BETA = 'context-management-2025-06-27'
 const VALID_CACHE_CONTROL_TTLS = new Set(['5m', '1h'])
+const CACHE_DEBUG_ENV = 'ANTHROPIC_CACHE_DEBUG'
 
 // structuredClone polyfill for Node < 17
 const safeClone =
@@ -1227,7 +1229,6 @@ class ClaudeRelayService {
         processedBody.metadata = {}
       }
       if (!processedBody.metadata.user_id || typeof processedBody.metadata.user_id !== 'string') {
-        const crypto = require('crypto')
         const deviceId = crypto.createHash('sha256').update('relay-generated-device').digest('hex')
         const sessionId = crypto.randomUUID()
         processedBody.metadata.user_id = JSON.stringify({
@@ -1478,6 +1479,162 @@ class ClaudeRelayService {
     }
 
     headers['X-Claude-Code-Session-Id'] = sessionId
+  }
+
+  _isCacheDebugEnabled() {
+    const raw = process.env[CACHE_DEBUG_ENV]
+    if (!raw) {
+      return false
+    }
+    return raw === '1' || raw.toLowerCase() === 'true'
+  }
+
+  _hashCacheDebugValue(value) {
+    let serialized = ''
+    try {
+      serialized = typeof value === 'string' ? value : JSON.stringify(value)
+    } catch (error) {
+      serialized = '[unserializable]'
+    }
+    return crypto
+      .createHash('sha256')
+      .update(serialized || '')
+      .digest('hex')
+      .slice(0, 16)
+  }
+
+  _cloneCacheDebugValue(value) {
+    if (value === undefined || value === null) {
+      return value
+    }
+    return safeClone(value)
+  }
+
+  _buildCacheDebugSystemPrefix(body, systemIndex) {
+    return {
+      model: body?.model || null,
+      tools: this._cloneCacheDebugValue(body?.tools || []),
+      system: Array.isArray(body?.system)
+        ? this._cloneCacheDebugValue(body.system.slice(0, systemIndex + 1))
+        : []
+    }
+  }
+
+  _buildCacheDebugMessagePrefix(body, messageIndex, contentIndex) {
+    const prefix = {
+      model: body?.model || null,
+      tools: this._cloneCacheDebugValue(body?.tools || []),
+      system: this._cloneCacheDebugValue(body?.system || []),
+      messages: []
+    }
+
+    if (!Array.isArray(body?.messages)) {
+      return prefix
+    }
+
+    for (let index = 0; index <= messageIndex; index += 1) {
+      const message = body.messages[index]
+      if (!message || typeof message !== 'object') {
+        prefix.messages.push(this._cloneCacheDebugValue(message))
+        continue
+      }
+
+      const clonedMessage = this._cloneCacheDebugValue(message)
+      if (index === messageIndex && Array.isArray(clonedMessage.content)) {
+        clonedMessage.content = clonedMessage.content.slice(0, contentIndex + 1)
+      }
+      prefix.messages.push(clonedMessage)
+    }
+
+    return prefix
+  }
+
+  _collectCacheDebugBreakpoints(body) {
+    const breakpoints = []
+
+    if (Array.isArray(body?.system)) {
+      body.system.forEach((item, index) => {
+        if (!item?.cache_control) {
+          return
+        }
+        const prefix = this._buildCacheDebugSystemPrefix(body, index)
+        const serialized = JSON.stringify(prefix)
+        breakpoints.push({
+          path: `system[${index}]`,
+          type: item.type || null,
+          ttl: item.cache_control.ttl || null,
+          prefixHash: this._hashCacheDebugValue(serialized),
+          prefixBytes: Buffer.byteLength(serialized, 'utf8')
+        })
+      })
+    }
+
+    if (Array.isArray(body?.messages)) {
+      body.messages.forEach((message, messageIndex) => {
+        if (!Array.isArray(message?.content)) {
+          return
+        }
+        message.content.forEach((item, contentIndex) => {
+          if (!item?.cache_control) {
+            return
+          }
+          const prefix = this._buildCacheDebugMessagePrefix(body, messageIndex, contentIndex)
+          const serialized = JSON.stringify(prefix)
+          breakpoints.push({
+            path: `messages[${messageIndex}].content[${contentIndex}]`,
+            type: item.type || null,
+            ttl: item.cache_control.ttl || null,
+            prefixHash: this._hashCacheDebugValue(serialized),
+            prefixBytes: Buffer.byteLength(serialized, 'utf8')
+          })
+        })
+      })
+    }
+
+    return breakpoints
+  }
+
+  _logCacheDebugSummary(requestPayload, headers, context = {}) {
+    if (!this._isCacheDebugEnabled() || !this._hasCacheControl(requestPayload)) {
+      return
+    }
+
+    try {
+      const betaHeader = this._getHeaderValueCaseInsensitive(headers, 'anthropic-beta') || ''
+      const sessionHeader =
+        this._getHeaderValueCaseInsensitive(headers, 'x-claude-code-session-id') || ''
+      const clientRequestId =
+        this._getHeaderValueCaseInsensitive(headers, 'x-client-request-id') || ''
+      const bodyString = JSON.stringify(requestPayload)
+      logger.info(
+        '🧩 Claude cache debug summary:',
+        JSON.stringify({
+          accountId: context.accountId || null,
+          accountType: context.accountType || null,
+          stream: context.isStream === true,
+          model: requestPayload?.model || null,
+          isRealClaudeCode: context.isRealClaudeCode === true,
+          bodyHash: this._hashCacheDebugValue(bodyString),
+          bodyBytes: Buffer.byteLength(bodyString, 'utf8'),
+          headers: {
+            beta: betaHeader,
+            hasPromptCachingScope: betaHeader.includes(PROMPT_CACHING_SCOPE_BETA),
+            hasExtendedCacheTtl: betaHeader.includes(EXTENDED_CACHE_TTL_BETA),
+            hasContextManagement: betaHeader.includes(CONTEXT_MANAGEMENT_BETA),
+            xApp: this._getHeaderValueCaseInsensitive(headers, 'x-app') || null,
+            hasClaudeCodeSessionId: Boolean(sessionHeader),
+            claudeCodeSessionIdHash: sessionHeader
+              ? this._hashCacheDebugValue(sessionHeader)
+              : null,
+            hasClientRequestId: Boolean(clientRequestId),
+            clientRequestIdHash: clientRequestId ? this._hashCacheDebugValue(clientRequestId) : null
+          },
+          breakpoints: this._collectCacheDebugBreakpoints(requestPayload)
+        })
+      )
+    } catch (error) {
+      logger.warn('⚠️ Failed to build Claude cache debug summary:', error.message)
+    }
   }
 
   _toTokenNumber(value) {
@@ -1795,6 +1952,12 @@ class ClaudeRelayService {
     const clientBetaHeader = this._getHeaderValueCaseInsensitive(clientHeaders, 'anthropic-beta')
     headers['anthropic-beta'] = this._getBetaHeader(modelId, clientBetaHeader, requestPayload)
     this._applyClaudeCodeSessionHeaders(headers, requestPayload)
+    this._logCacheDebugSummary(requestPayload, headers, {
+      accountId,
+      accountType,
+      isStream,
+      isRealClaudeCode
+    })
     return {
       requestPayload,
       bodyString,
