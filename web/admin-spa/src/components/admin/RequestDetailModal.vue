@@ -100,6 +100,13 @@
                 </p>
               </div>
               <div>
+                <p class="field-label">CC 版本</p>
+                <p class="field-value">{{ formatClaudeCodeVersion(detail) }}</p>
+                <p class="field-sub break-all">
+                  {{ detail.claudeCodeUserAgent || detail.claudeCodeEntrypoint || '未识别' }}
+                </p>
+              </div>
+              <div>
                 <p class="field-label">推理</p>
                 <p class="field-value">{{ formatReasoning(detail.reasoningDisplay) }}</p>
                 <p class="field-sub">
@@ -423,6 +430,7 @@ const formatPercent = (value) => `${Number(value || 0).toFixed(2)}%`
 const formatCacheCreate = (value, notApplicable = false) =>
   notApplicable ? '-' : formatNumber(value)
 const formatReasoning = (value) => value || '-'
+const formatClaudeCodeVersion = (record = {}) => record.claudeCodeVersion || '-'
 const formatCost = (value) => {
   const num = Number(value || 0)
   if (num >= 1) return `$${num.toFixed(2)}`

@@ -84,6 +84,12 @@ describe('requestDetailService', () => {
       requestBody: {
         apiKey: 'super-secret',
         model: 'gpt-5.4',
+        system: [
+          {
+            type: 'text',
+            text: 'x-anthropic-billing-header: cc_version=2.1.150.83b; cc_entrypoint=sdk-cli; cch=a39e9;'
+          }
+        ],
         reasoning: {
           effort: 'medium'
         },
@@ -104,6 +110,10 @@ describe('requestDetailService', () => {
     expect(storedPayload.endpoint).toBe('/openai/v1/responses')
     expect(storedPayload.reasoningDisplay).toBe('medium')
     expect(storedPayload.reasoningSource).toBe('reasoning.effort')
+    expect(storedPayload.claudeCodeVersion).toBe('2.1.150')
+    expect(storedPayload.claudeCodeEntrypoint).toBe('sdk-cli')
+    expect(storedPayload.claudeCodeUserAgent).toBe('claude-cli/2.1.150 (external, sdk-cli)')
+    expect(storedPayload.claudeCodeVersionSource).toBe('billing-header')
     expect(multi.zadd).toHaveBeenCalled()
     expect(exec).toHaveBeenCalled()
   })

@@ -386,6 +386,11 @@
                     模型
                   </th>
                   <th
+                    class="min-w-[120px] px-3 py-4 text-left text-xs font-bold uppercase tracking-wider text-gray-700 dark:text-gray-300"
+                  >
+                    CC 版本
+                  </th>
+                  <th
                     class="min-w-[110px] px-3 py-4 text-left text-xs font-bold uppercase tracking-wider text-gray-700 dark:text-gray-300"
                   >
                     推理
@@ -468,6 +473,17 @@
                     </div>
                   </td>
                   <td class="table-cell">{{ record.model }}</td>
+                  <td class="table-cell">
+                    <div class="font-semibold">
+                      {{ formatClaudeCodeVersion(record) }}
+                    </div>
+                    <div
+                      v-if="record.claudeCodeEntrypoint"
+                      class="text-xs text-gray-500 dark:text-gray-400"
+                    >
+                      {{ record.claudeCodeEntrypoint }}
+                    </div>
+                  </td>
                   <td class="table-cell">{{ formatReasoning(record.reasoningDisplay) }}</td>
                   <td class="table-cell">
                     <div>{{ record.endpoint || '-' }}</div>
@@ -535,6 +551,7 @@
               <div class="mt-3 grid grid-cols-2 gap-2 text-sm text-gray-700 dark:text-gray-300">
                 <div>API Key：{{ record.apiKeyName || '-' }}</div>
                 <div>账户：{{ record.accountName || '-' }}</div>
+                <div>CC版本：{{ formatClaudeCodeVersion(record) }}</div>
                 <div>推理：{{ formatReasoning(record.reasoningDisplay) }}</div>
                 <div>输入：{{ formatNumber(record.inputTokens) }}</div>
                 <div>输出：{{ formatNumber(record.outputTokens) }}</div>
@@ -934,6 +951,8 @@ const exportCsv = async () => {
       '使用账户',
       '消费类型',
       '模型',
+      'CC版本',
+      'CC入口',
       '推理',
       '接口',
       '输入',
@@ -954,6 +973,8 @@ const exportCsv = async () => {
         record.accountName || record.accountId || '',
         record.accountTypeName || record.accountType || '',
         record.model || '',
+        record.claudeCodeVersion || '',
+        record.claudeCodeEntrypoint || '',
         formatReasoning(record.reasoningDisplay),
         record.endpoint || '',
         record.inputTokens || 0,
@@ -1010,6 +1031,7 @@ const formatRetentionHours = (value) => {
 const formatDuration = (value) => `${Number(value || 0)}ms`
 const formatPercent = (value) => `${Number(value || 0).toFixed(2)}%`
 const formatReasoning = (value) => value || '-'
+const formatClaudeCodeVersion = (record = {}) => record.claudeCodeVersion || '-'
 
 const debouncedKeywordFetch = debounce(() => {
   pagination.currentPage = 1
