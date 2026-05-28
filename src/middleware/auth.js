@@ -163,6 +163,33 @@ const TOKEN_COUNT_PATHS = new Set([
   '/claude/v1/messages/count_tokens'
 ])
 
+const CRS_RATE_LIMIT_CODE = 'crs_rate_limited'
+const CRS_RATE_LIMIT_MESSAGE = 'CRS local rate limit reached; retry another upstream channel'
+
+function sendRelayCapacityLimit(res, { limitKind, retryAfterSeconds = 30 } = {}) {
+  const retryAfter = Math.max(1, Math.ceil(Number(retryAfterSeconds) || 30))
+
+  res.set({
+    'Retry-After': String(retryAfter),
+    'X-CRS-Error-Code': CRS_RATE_LIMIT_CODE,
+    'X-Relay-Action': 'retry_without_disable'
+  })
+
+  return res.status(429).json({
+    error: {
+      message: CRS_RATE_LIMIT_MESSAGE,
+      type: 'rate_limit_error',
+      code: CRS_RATE_LIMIT_CODE,
+      metadata: {
+        source: 'claude-relay-service',
+        retryable: true,
+        disable_channel: false,
+        limit_kind: limitKind || 'capacity'
+      }
+    }
+  })
+}
+
 function extractApiKey(req) {
   const candidates = [
     req.headers['x-api-key'],
@@ -655,12 +682,9 @@ const authenticateApiKey = async (req, res, next) => {
             }), current: ${currentConcurrency - 1}, limit: ${concurrencyLimit}`
           )
           // 建议客户端在短暂延迟后重试（并发场景下通常很快会有槽位释放）
-          res.set('Retry-After', '1')
-          return res.status(429).json({
-            error: 'Concurrency limit exceeded',
-            message: `Too many concurrent requests. Limit: ${concurrencyLimit} concurrent requests`,
-            currentConcurrency: currentConcurrency - 1,
-            concurrencyLimit
+          return sendRelayCapacityLimit(res, {
+            limitKind: 'concurrency',
+            retryAfterSeconds: 1
           })
         }
 
@@ -693,17 +717,8 @@ const authenticateApiKey = async (req, res, next) => {
             .catch((e) => logger.warn('Failed to record rejected_overload stat:', e))
           // 返回 429 + Retry-After，让客户端稍后重试
           const retryAfterSeconds = 30
-          res.set('Retry-After', String(retryAfterSeconds))
-          return res.status(429).json({
-            error: 'Queue overloaded',
-            message: `Queue is overloaded. Estimated wait time (${overloadCheck.estimatedWaitMs}ms) exceeds threshold. Limit: ${concurrencyLimit} concurrent requests, queue: ${currentQueueCount}/${maxQueueSize}. Please retry later.`,
-            currentConcurrency: concurrencyLimit,
-            concurrencyLimit,
-            queueCount: currentQueueCount,
-            maxQueueSize,
-            estimatedWaitMs: overloadCheck.estimatedWaitMs,
-            timeoutMs: overloadCheck.timeoutMs,
-            queueTimeoutMs: queueConfig.concurrentRequestQueueTimeoutMs,
+          return sendRelayCapacityLimit(res, {
+            limitKind: 'queue_overloaded',
             retryAfterSeconds
           })
         }
@@ -727,15 +742,8 @@ const authenticateApiKey = async (req, res, next) => {
             )
             // 队列已满，建议客户端在排队超时时间后重试
             const retryAfterSeconds = Math.ceil(queueConfig.concurrentRequestQueueTimeoutMs / 1000)
-            res.set('Retry-After', String(retryAfterSeconds))
-            return res.status(429).json({
-              error: 'Concurrency queue full',
-              message: `Too many requests waiting in queue. Limit: ${concurrencyLimit} concurrent requests, queue: ${newQueueCount - 1}/${maxQueueSize}, timeout: ${retryAfterSeconds}s`,
-              currentConcurrency: concurrencyLimit,
-              concurrencyLimit,
-              queueCount: newQueueCount - 1,
-              maxQueueSize,
-              queueTimeoutMs: queueConfig.concurrentRequestQueueTimeoutMs,
+            return sendRelayCapacityLimit(res, {
+              limitKind: 'queue_full',
               retryAfterSeconds
             })
           }
@@ -820,15 +828,8 @@ const authenticateApiKey = async (req, res, next) => {
             // - 最小值 5 秒，最大值 30 秒，避免极端情况
             const timeoutSeconds = Math.ceil(queueConfig.concurrentRequestQueueTimeoutMs / 1000)
             const retryAfterSeconds = Math.max(5, Math.min(30, Math.ceil(timeoutSeconds / 2)))
-            res.set('Retry-After', String(retryAfterSeconds))
-            return res.status(429).json({
-              error: 'Queue timeout',
-              message: `Request timed out waiting for concurrency slot. Limit: ${concurrencyLimit} concurrent requests, maxQueue: ${maxQueueSize}, Queue timeout: ${timeoutSeconds}s, waited: ${slot.waitTimeMs}ms`,
-              currentConcurrency: concurrencyLimit,
-              concurrencyLimit,
-              maxQueueSize,
-              queueTimeoutMs: queueConfig.concurrentRequestQueueTimeoutMs,
-              waitTimeMs: slot.waitTimeMs,
+            return sendRelayCapacityLimit(res, {
+              limitKind: 'queue_timeout',
               retryAfterSeconds
             })
           }
@@ -1111,13 +1112,9 @@ const authenticateApiKey = async (req, res, next) => {
           `🚦 Rate limit exceeded (requests) for key: ${validation.keyData.id} (${validation.keyData.name}), requests: ${currentRequests}/${rateLimitRequests}`
         )
 
-        return res.status(429).json({
-          error: 'Rate limit exceeded',
-          message: `已达到请求次数限制 (${rateLimitRequests} 次)，将在 ${remainingMinutes} 分钟后重置`,
-          currentRequests,
-          requestLimit: rateLimitRequests,
-          resetAt: resetTime.toISOString(),
-          remainingMinutes
+        return sendRelayCapacityLimit(res, {
+          limitKind: 'requests',
+          retryAfterSeconds: remainingMinutes * 60
         })
       }
 
@@ -1133,13 +1130,9 @@ const authenticateApiKey = async (req, res, next) => {
             `🚦 Rate limit exceeded (tokens) for key: ${validation.keyData.id} (${validation.keyData.name}), tokens: ${currentTokens}/${tokenLimit}`
           )
 
-          return res.status(429).json({
-            error: 'Rate limit exceeded',
-            message: `已达到 Token 使用限制 (${tokenLimit} tokens)，将在 ${remainingMinutes} 分钟后重置`,
-            currentTokens,
-            tokenLimit,
-            resetAt: resetTime.toISOString(),
-            remainingMinutes
+          return sendRelayCapacityLimit(res, {
+            limitKind: 'tokens',
+            retryAfterSeconds: remainingMinutes * 60
           })
         }
       } else if (rateLimitCost > 0) {
@@ -1154,13 +1147,9 @@ const authenticateApiKey = async (req, res, next) => {
             }), cost: $${currentCost.toFixed(2)}/$${rateLimitCost}`
           )
 
-          return res.status(429).json({
-            error: 'Rate limit exceeded',
-            message: `已达到费用限制 ($${rateLimitCost})，将在 ${remainingMinutes} 分钟后重置`,
-            currentCost,
-            costLimit: rateLimitCost,
-            resetAt: resetTime.toISOString(),
-            remainingMinutes
+          return sendRelayCapacityLimit(res, {
+            limitKind: 'cost',
+            retryAfterSeconds: remainingMinutes * 60
           })
         }
       }
