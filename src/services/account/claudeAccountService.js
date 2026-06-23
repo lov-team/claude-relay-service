@@ -12,6 +12,7 @@ const {
   logRefreshSuccess,
   logRefreshError,
   logTokenUsage,
+  sanitizeRefreshError,
   logRefreshSkipped
 } = require('../../utils/tokenRefreshLogger')
 const tokenRefreshService = require('../tokenRefreshService')
@@ -41,7 +42,7 @@ function isProAccount(info) {
 
 class ClaudeAccountService {
   constructor() {
-    this.claudeApiUrl = 'https://console.anthropic.com/v1/oauth/token'
+    this.claudeApiUrl = config.claude?.oauthTokenUrl || 'https://platform.claude.com/v1/oauth/token'
     this.claudeOauthClientId = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
     let maxWarnings = parseInt(process.env.CLAUDE_5H_WARNING_MAX_NOTIFICATIONS || '', 10)
 
@@ -406,7 +407,7 @@ class ClaudeAccountService {
         })
 
         logger.success(
-          `🔄 Refreshed token for account: ${accountData.name} (${accountId}) - Access Token: ${maskToken(access_token)}`
+          `🔄 Refreshed token for account: ${accountData.name} (${accountId}) - Access Token: ${maskToken(access_token, 20)}`
         )
 
         return {
@@ -458,7 +459,10 @@ class ClaudeAccountService {
         }
       }
 
-      logger.error(`❌ Failed to refresh token for account ${accountId}:`, error)
+      logger.error(
+        `❌ Failed to refresh token for account ${accountId}:`,
+        sanitizeRefreshError(error)
+      )
 
       throw error
     } finally {

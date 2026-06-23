@@ -1,7 +1,7 @@
 const winston = require('winston')
 const path = require('path')
 const fs = require('fs')
-const { maskToken } = require('./tokenMask')
+const { maskToken, maskTokensDeep } = require('./tokenMask')
 
 // 确保日志目录存在
 const logDir = path.join(process.cwd(), 'logs')
@@ -67,8 +67,8 @@ function logRefreshStart(accountId, accountName, platform = 'claude', reason = '
  */
 function logRefreshSuccess(accountId, accountName, platform = 'claude', tokenData = {}) {
   const maskedTokenData = {
-    accessToken: tokenData.accessToken ? maskToken(tokenData.accessToken) : '[NOT_PROVIDED]',
-    refreshToken: tokenData.refreshToken ? maskToken(tokenData.refreshToken) : '[NOT_PROVIDED]',
+    accessToken: tokenData.accessToken ? maskToken(tokenData.accessToken, 20) : '[NOT_PROVIDED]',
+    refreshToken: tokenData.refreshToken ? maskToken(tokenData.refreshToken, 20) : '[NOT_PROVIDED]',
     expiresAt: tokenData.expiresAt || tokenData.expiry_date || '[NOT_PROVIDED]',
     scopes: tokenData.scopes || tokenData.scope || '[NOT_PROVIDED]'
   }
@@ -86,13 +86,35 @@ function logRefreshSuccess(accountId, accountName, platform = 'claude', tokenDat
 /**
  * 记录 token 刷新失败
  */
-function logRefreshError(accountId, accountName, platform = 'claude', error, attemptNumber = 1) {
-  const errorInfo = {
+function sanitizeRefreshError(error) {
+  let requestData = error.config?.data
+  if (typeof requestData === 'string') {
+    try {
+      requestData = JSON.parse(requestData)
+    } catch (_) {
+      requestData = maskTokensDeep(requestData)
+    }
+  }
+
+  return {
     message: error.message || error.toString(),
     code: error.code || 'UNKNOWN',
     statusCode: error.response?.status || 'N/A',
-    responseData: error.response?.data || 'N/A'
+    statusText: error.response?.statusText || 'N/A',
+    responseData: maskTokensDeep(error.response?.data || 'N/A'),
+    request: error.config
+      ? {
+          method: error.config.method,
+          url: error.config.url,
+          timeout: error.config.timeout,
+          data: maskTokensDeep(requestData || 'N/A')
+        }
+      : undefined
   }
+}
+
+function logRefreshError(accountId, accountName, platform = 'claude', error, attemptNumber = 1) {
+  const errorInfo = sanitizeRefreshError(error)
 
   tokenRefreshLogger.error({
     event: 'token_refresh_error',
@@ -171,5 +193,6 @@ module.exports = {
   logRefreshSkipped,
   logTokenUsage,
   logBatchRefreshStart,
-  logBatchRefreshComplete
+  logBatchRefreshComplete,
+  sanitizeRefreshError
 }

@@ -25,6 +25,7 @@ export const getBatchModelStatsApi = (apiIds, period = 'daily') =>
 // 认证
 export const loginApi = (data) => request({ url: '/web/auth/login', method: 'POST', data })
 export const getAuthUserApi = () => request({ url: '/web/auth/user', method: 'GET' })
+export const refreshAuthApi = () => request({ url: '/web/auth/refresh', method: 'POST' })
 export const changePasswordApi = (data) =>
   request({ url: '/web/auth/change-password', method: 'POST', data })
 

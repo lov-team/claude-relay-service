@@ -2,7 +2,9 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import router from '@/router'
 
-import { loginApi, getAuthUserApi, getOemSettingsApi } from '@/utils/http_apis'
+import { loginApi, getAuthUserApi, refreshAuthApi, getOemSettingsApi } from '@/utils/http_apis'
+
+const ADMIN_SESSION_REFRESH_INTERVAL = 60 * 60 * 1000
 
 export const useAuthStore = defineStore('auth', () => {
   // 状态
@@ -18,6 +20,7 @@ export const useAuthStore = defineStore('auth', () => {
     faviconData: ''
   })
   const oemLoading = ref(true)
+  let refreshTimer = null
 
   // 计算属性
   const isAuthenticated = computed(() => !!authToken.value && isLoggedIn.value)
@@ -37,6 +40,7 @@ export const useAuthStore = defineStore('auth', () => {
         username.value = result.username || credentials.username
         isLoggedIn.value = true
         localStorage.setItem('authToken', result.token)
+        startAutoRefresh()
 
         await router.push('/dashboard')
       } else {
@@ -50,6 +54,7 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   function logout() {
+    stopAutoRefresh()
     isLoggedIn.value = false
     authToken.value = ''
     username.value = ''
@@ -60,6 +65,7 @@ export const useAuthStore = defineStore('auth', () => {
   function checkAuth() {
     if (authToken.value) {
       isLoggedIn.value = true
+      startAutoRefresh()
       // 验证token有效性
       verifyToken()
     }
@@ -73,8 +79,42 @@ export const useAuthStore = defineStore('auth', () => {
         return
       }
       username.value = userResult.user.username
+      refreshAdminSession({ logoutOnFailure: false })
     } catch (error) {
       logout()
+    }
+  }
+
+  function startAutoRefresh() {
+    if (typeof window === 'undefined') return
+    stopAutoRefresh()
+    refreshTimer = window.setInterval(() => {
+      refreshAdminSession({ logoutOnFailure: false })
+    }, ADMIN_SESSION_REFRESH_INTERVAL)
+  }
+
+  function stopAutoRefresh() {
+    if (refreshTimer) {
+      clearInterval(refreshTimer)
+      refreshTimer = null
+    }
+  }
+
+  async function refreshAdminSession({ logoutOnFailure = true } = {}) {
+    if (!authToken.value) return
+
+    try {
+      const result = await refreshAuthApi()
+      if (result.success && result.token) {
+        authToken.value = result.token
+        localStorage.setItem('authToken', result.token)
+      } else if (logoutOnFailure) {
+        logout()
+      }
+    } catch (error) {
+      if (logoutOnFailure) {
+        logout()
+      }
     }
   }
 
@@ -123,6 +163,7 @@ export const useAuthStore = defineStore('auth', () => {
     login,
     logout,
     checkAuth,
+    refreshAdminSession,
     loadOemSettings
   }
 })

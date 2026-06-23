@@ -5,6 +5,7 @@ const { formatDateWithTimezone } = require('../utils/dateHelper')
 const path = require('path')
 const fs = require('fs')
 const os = require('os')
+const { maskTokensDeep } = require('./tokenMask')
 
 // 安全的 JSON 序列化函数，处理循环引用和特殊字符
 const safeStringify = (obj, maxDepth = Infinity) => {
@@ -419,6 +420,8 @@ logger.healthCheck = () => {
 // 🔐 记录认证详细信息的方法
 logger.authDetail = (message, data = {}) => {
   try {
+    const sanitizedData = maskTokensDeep(data)
+
     // 记录到主日志（简化版）
     logger.info(`🔐 ${message}`, {
       type: 'auth-detail',
@@ -432,7 +435,7 @@ logger.authDetail = (message, data = {}) => {
     })
 
     // 记录到专门的认证详细日志文件（完整数据）
-    authDetailLogger.info(message, { data })
+    authDetailLogger.info(message, { data: sanitizedData })
   } catch (error) {
     logger.error('Failed to log auth detail:', error)
   }

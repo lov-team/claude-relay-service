@@ -43,6 +43,8 @@ const config = {
   // 🎯 Claude API配置
   claude: {
     apiUrl: process.env.CLAUDE_API_URL || 'https://api.anthropic.com/v1/messages',
+    oauthTokenUrl:
+      process.env.CLAUDE_OAUTH_TOKEN_URL || 'https://platform.claude.com/v1/oauth/token',
     apiVersion: process.env.CLAUDE_API_VERSION || '2023-06-01',
     betaHeader:
       process.env.CLAUDE_BETA_HEADER ||
