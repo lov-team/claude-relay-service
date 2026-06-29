@@ -9,7 +9,7 @@ const { getISOStringWithTimezone } = require('../utils/dateHelper')
 // 获取webhook配置
 router.get('/config', authenticateAdmin, async (req, res) => {
   try {
-    const config = await webhookConfigService.getConfig()
+    const config = await webhookConfigService.getSanitizedConfig()
     res.json({
       success: true,
       config
@@ -30,7 +30,7 @@ router.post('/config', authenticateAdmin, async (req, res) => {
     res.json({
       success: true,
       message: 'Webhook配置已保存',
-      config
+      config: webhookConfigService.sanitizeConfig(config)
     })
   } catch (error) {
     logger.error('保存webhook配置失败:', error)
@@ -48,7 +48,7 @@ router.post('/platforms', authenticateAdmin, async (req, res) => {
     res.json({
       success: true,
       message: 'Webhook平台已添加',
-      platform
+      platform: webhookConfigService.sanitizePlatform(platform)
     })
   } catch (error) {
     logger.error('添加webhook平台失败:', error)
@@ -66,7 +66,7 @@ router.put('/platforms/:id', authenticateAdmin, async (req, res) => {
     res.json({
       success: true,
       message: 'Webhook平台已更新',
-      platform
+      platform: webhookConfigService.sanitizePlatform(platform)
     })
   } catch (error) {
     logger.error('更新webhook平台失败:', error)
@@ -101,7 +101,7 @@ router.post('/platforms/:id/toggle', authenticateAdmin, async (req, res) => {
     res.json({
       success: true,
       message: `Webhook平台已${platform.enabled ? '启用' : '禁用'}`,
-      platform
+      platform: webhookConfigService.sanitizePlatform(platform)
     })
   } catch (error) {
     logger.error('切换webhook平台状态失败:', error)
@@ -115,6 +115,17 @@ router.post('/platforms/:id/toggle', authenticateAdmin, async (req, res) => {
 // 测试Webhook连通性
 router.post('/test', authenticateAdmin, async (req, res) => {
   try {
+    let testBody = req.body
+    if (req.body.id) {
+      const config = await webhookConfigService.getConfig()
+      const storedPlatform = (config.platforms || []).find(
+        (platform) => platform.id === req.body.id
+      )
+      if (storedPlatform) {
+        testBody = webhookConfigService.restoreSensitivePlaceholders(req.body, storedPlatform)
+      }
+    }
+
     const {
       url,
       type = 'custom',
@@ -137,8 +148,12 @@ router.post('/test', authenticateAdmin, async (req, res) => {
       botToken,
       chatId,
       apiBaseUrl,
-      proxyUrl
-    } = req.body
+      proxyUrl,
+      appId,
+      appSecret,
+      receiveId,
+      receiveIdType
+    } = testBody
 
     // Bark平台特殊处理
     if (type === 'bark') {
@@ -240,6 +255,27 @@ router.post('/test', authenticateAdmin, async (req, res) => {
       }
 
       logger.info(`🧪 测试webhook: ${type} - Chat ID: ${chatId}`)
+    } else if (type === 'feishu_app') {
+      if (!appId && !testBody.app_id) {
+        return res.status(400).json({
+          error: 'Missing Feishu App ID',
+          message: '请提供飞书 App ID'
+        })
+      }
+      if (!appSecret && !testBody.app_secret) {
+        return res.status(400).json({
+          error: 'Missing Feishu App Secret',
+          message: '请提供飞书 App Secret'
+        })
+      }
+      if (!receiveId && !chatId) {
+        return res.status(400).json({
+          error: 'Missing Feishu receive id',
+          message: '请提供飞书 receiveId/chatId'
+        })
+      }
+
+      logger.info(`🧪 测试webhook: ${type} - ${receiveIdType || 'chat_id'}:${receiveId || chatId}`)
     } else {
       // 其他平台验证URL
       if (!url) {
@@ -294,6 +330,12 @@ router.post('/test', authenticateAdmin, async (req, res) => {
       platform.chatId = chatId
       platform.apiBaseUrl = apiBaseUrl
       platform.proxyUrl = proxyUrl
+    } else if (type === 'feishu_app') {
+      platform.appId = appId || testBody.app_id
+      platform.appSecret = appSecret || testBody.app_secret
+      platform.receiveId = receiveId || chatId
+      platform.receiveIdType = receiveIdType || 'chat_id'
+      platform.apiBaseUrl = apiBaseUrl
     }
 
     const result = await webhookService.testWebhook(platform)
@@ -308,6 +350,9 @@ router.post('/test', authenticateAdmin, async (req, res) => {
       }
       if (type === 'telegram') {
         return `Chat ID: ${chatId}`
+      }
+      if (type === 'feishu_app') {
+        return `${receiveIdType || 'chat_id'}:${receiveId || chatId}`
       }
       return url
     })()

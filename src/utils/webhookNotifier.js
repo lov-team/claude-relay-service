@@ -26,9 +26,11 @@ class WebhookNotifier {
         accountName: notification.accountName,
         platform: notification.platform,
         status: notification.status,
+        previousStatus: notification.previousStatus,
         errorCode:
           notification.errorCode || this._getErrorCode(notification.platform, notification.status),
         reason: notification.reason,
+        message: notification.message,
         timestamp: notification.timestamp || getISOStringWithTimezone(new Date())
       })
     } catch (error) {

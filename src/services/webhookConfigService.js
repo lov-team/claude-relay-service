@@ -1,6 +1,12 @@
 const redis = require('../models/redis')
 const logger = require('../utils/logger')
 const { v4: uuidv4 } = require('uuid')
+const { createEncryptor } = require('../utils/commonHelper')
+
+const SECRET_PLACEHOLDER = '********'
+const ENCRYPTED_PREFIX = 'enc:v1:'
+const SENSITIVE_FIELDS = new Set(['appSecret', 'app_secret', 'secret', 'pass', 'botToken'])
+const encryptor = createEncryptor('webhook-config-salt')
 
 class WebhookConfigService {
   constructor() {
@@ -19,7 +25,7 @@ class WebhookConfigService {
         return this.getDefaultConfig()
       }
 
-      const storedConfig = JSON.parse(configStr)
+      const storedConfig = this.decryptSensitiveFields(JSON.parse(configStr))
       const defaultConfig = this.getDefaultConfig()
 
       // 合并默认通知类型，确保新增类型有默认值
@@ -40,6 +46,7 @@ class WebhookConfigService {
    */
   async saveConfig(config) {
     try {
+      const currentConfig = await this.getConfig()
       const defaultConfig = this.getDefaultConfig()
 
       config.notificationTypes = {
@@ -47,13 +54,18 @@ class WebhookConfigService {
         ...(config.notificationTypes || {})
       }
 
+      config = this.stripConfiguredFlags(this.restoreSensitivePlaceholders(config, currentConfig))
+
       // 验证配置
       this.validateConfig(config)
 
       // 添加更新时间
       config.updatedAt = new Date().toISOString()
 
-      await redis.client.set(this.DEFAULT_CONFIG_KEY, JSON.stringify(config))
+      await redis.client.set(
+        this.DEFAULT_CONFIG_KEY,
+        JSON.stringify(this.encryptSensitiveFields(config))
+      )
       logger.info('✅ Webhook配置已保存')
 
       return config
@@ -61,6 +73,124 @@ class WebhookConfigService {
       logger.error('保存webhook配置失败:', error)
       throw error
     }
+  }
+
+  async getSanitizedConfig() {
+    return this.sanitizeConfig(await this.getConfig())
+  }
+
+  sanitizeConfig(config) {
+    return this.mapSensitiveFields(config, (value, key) => {
+      if (!value) {
+        return value
+      }
+      return {
+        [key]: SECRET_PLACEHOLDER,
+        [`${key}Configured`]: true
+      }
+    })
+  }
+
+  sanitizePlatform(platform) {
+    return this.sanitizeConfig(platform)
+  }
+
+  encryptSensitiveFields(config) {
+    return this.mapSensitiveFields(config, (value, key) => ({
+      [key]: this.encryptSecret(value)
+    }))
+  }
+
+  decryptSensitiveFields(config) {
+    return this.mapSensitiveFields(config, (value, key) => ({
+      [key]: this.decryptSecret(value)
+    }))
+  }
+
+  restoreSensitivePlaceholders(value, previousValue) {
+    if (Array.isArray(value)) {
+      return value.map((item, index) => {
+        const previousItem =
+          item && typeof item === 'object' && item.id && Array.isArray(previousValue)
+            ? previousValue.find((candidate) => candidate?.id === item.id)
+            : previousValue?.[index]
+        return this.restoreSensitivePlaceholders(item, previousItem)
+      })
+    }
+
+    if (!value || typeof value !== 'object') {
+      return value
+    }
+
+    const restored = { ...value }
+    for (const [key, item] of Object.entries(value)) {
+      if (SENSITIVE_FIELDS.has(key) && item === SECRET_PLACEHOLDER) {
+        restored[key] = previousValue?.[key] || ''
+      } else {
+        restored[key] = this.restoreSensitivePlaceholders(item, previousValue?.[key])
+      }
+    }
+    return restored
+  }
+
+  stripConfiguredFlags(value) {
+    if (Array.isArray(value)) {
+      return value.map((item) => this.stripConfiguredFlags(item))
+    }
+
+    if (!value || typeof value !== 'object') {
+      return value
+    }
+
+    const stripped = {}
+    for (const [key, item] of Object.entries(value)) {
+      if (key.endsWith('Configured') && SENSITIVE_FIELDS.has(key.replace(/Configured$/, ''))) {
+        continue
+      }
+      stripped[key] = this.stripConfiguredFlags(item)
+    }
+    return stripped
+  }
+
+  mapSensitiveFields(value, mapper) {
+    if (Array.isArray(value)) {
+      return value.map((item) => this.mapSensitiveFields(item, mapper))
+    }
+
+    if (!value || typeof value !== 'object') {
+      return value
+    }
+
+    const mapped = {}
+    for (const [key, item] of Object.entries(value)) {
+      if (SENSITIVE_FIELDS.has(key)) {
+        Object.assign(mapped, mapper(item, key))
+      } else {
+        mapped[key] = this.mapSensitiveFields(item, mapper)
+      }
+    }
+    return mapped
+  }
+
+  encryptSecret(value) {
+    if (!value || value === SECRET_PLACEHOLDER || this.isEncryptedSecret(value)) {
+      return value
+    }
+    return `${ENCRYPTED_PREFIX}${encryptor.encrypt(String(value))}`
+  }
+
+  decryptSecret(value) {
+    if (!value || typeof value !== 'string') {
+      return value
+    }
+    if (!this.isEncryptedSecret(value)) {
+      return value
+    }
+    return encryptor.decrypt(value.slice(ENCRYPTED_PREFIX.length))
+  }
+
+  isEncryptedSecret(value) {
+    return typeof value === 'string' && value.startsWith(ENCRYPTED_PREFIX)
   }
 
   /**
@@ -77,6 +207,7 @@ class WebhookConfigService {
         'wechat_work',
         'dingtalk',
         'feishu',
+        'feishu_app',
         'slack',
         'discord',
         'telegram',
@@ -91,7 +222,7 @@ class WebhookConfigService {
         }
 
         // Bark和SMTP平台不使用标准URL
-        if (!['bark', 'smtp', 'telegram'].includes(platform.type)) {
+        if (!['bark', 'smtp', 'telegram', 'feishu_app'].includes(platform.type)) {
           if (!platform.url || !this.isValidUrl(platform.url)) {
             throw new Error(`无效的webhook URL: ${platform.url}`)
           }
@@ -123,6 +254,26 @@ class WebhookConfigService {
           throw new Error('飞书启用签名时必须提供secret')
         }
         break
+      case 'feishu_app': {
+        if (!platform.appId && !platform.app_id) {
+          throw new Error('飞书应用机器人必须提供 App ID')
+        }
+        if (!platform.appSecret && !platform.app_secret) {
+          throw new Error('飞书应用机器人必须提供 App Secret')
+        }
+        if (!platform.receiveId && !platform.chatId) {
+          throw new Error('飞书应用机器人必须提供 receiveId/chatId')
+        }
+        const receiveIdType = platform.receiveIdType || 'chat_id'
+        const validReceiveIdTypes = ['open_id', 'user_id', 'union_id', 'email', 'chat_id']
+        if (!validReceiveIdTypes.includes(receiveIdType)) {
+          throw new Error(`无效的飞书 receiveIdType: ${receiveIdType}`)
+        }
+        if (platform.apiBaseUrl && !this.isValidUrl(platform.apiBaseUrl)) {
+          throw new Error('飞书 API 基础地址格式无效')
+        }
+        break
+      }
       case 'slack':
         // Slack webhook URL通常包含token
         if (!platform.url.includes('hooks.slack.com')) {
@@ -330,6 +481,7 @@ class WebhookConfigService {
         systemError: true, // 系统错误
         securityAlert: true, // 安全警报
         rateLimitRecovery: true, // 限流恢复
+        accountVitalitySummary: true, // 账号活力汇总
         test: true // 测试通知
       },
       retrySettings: {
@@ -465,3 +617,4 @@ class WebhookConfigService {
 }
 
 module.exports = new WebhookConfigService()
+module.exports.SECRET_PLACEHOLDER = SECRET_PLACEHOLDER

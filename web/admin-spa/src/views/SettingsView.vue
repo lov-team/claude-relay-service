@@ -568,11 +568,44 @@
                     </div>
                     <div class="mt-3 space-y-1 text-sm">
                       <div
-                        v-if="platform.type !== 'smtp' && platform.type !== 'telegram'"
+                        v-if="
+                          platform.type !== 'smtp' &&
+                          platform.type !== 'telegram' &&
+                          platform.type !== 'feishu_app'
+                        "
                         class="flex items-center text-gray-600 dark:text-gray-400"
                       >
                         <i class="fas fa-link mr-2"></i>
                         <span class="truncate">{{ platform.url }}</span>
+                      </div>
+                      <div
+                        v-if="platform.type === 'feishu_app'"
+                        class="flex items-center text-gray-600 dark:text-gray-400"
+                      >
+                        <i class="fas fa-id-card mr-2"></i>
+                        <span class="truncate"
+                          >App ID: {{ platform.appId || platform.app_id }}</span
+                        >
+                      </div>
+                      <div
+                        v-if="platform.type === 'feishu_app'"
+                        class="flex items-center text-gray-600 dark:text-gray-400"
+                      >
+                        <i class="fas fa-comments mr-2"></i>
+                        <span class="truncate">
+                          {{ platform.receiveIdType || 'chat_id' }}:
+                          {{ platform.receiveId || platform.chatId || '未配置' }}
+                        </span>
+                      </div>
+                      <div
+                        v-if="
+                          platform.type === 'feishu_app' &&
+                          isSecretConfigured(platform, 'appSecret')
+                        "
+                        class="flex items-center text-gray-600 dark:text-gray-400"
+                      >
+                        <i class="fas fa-key mr-2"></i>
+                        <span class="truncate">App Secret: 已配置</span>
                       </div>
                       <div
                         v-if="platform.type === 'telegram'"
@@ -582,12 +615,20 @@
                         <span class="truncate">Chat ID: {{ platform.chatId || '未配置' }}</span>
                       </div>
                       <div
-                        v-if="platform.type === 'telegram' && platform.botToken"
+                        v-if="
+                          platform.type === 'telegram' &&
+                          (platform.botToken || platform.botTokenConfigured)
+                        "
                         class="flex items-center text-gray-600 dark:text-gray-400"
                       >
                         <i class="fas fa-key mr-2"></i>
                         <span class="truncate"
-                          >Token: {{ formatTelegramToken(platform.botToken) }}</span
+                          >Token:
+                          {{
+                            isSecretConfigured(platform, 'botToken')
+                              ? '已配置'
+                              : formatTelegramToken(platform.botToken)
+                          }}</span
                         >
                       </div>
                       <div
@@ -645,6 +686,7 @@
                     </button>
                     <!-- 编辑按钮 -->
                     <button
+                      v-if="platform.type !== 'feishu_app'"
                       class="rounded-lg bg-gray-100 p-2 text-gray-600 transition-colors hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-400 dark:hover:bg-gray-600"
                       title="编辑"
                       @click="editPlatform(platform)"
@@ -2906,6 +2948,7 @@ const testPlatform = async (platform) => {
 
   try {
     const testData = {
+      id: platform.id,
       type: platform.type,
       secret: platform.secret,
       enableSign: platform.enableSign
@@ -2932,6 +2975,12 @@ const testPlatform = async (platform) => {
       testData.chatId = platform.chatId
       testData.apiBaseUrl = platform.apiBaseUrl
       testData.proxyUrl = platform.proxyUrl
+    } else if (platform.type === 'feishu_app') {
+      testData.appId = platform.appId || platform.app_id
+      testData.appSecret = platform.appSecret || platform.app_secret
+      testData.receiveId = platform.receiveId || platform.chatId
+      testData.receiveIdType = platform.receiveIdType || 'chat_id'
+      testData.apiBaseUrl = platform.apiBaseUrl
     } else {
       testData.url = platform.url
     }
@@ -3049,6 +3098,7 @@ const getPlatformName = (type) => {
     wechat_work: '企业微信',
     dingtalk: '钉钉',
     feishu: '飞书',
+    feishu_app: '飞书应用机器人',
     slack: 'Slack',
     discord: 'Discord',
     telegram: 'Telegram',
@@ -3064,6 +3114,7 @@ const getPlatformIcon = (type) => {
     wechat_work: 'fab fa-weixin text-green-600',
     dingtalk: 'fas fa-comment-dots text-blue-500',
     feishu: 'fas fa-dove text-blue-600',
+    feishu_app: 'fas fa-paper-plane text-blue-600',
     slack: 'fab fa-slack text-purple-600',
     discord: 'fab fa-discord text-indigo-600',
     telegram: 'fab fa-telegram-plane text-sky-500',
@@ -3079,6 +3130,7 @@ const getWebhookHint = (type) => {
     wechat_work: '请在企业微信群机器人设置中获取Webhook地址',
     dingtalk: '请在钉钉群机器人设置中获取Webhook地址',
     feishu: '请在飞书群机器人设置中获取Webhook地址',
+    feishu_app: '使用飞书自建应用机器人主动发送消息，需要 App ID、App Secret 和 chat_id',
     slack: '请在Slack应用的Incoming Webhooks中获取地址',
     discord: '请在Discord服务器的集成设置中创建Webhook',
     telegram: '使用 @BotFather 创建机器人并复制 Token，Chat ID 可通过 @userinfobot 或相关工具获取',
@@ -3091,13 +3143,18 @@ const getWebhookHint = (type) => {
 
 const formatTelegramToken = (token) => {
   if (!token) return ''
+  if (token === '********') return '已配置'
   if (token.length <= 12) return token
   return `${token.slice(0, 6)}...${token.slice(-4)}`
 }
 
+const isSecretConfigured = (platform, field) =>
+  platform?.[`${field}Configured`] === true || platform?.[field] === '********'
+
 const getNotificationTypeName = (type) => {
   const names = {
     accountAnomaly: '账号异常',
+    accountVitalitySummary: '账号活力汇总',
     quotaWarning: '配额警告',
     systemError: '系统错误',
     securityAlert: '安全警报',
@@ -3110,6 +3167,7 @@ const getNotificationTypeName = (type) => {
 const getNotificationTypeDescription = (type) => {
   const descriptions = {
     accountAnomaly: '账号状态异常、认证失败等',
+    accountVitalitySummary: '账号活力状态手动汇总',
     quotaWarning: 'API调用配额不足警告',
     systemError: '系统运行错误和故障',
     securityAlert: '安全相关的警报通知',

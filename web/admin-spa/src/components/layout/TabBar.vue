@@ -55,6 +55,7 @@ const authStore = useAuthStore()
 const tabs = computed(() => {
   const baseTabs = [
     { key: 'dashboard', name: '仪表板', shortName: '仪表板', icon: 'fas fa-tachometer-alt' },
+    { key: 'accountVitality', name: '账号活力', shortName: '活力', icon: 'fas fa-th' },
     { key: 'apiKeys', name: 'API Keys', shortName: 'API', icon: 'fas fa-key' },
     { key: 'accounts', name: '账户管理', shortName: '账户', icon: 'fas fa-user-circle' },
     { key: 'requestDetails', name: '请求明细', shortName: '明细', icon: 'fas fa-table' },
