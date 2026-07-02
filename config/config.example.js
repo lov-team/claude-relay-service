@@ -230,6 +230,9 @@ const config = {
     maxTotalCostLimit: parseFloat(process.env.QUOTA_CARD_MAX_TOTAL_COST_LIMIT) || 1000 // 最大总额度（美元）
   },
 
+  // 🌱 Claude Pro/Max 被动养号护栏（运行时以 Redis account_nurture_config 为准，此处为默认值）
+  accountNurture: require('../src/utils/accountNurtureDefaults').cloneDefaultConfig(),
+
   // ⏱️ 上游错误自动暂停配置
   // 说明：此处是全局默认值。Claude 官方 OAuth 账号可在后台做账号级 503/5xx 覆盖，
   // 且可通过账号设置禁用 temp_unavailable（账号级策略优先于全局默认值）。
