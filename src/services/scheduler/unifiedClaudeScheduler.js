@@ -1,4 +1,5 @@
 const claudeAccountService = require('../account/claudeAccountService')
+const claudeAccountNurtureService = require('../account/claudeAccountNurtureService')
 const claudeConsoleAccountService = require('../account/claudeConsoleAccountService')
 const bedrockAccountService = require('../account/bedrockAccountService')
 const ccrAccountService = require('../account/ccrAccountService')
@@ -38,6 +39,24 @@ function isProAccount(info) {
 class UnifiedClaudeScheduler {
   constructor() {
     this.SESSION_MAPPING_PREFIX = 'unified_claude_session_mapping:'
+  }
+
+  async isNurtureBlocked(accountId) {
+    const evaluation = await claudeAccountNurtureService.evaluate(accountId)
+    if (evaluation.blocked) {
+      await claudeAccountNurtureService.recordBlocked(accountId, evaluation)
+      return evaluation
+    }
+    return null
+  }
+
+  _throwDedicatedNurtureError(accountId, evaluation) {
+    const error = new Error('Dedicated Claude account reached nurture limit')
+    error.code = 'CLAUDE_NURTURE_LIMITED'
+    error.accountId = accountId
+    error.nurtureReason = evaluation?.reason || null
+    error.retryAfterAt = null
+    throw error
   }
 
   // 🔍 检查账户是否支持请求的模型
@@ -278,6 +297,11 @@ class UnifiedClaudeScheduler {
               throw error
             }
 
+            const nurtureEvaluation = await this.isNurtureBlocked(boundAccount.id)
+            if (nurtureEvaluation) {
+              this._throwDedicatedNurtureError(boundAccount.id, nurtureEvaluation)
+            }
+
             if (!isSchedulable(boundAccount.schedulable)) {
               logger.warn(
                 `⚠️ Bound Claude OAuth account ${apiKeyData.claudeAccountId} is not schedulable (schedulable: ${boundAccount?.schedulable}), falling back to pool`
@@ -494,6 +518,11 @@ class UnifiedClaudeScheduler {
             throw error
           }
 
+          const nurtureEvaluation = await this.isNurtureBlocked(boundAccount.id)
+          if (nurtureEvaluation) {
+            this._throwDedicatedNurtureError(boundAccount.id, nurtureEvaluation)
+          }
+
           if (!isSchedulable(boundAccount.schedulable)) {
             logger.warn(
               `⚠️ Bound Claude OAuth account ${apiKeyData.claudeAccountId} is not schedulable (schedulable: ${boundAccount?.schedulable})`
@@ -645,6 +674,14 @@ class UnifiedClaudeScheduler {
         // 检查是否被限流
         const isRateLimited = await claudeAccountService.isAccountRateLimited(account.id)
         if (isRateLimited) {
+          continue
+        }
+
+        const nurtureEvaluation = await this.isNurtureBlocked(account.id)
+        if (nurtureEvaluation) {
+          logger.info(
+            `🌱 Skipping account ${account.name} (${account.id}) due to nurture limit: ${nurtureEvaluation.reason}`
+          )
           continue
         }
 
@@ -1018,6 +1055,11 @@ class UnifiedClaudeScheduler {
         const isRateLimited = await claudeAccountService.isAccountRateLimited(accountId)
         const isOverloaded = await claudeAccountService.isAccountOverloaded(accountId)
         if (isRateLimited || isOverloaded) {
+          return false
+        }
+
+        const nurtureEvaluation = await this.isNurtureBlocked(accountId)
+        if (nurtureEvaluation) {
           return false
         }
 
@@ -1584,6 +1626,16 @@ class UnifiedClaudeScheduler {
             continue
           }
 
+          if (accountType === 'claude-official') {
+            const nurtureEvaluation = await this.isNurtureBlocked(account.id)
+            if (nurtureEvaluation) {
+              logger.info(
+                `🌱 Skipping group member ${account.name} (${account.id}) due to nurture limit: ${nurtureEvaluation.reason}`
+              )
+              continue
+            }
+          }
+
           if (accountType === 'claude-official' && isOpusRequest) {
             const isOpusRateLimited = await claudeAccountService.isAccountOpusRateLimited(
               account.id
@@ -1835,6 +1887,14 @@ class UnifiedClaudeScheduler {
       // 检查是否被限流
       if (await claudeAccountService.isAccountRateLimited(accountId)) {
         logger.warn(`Session binding: Claude OAuth account ${accountId} is rate limited`)
+        return false
+      }
+
+      const nurtureEvaluation = await this.isNurtureBlocked(accountId)
+      if (nurtureEvaluation) {
+        logger.warn(
+          `Session binding: Claude OAuth account ${accountId} blocked by nurture: ${nurtureEvaluation.reason}`
+        )
         return false
       }
 

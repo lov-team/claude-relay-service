@@ -346,6 +346,29 @@ export const getClaudeRelayConfigApi = (config) =>
 export const updateClaudeRelayConfigApi = (data, config) =>
   request({ url: '/admin/claude-relay-config', method: 'PUT', data, ...config })
 
+// 养号护栏配置
+export const getAccountNurtureConfigApi = (config) =>
+  request({ url: '/admin/account-nurture-config', method: 'GET', ...config })
+export const updateAccountNurtureConfigApi = (data, config) =>
+  request({ url: '/admin/account-nurture-config', method: 'PUT', data, ...config })
+export const resetAccountNurtureConfigApi = (config) =>
+  request({ url: '/admin/account-nurture-config/reset', method: 'POST', ...config })
+
+export const getClaudeAccountNurtureStatusApi = (accountId, config) =>
+  request({ url: `/admin/claude-accounts/${accountId}/nurture-status`, method: 'GET', ...config })
+export const enableClaudeAccountNurtureApi = (accountId, config) =>
+  request({ url: `/admin/claude-accounts/${accountId}/nurture/enable`, method: 'POST', ...config })
+export const disableClaudeAccountNurtureApi = (accountId, config) =>
+  request({ url: `/admin/claude-accounts/${accountId}/nurture/disable`, method: 'POST', ...config })
+export const graduateClaudeAccountNurtureApi = (accountId, config) =>
+  request({
+    url: `/admin/claude-accounts/${accountId}/nurture/graduate`,
+    method: 'POST',
+    ...config
+  })
+export const resetClaudeAccountNurtureApi = (accountId, config) =>
+  request({ url: `/admin/claude-accounts/${accountId}/nurture/reset`, method: 'POST', ...config })
+
 // 服务倍率配置（管理端）
 export const getAdminServiceRatesApi = (config) =>
   request({ url: '/admin/service-rates', method: 'GET', ...config })

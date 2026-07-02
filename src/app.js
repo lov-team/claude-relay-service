@@ -678,16 +678,18 @@ class Application {
         const apiKeyService = require('./services/apiKeyService')
         const claudeAccountService = require('./services/account/claudeAccountService')
 
-        const [expiredKeys, errorAccounts] = await Promise.all([
+        const claudeAccountNurtureService = require('./services/account/claudeAccountNurtureService')
+        const [expiredKeys, errorAccounts, nurtureRollover] = await Promise.all([
           apiKeyService.cleanupExpiredKeys(),
           claudeAccountService.cleanupErrorAccounts(),
-          claudeAccountService.cleanupTempErrorAccounts() // 新增：清理临时错误账户
+          claudeAccountService.cleanupTempErrorAccounts(), // 新增：清理临时错误账户
+          claudeAccountNurtureService.rolloverDayIndexes()
         ])
 
         await redis.cleanup()
 
         logger.success(
-          `🧹 Cleanup completed: ${expiredKeys} expired keys, ${errorAccounts} error accounts reset`
+          `🧹 Cleanup completed: ${expiredKeys} expired keys, ${errorAccounts} error accounts reset, nurture rollover processed=${nurtureRollover?.processed || 0} graduated=${nurtureRollover?.graduated || 0}`
         )
       } catch (error) {
         logger.error('❌ Cleanup task failed:', error)
