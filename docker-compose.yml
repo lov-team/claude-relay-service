@@ -6,7 +6,10 @@ version: '3.8'
 services:
   # 🚀 Claude Relay Service
   claude-relay:
-    build: .
+    build:
+      context: .
+      args:
+        VITE_APP_BASE_URL: ${VITE_APP_BASE_URL:-/admin-next/}
     image: weishaw/claude-relay-service:latest
     restart: unless-stopped
     ports:
