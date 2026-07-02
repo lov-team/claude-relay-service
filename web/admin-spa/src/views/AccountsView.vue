@@ -780,6 +780,17 @@
                       </el-tooltip>
                     </span>
                     <span
+                      v-if="account.nurtureEnabled"
+                      class="inline-flex items-center rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-200"
+                    >
+                      <i class="fas fa-seedling mr-1" />
+                      {{
+                        account.nurturePhase === 'steady'
+                          ? `常驻 ${(account.nurtureTier || '').toUpperCase()}`
+                          : `养号 D${account.nurtureDayIndex || 1}`
+                      }}
+                    </span>
+                    <span
                       v-if="account.schedulable === false"
                       class="inline-flex items-center rounded-full bg-gray-100 px-3 py-1 text-xs font-semibold text-gray-700"
                     >

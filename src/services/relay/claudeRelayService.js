@@ -5,6 +5,7 @@ const crypto = require('crypto')
 const ProxyHelper = require('../../utils/proxyHelper')
 const { filterForClaude } = require('../../utils/headerFilter')
 const claudeAccountService = require('../account/claudeAccountService')
+const claudeAccountNurtureService = require('../account/claudeAccountNurtureService')
 const unifiedClaudeScheduler = require('../scheduler/unifiedClaudeScheduler')
 const sessionHelper = require('../../utils/sessionHelper')
 const logger = require('../../utils/logger')
@@ -114,6 +115,50 @@ class ClaudeRelayService {
     }
     const formattedReset = formatDateWithTimezone(resetTime)
     return `此专属账号的Opus模型已达到周使用限制，将于 ${formattedReset} 自动恢复，请尝试切换其他模型后再试。`
+  }
+
+  _buildNurtureLimitedResponse(accountId, reason) {
+    const retryAfterSeconds = this._calcNurtureRetryAfterSeconds()
+    logger.warn(
+      `🌱 Account ${accountId} blocked by nurture guard (${reason || 'unknown'}), returning 503`
+    )
+    return {
+      statusCode: 503,
+      headers: {
+        'Content-Type': 'application/json',
+        'retry-after': String(retryAfterSeconds)
+      },
+      body: JSON.stringify({
+        error: 'nurture_limit_reached',
+        message: '账号养号护栏已达今日或当前窗口上限，请稍后重试。',
+        reason: reason || null
+      }),
+      accountId
+    }
+  }
+
+  _calcNurtureRetryAfterSeconds() {
+    const now = new Date()
+    const tomorrow = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0)
+    )
+    return Math.max(60, Math.ceil((tomorrow.getTime() - now.getTime()) / 1000))
+  }
+
+  async _enforceNurtureBeforeRelay(accountId, accountType) {
+    if (accountType !== 'claude-official') {
+      return null
+    }
+
+    const evaluation = await claudeAccountNurtureService.evaluate(accountId, {
+      incrementRpm: true
+    })
+    if (evaluation.blocked) {
+      await claudeAccountNurtureService.recordBlocked(accountId, evaluation)
+      return this._buildNurtureLimitedResponse(accountId, evaluation.reason)
+    }
+
+    return null
   }
 
   // 🧾 提取错误消息文本
@@ -595,6 +640,9 @@ class ClaudeRelayService {
             accountId: error.accountId
           }
         }
+        if (error.code === 'CLAUDE_NURTURE_LIMITED') {
+          return this._buildNurtureLimitedResponse(error.accountId, error.nurtureReason)
+        }
         throw error
       }
       const { accountId } = accountSelection
@@ -604,6 +652,11 @@ class ClaudeRelayService {
       logger.info(
         `📤 Processing API request for key: ${apiKeyData.name || apiKeyData.id}, account: ${accountId} (${accountType})${sessionHash ? `, session: ${sessionHash}` : ''}`
       )
+
+      const nurtureBlockedResponse = await this._enforceNurtureBeforeRelay(accountId, accountType)
+      if (nurtureBlockedResponse) {
+        return nurtureBlockedResponse
+      }
 
       // 📬 用户消息队列处理：如果是用户消息请求，需要获取队列锁
       if (userMessageQueueService.isUserMessageRequest(requestBody)) {
@@ -1048,6 +1101,8 @@ class ClaudeRelayService {
           // 保存会话窗口状态到账户数据
           await claudeAccountService.updateSessionWindowStatus(accountId, sessionWindowStatus)
         }
+
+        await claudeAccountNurtureService.recordRequestSuccess(accountId)
 
         // 请求成功，清除401和500错误计数
         await this.clearUnauthorizedErrors(accountId)
@@ -2283,11 +2338,39 @@ class ClaudeRelayService {
           responseStream.end()
           return
         }
+        if (error.code === 'CLAUDE_NURTURE_LIMITED') {
+          const nurtureResponse = this._buildNurtureLimitedResponse(
+            error.accountId,
+            error.nurtureReason
+          )
+          if (!responseStream.headersSent) {
+            responseStream.status(nurtureResponse.statusCode)
+            Object.entries(nurtureResponse.headers).forEach(([key, value]) => {
+              responseStream.setHeader(key, value)
+            })
+          }
+          responseStream.write(nurtureResponse.body)
+          responseStream.end()
+          return
+        }
         throw error
       }
       const { accountId } = accountSelection
       const { accountType } = accountSelection
       selectedAccountId = accountId
+
+      const nurtureBlockedResponse = await this._enforceNurtureBeforeRelay(accountId, accountType)
+      if (nurtureBlockedResponse) {
+        if (!responseStream.headersSent) {
+          responseStream.status(nurtureBlockedResponse.statusCode)
+          Object.entries(nurtureBlockedResponse.headers).forEach(([key, value]) => {
+            responseStream.setHeader(key, value)
+          })
+        }
+        responseStream.write(nurtureBlockedResponse.body)
+        responseStream.end()
+        return
+      }
 
       // 📬 用户消息队列处理：如果是用户消息请求，需要获取队列锁
       if (userMessageQueueService.isUserMessageRequest(requestBody)) {
@@ -3318,6 +3401,8 @@ class ClaudeRelayService {
                 .catch(() => {})
             }
           } else if (res.statusCode === 200) {
+            await claudeAccountNurtureService.recordRequestSuccess(accountId)
+
             // 请求成功，清除401和500错误计数
             await this.clearUnauthorizedErrors(accountId)
             await claudeAccountService.clearInternalErrors(accountId)
