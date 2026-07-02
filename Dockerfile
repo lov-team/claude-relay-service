@@ -28,6 +28,9 @@ RUN --mount=type=cache,target=/root/.npm \
 COPY web/admin-spa/ ./
 
 # 🏗️ 构建前端
+# 反向代理子路径部署时需与浏览器访问前缀一致，例如 Nginx /cc/ -> /cc/admin-next/
+ARG VITE_APP_BASE_URL=/admin-next/
+ENV VITE_APP_BASE_URL=${VITE_APP_BASE_URL}
 RUN npm run build
 
 # 🐳 主应用阶段

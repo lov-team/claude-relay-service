@@ -1,6 +1,6 @@
 // App 配置
 export const APP_CONFIG = {
-  basePath: import.meta.env.VITE_APP_BASE_URL || (import.meta.env.DEV ? '/admin/' : '/web/admin/'),
+  basePath: import.meta.env.VITE_APP_BASE_URL || (import.meta.env.DEV ? '/admin/' : '/admin-next/'),
   apiPrefix: import.meta.env.DEV ? '/webapi' : ''
 }
 

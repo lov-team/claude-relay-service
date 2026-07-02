@@ -243,6 +243,58 @@ function toMillis(value) {
   return date.getTime()
 }
 
+function normalizeClaudeCodeVersion(value) {
+  const rawVersion = String(value || '').trim()
+  const semverMatch = rawVersion.match(/^(\d+\.\d+\.\d+)/)
+  return semverMatch ? semverMatch[1] : null
+}
+
+function extractClaudeCodeBillingHeaderText(requestBodySource) {
+  const system = requestBodySource?.system
+  const candidates = []
+
+  if (typeof requestBodySource === 'string') {
+    candidates.push(requestBodySource)
+  }
+
+  if (typeof system === 'string') {
+    candidates.push(system)
+  } else if (Array.isArray(system)) {
+    system.forEach((item) => {
+      if (typeof item === 'string') {
+        candidates.push(item)
+      } else if (typeof item?.text === 'string') {
+        candidates.push(item.text)
+      }
+    })
+  }
+
+  return candidates.find((text) => /x-anthropic-billing-header\s*:/i.test(text)) || null
+}
+
+function extractClaudeCodeIdentity(requestBodySource) {
+  const billingHeaderText = extractClaudeCodeBillingHeaderText(requestBodySource)
+  if (!billingHeaderText) {
+    return null
+  }
+
+  const versionMatch = billingHeaderText.match(/(?:^|[;\s])cc_version=([^;\s]+)/i)
+  const entrypointMatch = billingHeaderText.match(/(?:^|[;\s])cc_entrypoint=([^;\s]+)/i)
+  const version = normalizeClaudeCodeVersion(versionMatch?.[1])
+  const entrypoint = entrypointMatch?.[1]?.trim() || null
+
+  if (!version && !entrypoint) {
+    return null
+  }
+
+  return {
+    version,
+    entrypoint,
+    userAgent: version ? `claude-cli/${version} (external, ${entrypoint || 'cli'})` : null,
+    source: 'billing-header'
+  }
+}
+
 function safeJsonParse(value, label = 'request detail record') {
   if (!value) {
     return null
@@ -709,6 +761,7 @@ class RequestDetailService {
     const cost = normalizeNumber(detail.cost, 6)
     const realCost = normalizeNumber(detail.realCost, 6)
     const reasoningInfo = extractRequestReasoningInfo(requestBodySource)
+    const claudeCodeIdentity = extractClaudeCodeIdentity(requestBodySource)
     const normalized = {
       requestId,
       timestamp,
@@ -736,7 +789,11 @@ class RequestDetailService {
       durationMs,
       isLongContextRequest: detail.isLongContextRequest === true,
       reasoningDisplay: detail.reasoningDisplay || reasoningInfo.reasoningDisplay || null,
-      reasoningSource: detail.reasoningSource || reasoningInfo.reasoningSource || null
+      reasoningSource: detail.reasoningSource || reasoningInfo.reasoningSource || null,
+      claudeCodeVersion: detail.claudeCodeVersion || claudeCodeIdentity?.version || null,
+      claudeCodeEntrypoint: detail.claudeCodeEntrypoint || claudeCodeIdentity?.entrypoint || null,
+      claudeCodeUserAgent: detail.claudeCodeUserAgent || claudeCodeIdentity?.userAgent || null,
+      claudeCodeVersionSource: detail.claudeCodeVersionSource || claudeCodeIdentity?.source || null
     }
 
     if (options.bodyPreviewEnabled && requestBodySource !== undefined) {
@@ -1112,6 +1169,9 @@ class RequestDetailService {
       record.accountName,
       record.accountTypeName,
       record.model,
+      record.claudeCodeVersion,
+      record.claudeCodeEntrypoint,
+      record.claudeCodeUserAgent,
       record.endpoint,
       record.method
     ]

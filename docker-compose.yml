@@ -6,7 +6,10 @@ version: '3.8'
 services:
   # 🚀 Claude Relay Service
   claude-relay:
-    build: .
+    build:
+      context: .
+      args:
+        VITE_APP_BASE_URL: ${VITE_APP_BASE_URL:-/admin-next/}
     image: weishaw/claude-relay-service:latest
     restart: unless-stopped
     ports:
@@ -61,6 +64,7 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - LOG_MAX_SIZE=${LOG_MAX_SIZE:-10m}
       - LOG_MAX_FILES=${LOG_MAX_FILES:-5}
+      - ANTHROPIC_CACHE_DEBUG=${ANTHROPIC_CACHE_DEBUG:-false}
       
       # 🔧 系统配置
       - CLEANUP_INTERVAL=${CLEANUP_INTERVAL:-3600000}

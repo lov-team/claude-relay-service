@@ -2863,6 +2863,63 @@
             </label>
           </div>
 
+          <div
+            v-if="form.platform === 'claude' && isClaudeProOrMaxSubscription && isEdit"
+            class="mt-4 rounded-lg border border-emerald-200 bg-emerald-50/70 p-4 dark:border-emerald-800 dark:bg-emerald-900/20"
+          >
+            <div class="mb-3 flex items-center justify-between">
+              <span class="text-sm font-semibold text-emerald-800 dark:text-emerald-200">
+                养号护栏
+              </span>
+              <span
+                class="rounded-full bg-emerald-100 px-2 py-1 text-xs font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-200"
+              >
+                {{ nurtureStatusLabel }}
+              </span>
+            </div>
+            <p v-if="nurtureStatus?.evaluation?.actual?.sevenDayUtil != null" class="mb-3 text-xs text-gray-600 dark:text-gray-300">
+              7d 用量 {{ nurtureStatus.evaluation.actual.sevenDayUtil.toFixed(1) }}% /
+              上限 {{ nurtureStatus.evaluation.limits?.sevenDayLimit?.toFixed?.(1) || '-' }}%
+            </p>
+            <p v-if="nurtureStatus?.lastBlockReason" class="mb-3 text-xs text-amber-700 dark:text-amber-300">
+              最近阻断：{{ nurtureStatus.lastBlockReason }}
+            </p>
+            <div class="flex flex-wrap gap-2">
+              <button
+                v-if="!nurtureStatus?.nurtureEnabled"
+                class="rounded bg-emerald-600 px-3 py-1.5 text-xs text-white hover:bg-emerald-700"
+                type="button"
+                @click="handleEnableNurture"
+              >
+                开启养号
+              </button>
+              <button
+                v-if="nurtureStatus?.nurtureEnabled"
+                class="rounded bg-gray-600 px-3 py-1.5 text-xs text-white hover:bg-gray-700"
+                type="button"
+                @click="handleDisableNurture"
+              >
+                关闭养号
+              </button>
+              <button
+                v-if="nurtureStatus?.nurturePhase === 'nurturing'"
+                class="rounded bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-700"
+                type="button"
+                @click="handleGraduateNurture"
+              >
+                提前常驻
+              </button>
+              <button
+                v-if="nurtureStatus?.nurtureEnabled"
+                class="rounded border border-gray-300 px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-100 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700"
+                type="button"
+                @click="handleResetNurture"
+              >
+                重置 Day1
+              </button>
+            </div>
+          </div>
+
           <!-- Claude 账户级串行队列开关（编辑模式） -->
           <div v-if="form.platform === 'claude'" class="mt-4">
             <label class="flex items-start">
@@ -4407,6 +4464,62 @@ const form = ref({
   })(),
   expiresAt: props.account?.expiresAt || null
 })
+
+const isClaudeProOrMaxSubscription = computed(
+  () =>
+    form.value.subscriptionType === 'claude_pro' || form.value.subscriptionType === 'claude_max'
+)
+const nurtureStatus = ref(null)
+const nurtureStatusLabel = computed(() => {
+  if (!nurtureStatus.value?.nurtureEnabled) {
+    return '已关闭'
+  }
+  if (nurtureStatus.value.nurturePhase === 'steady') {
+    return `常驻 ${(nurtureStatus.value.nurtureTier || '').toUpperCase()}`
+  }
+  return `养号 D${nurtureStatus.value.nurtureDayIndex || 1}`
+})
+
+const loadNurtureStatus = async () => {
+  if (!props.account?.id || form.value.platform !== 'claude') {
+    nurtureStatus.value = null
+    return
+  }
+  try {
+    const response = await httpApis.getClaudeAccountNurtureStatusApi(props.account.id)
+    nurtureStatus.value = response.data || null
+  } catch (error) {
+    console.error(error)
+  }
+}
+
+const handleEnableNurture = async () => {
+  if (!props.account?.id) return
+  await httpApis.enableClaudeAccountNurtureApi(props.account.id)
+  await loadNurtureStatus()
+  showToast('养号护栏已开启', 'success')
+}
+
+const handleDisableNurture = async () => {
+  if (!props.account?.id) return
+  await httpApis.disableClaudeAccountNurtureApi(props.account.id)
+  await loadNurtureStatus()
+  showToast('养号护栏已关闭', 'success')
+}
+
+const handleGraduateNurture = async () => {
+  if (!props.account?.id) return
+  await httpApis.graduateClaudeAccountNurtureApi(props.account.id)
+  await loadNurtureStatus()
+  showToast('账户已进入常驻护栏', 'success')
+}
+
+const handleResetNurture = async () => {
+  if (!props.account?.id) return
+  await httpApis.resetClaudeAccountNurtureApi(props.account.id)
+  await loadNurtureStatus()
+  showToast('养号进度已重置为 Day1', 'success')
+}
 
 const buildClaudeTempUnavailablePolicyPayload = () => ({
   disableTempUnavailable: !!form.value.disableTempUnavailable,
@@ -6721,6 +6834,9 @@ onMounted(() => {
   // 如果是编辑模式且是Claude Console账户，加载使用情况
   if (isEdit.value && props.account?.platform === 'claude-console') {
     loadAccountUsage()
+  }
+  if (isEdit.value && props.account?.platform === 'claude') {
+    loadNurtureStatus()
   }
 })
 
