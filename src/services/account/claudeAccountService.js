@@ -229,6 +229,24 @@ class ClaudeAccountService {
       }
     }
 
+    try {
+      const claudeAccountNurtureService = require('./claudeAccountNurtureService')
+      const accountNurtureConfigService = require('../accountNurtureConfigService')
+      const nurtureConfig = await accountNurtureConfigService.getConfig()
+      const savedAccount = await redis.getClaudeAccount(accountId)
+      const tier = claudeAccountNurtureService.getNurtureTier(savedAccount)
+      const shouldEnable =
+        nurtureConfig.enabled &&
+        tier &&
+        ((tier === 'pro' && nurtureConfig.defaultEnabledForNewPro) ||
+          (tier === 'max' && nurtureConfig.defaultEnabledForNewMax))
+      if (shouldEnable) {
+        await claudeAccountNurtureService.initializeForAccount(accountId, tier, true)
+      }
+    } catch (nurtureError) {
+      logger.warn(`Failed to initialize nurture fields for account ${accountId}: ${nurtureError.message}`)
+    }
+
     return {
       id: accountId,
       name,
@@ -657,7 +675,14 @@ class ClaudeAccountService {
             tempUnavailable503TtlSeconds:
               normalizedTempUnavailablePolicy.tempUnavailable503TtlSeconds,
             tempUnavailable5xxTtlSeconds:
-              normalizedTempUnavailablePolicy.tempUnavailable5xxTtlSeconds
+              normalizedTempUnavailablePolicy.tempUnavailable5xxTtlSeconds,
+            nurtureEnabled: account.nurtureEnabled === 'true',
+            nurturePhase: account.nurturePhase || null,
+            nurtureTier: account.nurtureTier || null,
+            nurtureDayIndex: parseInt(account.nurtureDayIndex || '0', 10) || null,
+            nurtureStartedAt: account.nurtureStartedAt || null,
+            nurtureGraduatedAt: account.nurtureGraduatedAt || null,
+            nurtureLastBlockReason: account.nurtureLastBlockReason || null
           }
         })
       )

@@ -7,6 +7,7 @@ const express = require('express')
 const router = express.Router()
 
 const claudeAccountService = require('../../services/account/claudeAccountService')
+const claudeAccountNurtureService = require('../../services/account/claudeAccountNurtureService')
 const claudeRelayService = require('../../services/relay/claudeRelayService')
 const accountGroupService = require('../../services/accountGroupService')
 const accountTestSchedulerService = require('../../services/accountTestSchedulerService')
@@ -1182,6 +1183,79 @@ router.post('/claude-accounts/batch-test-history', authenticateAdmin, async (req
       error: 'Failed to get batch test history',
       message: error.message
     })
+  }
+})
+
+router.get('/claude-accounts/:id/nurture-status', authenticateAdmin, async (req, res) => {
+  try {
+    const status = await claudeAccountNurtureService.getStatus(req.params.id)
+    if (!status) {
+      return res.status(404).json({ error: 'Account not found' })
+    }
+    return res.json({ success: true, data: status })
+  } catch (error) {
+    logger.error('Failed to get nurture status:', error)
+    return res.status(500).json({ error: 'Failed to get nurture status', message: error.message })
+  }
+})
+
+router.post('/claude-accounts/:id/nurture/enable', authenticateAdmin, async (req, res) => {
+  try {
+    const account = await redis.getClaudeAccount(req.params.id)
+    if (!account) {
+      return res.status(404).json({ error: 'Account not found' })
+    }
+    const tier = claudeAccountNurtureService.getNurtureTier(account)
+    if (!tier) {
+      return res.status(400).json({ error: 'Only Claude Pro/Max accounts support nurture guard' })
+    }
+    await claudeAccountNurtureService.initializeForAccount(req.params.id, tier, true)
+    const status = await claudeAccountNurtureService.getStatus(req.params.id)
+    return res.json({ success: true, data: status })
+  } catch (error) {
+    logger.error('Failed to enable nurture:', error)
+    return res.status(500).json({ error: 'Failed to enable nurture', message: error.message })
+  }
+})
+
+router.post('/claude-accounts/:id/nurture/disable', authenticateAdmin, async (req, res) => {
+  try {
+    const account = await claudeAccountNurtureService.disableNurture(req.params.id)
+    if (!account) {
+      return res.status(404).json({ error: 'Account not found' })
+    }
+    return res.json({ success: true, message: 'Nurture guard disabled' })
+  } catch (error) {
+    logger.error('Failed to disable nurture:', error)
+    return res.status(500).json({ error: 'Failed to disable nurture', message: error.message })
+  }
+})
+
+router.post('/claude-accounts/:id/nurture/graduate', authenticateAdmin, async (req, res) => {
+  try {
+    const account = await claudeAccountNurtureService.advanceToSteady(req.params.id)
+    if (!account) {
+      return res.status(404).json({ error: 'Account not found' })
+    }
+    const status = await claudeAccountNurtureService.getStatus(req.params.id)
+    return res.json({ success: true, data: status })
+  } catch (error) {
+    logger.error('Failed to graduate nurture account:', error)
+    return res.status(500).json({ error: 'Failed to graduate nurture account', message: error.message })
+  }
+})
+
+router.post('/claude-accounts/:id/nurture/reset', authenticateAdmin, async (req, res) => {
+  try {
+    const account = await claudeAccountNurtureService.resetToDayOne(req.params.id)
+    if (!account) {
+      return res.status(404).json({ error: 'Account not found' })
+    }
+    const status = await claudeAccountNurtureService.getStatus(req.params.id)
+    return res.json({ success: true, data: status })
+  } catch (error) {
+    logger.error('Failed to reset nurture account:', error)
+    return res.status(500).json({ error: 'Failed to reset nurture account', message: error.message })
   }
 })
 
