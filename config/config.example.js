@@ -43,6 +43,8 @@ const config = {
   // 🎯 Claude API配置
   claude: {
     apiUrl: process.env.CLAUDE_API_URL || 'https://api.anthropic.com/v1/messages',
+    oauthTokenUrl:
+      process.env.CLAUDE_OAUTH_TOKEN_URL || 'https://platform.claude.com/v1/oauth/token',
     apiVersion: process.env.CLAUDE_API_VERSION || '2023-06-01',
     betaHeader:
       process.env.CLAUDE_BETA_HEADER ||
@@ -229,6 +231,9 @@ const config = {
     maxExpiryDays: parseInt(process.env.QUOTA_CARD_MAX_EXPIRY_DAYS) || 90, // 最大有效期距今天数
     maxTotalCostLimit: parseFloat(process.env.QUOTA_CARD_MAX_TOTAL_COST_LIMIT) || 1000 // 最大总额度（美元）
   },
+
+  // 🌱 Claude Pro/Max 被动养号护栏（运行时以 Redis account_nurture_config 为准，此处为默认值）
+  accountNurture: require('../src/utils/accountNurtureDefaults').cloneDefaultConfig(),
 
   // ⏱️ 上游错误自动暂停配置
   // 说明：此处是全局默认值。Claude 官方 OAuth 账号可在后台做账号级 503/5xx 覆盖，

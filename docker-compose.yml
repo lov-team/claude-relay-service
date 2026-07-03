@@ -43,6 +43,7 @@ services:
       
       # 🎯 Claude API 配置
       - CLAUDE_API_URL=${CLAUDE_API_URL:-https://api.anthropic.com/v1/messages}
+      - CLAUDE_OAUTH_TOKEN_URL=${CLAUDE_OAUTH_TOKEN_URL:-https://platform.claude.com/v1/oauth/token}
       - CLAUDE_API_VERSION=${CLAUDE_API_VERSION:-2023-06-01}
       - CLAUDE_BETA_HEADER=${CLAUDE_BETA_HEADER:-claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14}
       
@@ -61,6 +62,7 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - LOG_MAX_SIZE=${LOG_MAX_SIZE:-10m}
       - LOG_MAX_FILES=${LOG_MAX_FILES:-5}
+      - ANTHROPIC_CACHE_DEBUG=${ANTHROPIC_CACHE_DEBUG:-false}
       
       # 🔧 系统配置
       - CLEANUP_INTERVAL=${CLEANUP_INTERVAL:-3600000}

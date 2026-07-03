@@ -12,6 +12,7 @@ const {
   logRefreshSuccess,
   logRefreshError,
   logTokenUsage,
+  sanitizeRefreshError,
   logRefreshSkipped
 } = require('../../utils/tokenRefreshLogger')
 const tokenRefreshService = require('../tokenRefreshService')
@@ -41,7 +42,7 @@ function isProAccount(info) {
 
 class ClaudeAccountService {
   constructor() {
-    this.claudeApiUrl = 'https://console.anthropic.com/v1/oauth/token'
+    this.claudeApiUrl = config.claude?.oauthTokenUrl || 'https://platform.claude.com/v1/oauth/token'
     this.claudeOauthClientId = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
     let maxWarnings = parseInt(process.env.CLAUDE_5H_WARNING_MAX_NOTIFICATIONS || '', 10)
 
@@ -228,6 +229,26 @@ class ClaudeAccountService {
       }
     }
 
+    try {
+      const claudeAccountNurtureService = require('./claudeAccountNurtureService')
+      const accountNurtureConfigService = require('../accountNurtureConfigService')
+      const nurtureConfig = await accountNurtureConfigService.getConfig()
+      const savedAccount = await redis.getClaudeAccount(accountId)
+      const tier = claudeAccountNurtureService.getNurtureTier(savedAccount)
+      const shouldEnable =
+        nurtureConfig.enabled &&
+        tier &&
+        ((tier === 'pro' && nurtureConfig.defaultEnabledForNewPro) ||
+          (tier === 'max' && nurtureConfig.defaultEnabledForNewMax))
+      if (shouldEnable) {
+        await claudeAccountNurtureService.initializeForAccount(accountId, tier, true)
+      }
+    } catch (nurtureError) {
+      logger.warn(
+        `Failed to initialize nurture fields for account ${accountId}: ${nurtureError.message}`
+      )
+    }
+
     return {
       id: accountId,
       name,
@@ -406,7 +427,7 @@ class ClaudeAccountService {
         })
 
         logger.success(
-          `🔄 Refreshed token for account: ${accountData.name} (${accountId}) - Access Token: ${maskToken(access_token)}`
+          `🔄 Refreshed token for account: ${accountData.name} (${accountId}) - Access Token: ${maskToken(access_token, 20)}`
         )
 
         return {
@@ -458,7 +479,10 @@ class ClaudeAccountService {
         }
       }
 
-      logger.error(`❌ Failed to refresh token for account ${accountId}:`, error)
+      logger.error(
+        `❌ Failed to refresh token for account ${accountId}:`,
+        sanitizeRefreshError(error)
+      )
 
       throw error
     } finally {
@@ -656,7 +680,14 @@ class ClaudeAccountService {
             tempUnavailable503TtlSeconds:
               normalizedTempUnavailablePolicy.tempUnavailable503TtlSeconds,
             tempUnavailable5xxTtlSeconds:
-              normalizedTempUnavailablePolicy.tempUnavailable5xxTtlSeconds
+              normalizedTempUnavailablePolicy.tempUnavailable5xxTtlSeconds,
+            nurtureEnabled: account.nurtureEnabled === 'true',
+            nurturePhase: account.nurturePhase || null,
+            nurtureTier: account.nurtureTier || null,
+            nurtureDayIndex: parseInt(account.nurtureDayIndex || '0', 10) || null,
+            nurtureStartedAt: account.nurtureStartedAt || null,
+            nurtureGraduatedAt: account.nurtureGraduatedAt || null,
+            nurtureLastBlockReason: account.nurtureLastBlockReason || null
           }
         })
       )

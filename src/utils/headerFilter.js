@@ -70,6 +70,8 @@ function filterForClaude(headers) {
     'anthropic-dangerous-direct-browser-access',
     'anthropic-version',
     'x-app',
+    'x-claude-code-session-id',
+    'x-client-request-id',
     'anthropic-beta',
     'accept-language',
     'sec-fetch-mode',

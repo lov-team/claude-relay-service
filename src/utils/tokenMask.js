@@ -71,6 +71,62 @@ function maskTokensInObject(
   return masked
 }
 
+const SENSITIVE_KEY_PATTERN =
+  /^(access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?token|authtoken|authorization|api[_-]?key|x-api-key|password|secret|client[_-]?secret|credentials|cookie|set-cookie)$/i
+
+function maskSensitiveString(value) {
+  if (typeof value !== 'string') {
+    return value
+  }
+
+  return value
+    .replace(
+      /((?:"?(?:access|refresh|id|session|auth)[_-]?token"?\s*[:=]\s*"?))([^"',\s}\\]+)/gi,
+      (_, prefix, token) => `${prefix}${maskToken(token, 20)}`
+    )
+    .replace(
+      /(Bearer\s+)([A-Za-z0-9._~+/-]+)/gi,
+      (_, prefix, token) => `${prefix}${maskToken(token, 20)}`
+    )
+    .replace(/(sk-ant-[A-Za-z0-9._-]+)/g, (token) => maskToken(token, 20))
+}
+
+function maskTokensDeep(value, seen = new WeakSet(), key = '') {
+  if (value === null || value === undefined) {
+    return value
+  }
+
+  if (SENSITIVE_KEY_PATTERN.test(key)) {
+    if (typeof value === 'string') {
+      return maskToken(value, 20)
+    }
+    return '[REDACTED]'
+  }
+
+  if (typeof value === 'string') {
+    return maskSensitiveString(value)
+  }
+
+  if (typeof value !== 'object') {
+    return value
+  }
+
+  if (seen.has(value)) {
+    return '[Circular Reference]'
+  }
+  seen.add(value)
+
+  if (Array.isArray(value)) {
+    return value.map((item) => maskTokensDeep(item, seen))
+  }
+
+  const masked = {}
+  for (const [childKey, childValue] of Object.entries(value)) {
+    masked[childKey] = maskTokensDeep(childValue, seen, childKey)
+  }
+  return masked
+}
+
 /**
  * 格式化 token 刷新日志
  * @param {string} accountId - 账户 ID
@@ -92,8 +148,8 @@ function formatTokenRefreshLog(accountId, accountName, tokens, status, message =
 
   if (tokens) {
     log.tokens = {
-      accessToken: tokens.accessToken ? maskToken(tokens.accessToken) : '[NOT_PROVIDED]',
-      refreshToken: tokens.refreshToken ? maskToken(tokens.refreshToken) : '[NOT_PROVIDED]',
+      accessToken: tokens.accessToken ? maskToken(tokens.accessToken, 20) : '[NOT_PROVIDED]',
+      refreshToken: tokens.refreshToken ? maskToken(tokens.refreshToken, 20) : '[NOT_PROVIDED]',
       expiresAt: tokens.expiresAt || '[NOT_PROVIDED]'
     }
   }
@@ -104,5 +160,7 @@ function formatTokenRefreshLog(accountId, accountName, tokens, status, message =
 module.exports = {
   maskToken,
   maskTokensInObject,
+  maskSensitiveString,
+  maskTokensDeep,
   formatTokenRefreshLog
 }

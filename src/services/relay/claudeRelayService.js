@@ -1,9 +1,11 @@
 const https = require('https')
 const zlib = require('zlib')
 const path = require('path')
+const crypto = require('crypto')
 const ProxyHelper = require('../../utils/proxyHelper')
 const { filterForClaude } = require('../../utils/headerFilter')
 const claudeAccountService = require('../account/claudeAccountService')
+const claudeAccountNurtureService = require('../account/claudeAccountNurtureService')
 const unifiedClaudeScheduler = require('../scheduler/unifiedClaudeScheduler')
 const sessionHelper = require('../../utils/sessionHelper')
 const logger = require('../../utils/logger')
@@ -23,6 +25,12 @@ const {
   getHttpsAgentForNonStream,
   getPricingData
 } = require('../../utils/performanceOptimizer')
+
+const EXTENDED_CACHE_TTL_BETA = 'extended-cache-ttl-2025-04-11'
+const PROMPT_CACHING_SCOPE_BETA = 'prompt-caching-scope-2026-01-05'
+const CONTEXT_MANAGEMENT_BETA = 'context-management-2025-06-27'
+const VALID_CACHE_CONTROL_TTLS = new Set(['5m', '1h'])
+const CACHE_DEBUG_ENV = 'ANTHROPIC_CACHE_DEBUG'
 
 // structuredClone polyfill for Node < 17
 const safeClone =
@@ -44,7 +52,7 @@ class ClaudeRelayService {
   }
 
   // 🔧 根据模型ID和客户端传递的 anthropic-beta 获取最终的 header
-  _getBetaHeader(modelId, clientBetaHeader) {
+  _getBetaHeader(modelId, clientBetaHeader, requestPayload = null) {
     const OAUTH_BETA = 'oauth-2025-04-20'
     const CLAUDE_CODE_BETA = 'claude-code-20250219'
     const INTERLEAVED_THINKING_BETA = 'interleaved-thinking-2025-05-14'
@@ -75,6 +83,21 @@ class ClaudeRelayService {
         .forEach(addBeta)
     }
 
+    if (this._hasExtendedCacheTtl(requestPayload)) {
+      addBeta(EXTENDED_CACHE_TTL_BETA)
+    }
+
+    if (this._hasCacheControl(requestPayload)) {
+      addBeta(PROMPT_CACHING_SCOPE_BETA)
+    }
+
+    if (
+      requestPayload?.context_management &&
+      typeof requestPayload.context_management === 'object'
+    ) {
+      addBeta(CONTEXT_MANAGEMENT_BETA)
+    }
+
     return betaList.join(',')
   }
 
@@ -92,6 +115,50 @@ class ClaudeRelayService {
     }
     const formattedReset = formatDateWithTimezone(resetTime)
     return `此专属账号的Opus模型已达到周使用限制，将于 ${formattedReset} 自动恢复，请尝试切换其他模型后再试。`
+  }
+
+  _buildNurtureLimitedResponse(accountId, reason) {
+    const retryAfterSeconds = this._calcNurtureRetryAfterSeconds()
+    logger.warn(
+      `🌱 Account ${accountId} blocked by nurture guard (${reason || 'unknown'}), returning 503`
+    )
+    return {
+      statusCode: 503,
+      headers: {
+        'Content-Type': 'application/json',
+        'retry-after': String(retryAfterSeconds)
+      },
+      body: JSON.stringify({
+        error: 'nurture_limit_reached',
+        message: '账号养号护栏已达今日或当前窗口上限，请稍后重试。',
+        reason: reason || null
+      }),
+      accountId
+    }
+  }
+
+  _calcNurtureRetryAfterSeconds() {
+    const now = new Date()
+    const tomorrow = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0)
+    )
+    return Math.max(60, Math.ceil((tomorrow.getTime() - now.getTime()) / 1000))
+  }
+
+  async _enforceNurtureBeforeRelay(accountId, accountType) {
+    if (accountType !== 'claude-official') {
+      return null
+    }
+
+    const evaluation = await claudeAccountNurtureService.evaluate(accountId, {
+      incrementRpm: true
+    })
+    if (evaluation.blocked) {
+      await claudeAccountNurtureService.recordBlocked(accountId, evaluation)
+      return this._buildNurtureLimitedResponse(accountId, evaluation.reason)
+    }
+
+    return null
   }
 
   // 🧾 提取错误消息文本
@@ -162,8 +229,79 @@ class ClaudeRelayService {
     return typeof userAgent === 'string' && /^claude-cli\/[^\s]+\s+\(/i.test(userAgent)
   }
 
+  _extractClaudeCodeUserAgentFromBillingHeader(requestPayload) {
+    const system = Array.isArray(requestPayload?.system) ? requestPayload.system : []
+    const billingItem = system.find(
+      (item) =>
+        item &&
+        item.type === 'text' &&
+        typeof item.text === 'string' &&
+        item.text.trim().startsWith('x-anthropic-billing-header:')
+    )
+
+    if (!billingItem) {
+      return null
+    }
+
+    const versionMatch = billingItem.text.match(/\bcc_version=(\d+\.\d+\.\d+)/)
+    if (!versionMatch) {
+      return null
+    }
+
+    const entrypointMatch = billingItem.text.match(/\bcc_entrypoint=([^;]+)/)
+    const entrypoint =
+      entrypointMatch && entrypointMatch[1].trim() ? entrypointMatch[1].trim() : 'cli'
+    return `claude-cli/${versionMatch[1]} (external, ${entrypoint})`
+  }
+
+  _resolveClaudeUserAgent(headers, requestPayload, isRealClaudeCode, unifiedUA) {
+    if (unifiedUA) {
+      return unifiedUA
+    }
+
+    const userAgent = headers?.['user-agent'] || headers?.['User-Agent']
+    if (typeof userAgent === 'string' && /^claude-cli\/[^\s]+\s+\(/i.test(userAgent)) {
+      return userAgent
+    }
+
+    if (isRealClaudeCode) {
+      return (
+        this._extractClaudeCodeUserAgentFromBillingHeader(requestPayload) ||
+        'claude-cli/1.0.119 (external, cli)'
+      )
+    }
+
+    return userAgent || 'claude-cli/1.0.119 (external, cli)'
+  }
+
+  _hasClaudeCodeIdentityHeaders(clientHeaders) {
+    const xApp = this._getHeaderValueCaseInsensitive(clientHeaders, 'x-app')
+    const anthropicBeta = this._getHeaderValueCaseInsensitive(clientHeaders, 'anthropic-beta')
+    const claudeCodeSessionId = this._getHeaderValueCaseInsensitive(
+      clientHeaders,
+      'x-claude-code-session-id'
+    )
+
+    if (
+      typeof xApp !== 'string' ||
+      !xApp.trim() ||
+      typeof anthropicBeta !== 'string' ||
+      !anthropicBeta.toLowerCase().includes('claude-code') ||
+      typeof claudeCodeSessionId !== 'string' ||
+      !claudeCodeSessionId.trim()
+    ) {
+      return false
+    }
+
+    return true
+  }
+
   _isActualClaudeCodeRequest(requestBody, clientHeaders) {
-    return this.isRealClaudeCodeRequest(requestBody) && this._isClaudeCodeUserAgent(clientHeaders)
+    if (this.isRealClaudeCodeRequest(requestBody)) {
+      return true
+    }
+
+    return this._hasClaudeCodeIdentityHeaders(clientHeaders)
   }
 
   _getHeaderValueCaseInsensitive(headers, key) {
@@ -502,6 +640,9 @@ class ClaudeRelayService {
             accountId: error.accountId
           }
         }
+        if (error.code === 'CLAUDE_NURTURE_LIMITED') {
+          return this._buildNurtureLimitedResponse(error.accountId, error.nurtureReason)
+        }
         throw error
       }
       const { accountId } = accountSelection
@@ -511,6 +652,11 @@ class ClaudeRelayService {
       logger.info(
         `📤 Processing API request for key: ${apiKeyData.name || apiKeyData.id}, account: ${accountId} (${accountType})${sessionHash ? `, session: ${sessionHash}` : ''}`
       )
+
+      const nurtureBlockedResponse = await this._enforceNurtureBeforeRelay(accountId, accountType)
+      if (nurtureBlockedResponse) {
+        return nurtureBlockedResponse
+      }
 
       // 📬 用户消息队列处理：如果是用户消息请求，需要获取队列锁
       if (userMessageQueueService.isUserMessageRequest(requestBody)) {
@@ -956,6 +1102,8 @@ class ClaudeRelayService {
           await claudeAccountService.updateSessionWindowStatus(accountId, sessionWindowStatus)
         }
 
+        await claudeAccountNurtureService.recordRequestSuccess(accountId)
+
         // 请求成功，清除401和500错误计数
         await this.clearUnauthorizedErrors(accountId)
         await claudeAccountService.clearInternalErrors(accountId)
@@ -1147,8 +1295,8 @@ class ClaudeRelayService {
     // 验证并限制max_tokens参数
     this._validateAndLimitMaxTokens(processedBody)
 
-    // 移除cache_control中的ttl字段
-    this._stripTtlFromCacheControl(processedBody)
+    // 保留 Anthropic 支持的 cache_control.ttl（如 1h 扩展缓存），清理非法值
+    this._normalizeCacheControlTtl(processedBody)
 
     // 判断是否是真实的 Claude Code 请求
     // 优先使用调用方传入的值（基于 UA + system prompt 综合判断），
@@ -1207,7 +1355,6 @@ class ClaudeRelayService {
         processedBody.metadata = {}
       }
       if (!processedBody.metadata.user_id || typeof processedBody.metadata.user_id !== 'string') {
-        const crypto = require('crypto')
         const deviceId = crypto.createHash('sha256').update('relay-generated-device').digest('hex')
         const sessionId = crypto.randomUUID()
         processedBody.metadata.user_id = JSON.stringify({
@@ -1369,8 +1516,7 @@ class ClaudeRelayService {
     }
   }
 
-  // 🧹 移除TTL字段
-  _stripTtlFromCacheControl(body) {
+  _forEachCacheControl(body, visitor) {
     if (!body || typeof body !== 'object') {
       return
     }
@@ -1382,10 +1528,7 @@ class ClaudeRelayService {
 
       contentArray.forEach((item) => {
         if (item && typeof item === 'object' && item.cache_control) {
-          if (item.cache_control.ttl) {
-            delete item.cache_control.ttl
-            logger.debug('🧹 Removed ttl from cache_control')
-          }
+          visitor(item.cache_control)
         }
       })
     }
@@ -1401,6 +1544,314 @@ class ClaudeRelayService {
         }
       })
     }
+  }
+
+  // 🧹 规范化 cache_control.ttl，保留合法 TTL 以支持 Anthropic 扩展缓存
+  _normalizeCacheControlTtl(body) {
+    this._forEachCacheControl(body, (cacheControl) => {
+      if (!cacheControl || cacheControl.ttl === undefined || cacheControl.ttl === null) {
+        return
+      }
+
+      const ttl = String(cacheControl.ttl).trim().toLowerCase()
+      if (VALID_CACHE_CONTROL_TTLS.has(ttl)) {
+        cacheControl.ttl = ttl
+        return
+      }
+
+      logger.debug(`🧹 Removed unsupported cache_control ttl: ${cacheControl.ttl}`)
+      delete cacheControl.ttl
+    })
+  }
+
+  _hasExtendedCacheTtl(body) {
+    let hasExtendedTtl = false
+
+    this._forEachCacheControl(body, (cacheControl) => {
+      if (
+        String(cacheControl?.ttl || '')
+          .trim()
+          .toLowerCase() === '1h'
+      ) {
+        hasExtendedTtl = true
+      }
+    })
+
+    return hasExtendedTtl
+  }
+
+  _hasCacheControl(body) {
+    let hasCacheControl = false
+
+    this._forEachCacheControl(body, () => {
+      hasCacheControl = true
+    })
+
+    return hasCacheControl
+  }
+
+  _applyClaudeCodeSessionHeaders(headers, requestPayload) {
+    const existingSessionId = this._getHeaderValueCaseInsensitive(
+      headers,
+      'x-claude-code-session-id'
+    )
+    if (existingSessionId) {
+      return
+    }
+
+    const sessionId = metadataUserIdHelper.extractSessionId(requestPayload?.metadata?.user_id)
+    if (!sessionId) {
+      return
+    }
+
+    headers['X-Claude-Code-Session-Id'] = sessionId
+  }
+
+  _isCacheDebugEnabled() {
+    const raw = process.env[CACHE_DEBUG_ENV]
+    if (!raw) {
+      return false
+    }
+    return raw === '1' || raw.toLowerCase() === 'true'
+  }
+
+  _hashCacheDebugValue(value) {
+    let serialized = ''
+    try {
+      serialized = typeof value === 'string' ? value : JSON.stringify(value)
+    } catch (error) {
+      serialized = '[unserializable]'
+    }
+    return crypto
+      .createHash('sha256')
+      .update(serialized || '')
+      .digest('hex')
+      .slice(0, 16)
+  }
+
+  _cloneCacheDebugValue(value) {
+    if (value === undefined || value === null) {
+      return value
+    }
+    return safeClone(value)
+  }
+
+  _buildCacheDebugSystemPrefix(body, systemIndex) {
+    return {
+      model: body?.model || null,
+      tools: this._cloneCacheDebugValue(body?.tools || []),
+      system: Array.isArray(body?.system)
+        ? this._cloneCacheDebugValue(body.system.slice(0, systemIndex + 1))
+        : []
+    }
+  }
+
+  _buildCacheDebugMessagePrefix(body, messageIndex, contentIndex) {
+    const prefix = {
+      model: body?.model || null,
+      tools: this._cloneCacheDebugValue(body?.tools || []),
+      system: this._cloneCacheDebugValue(body?.system || []),
+      messages: []
+    }
+
+    if (!Array.isArray(body?.messages)) {
+      return prefix
+    }
+
+    for (let index = 0; index <= messageIndex; index += 1) {
+      const message = body.messages[index]
+      if (!message || typeof message !== 'object') {
+        prefix.messages.push(this._cloneCacheDebugValue(message))
+        continue
+      }
+
+      const clonedMessage = this._cloneCacheDebugValue(message)
+      if (index === messageIndex && Array.isArray(clonedMessage.content)) {
+        clonedMessage.content = clonedMessage.content.slice(0, contentIndex + 1)
+      }
+      prefix.messages.push(clonedMessage)
+    }
+
+    return prefix
+  }
+
+  _collectCacheDebugBreakpoints(body) {
+    const breakpoints = []
+
+    if (Array.isArray(body?.system)) {
+      body.system.forEach((item, index) => {
+        if (!item?.cache_control) {
+          return
+        }
+        const prefix = this._buildCacheDebugSystemPrefix(body, index)
+        const serialized = JSON.stringify(prefix)
+        breakpoints.push({
+          path: `system[${index}]`,
+          type: item.type || null,
+          ttl: item.cache_control.ttl || null,
+          prefixHash: this._hashCacheDebugValue(serialized),
+          prefixBytes: Buffer.byteLength(serialized, 'utf8')
+        })
+      })
+    }
+
+    if (Array.isArray(body?.messages)) {
+      body.messages.forEach((message, messageIndex) => {
+        if (!Array.isArray(message?.content)) {
+          return
+        }
+        message.content.forEach((item, contentIndex) => {
+          if (!item?.cache_control) {
+            return
+          }
+          const prefix = this._buildCacheDebugMessagePrefix(body, messageIndex, contentIndex)
+          const serialized = JSON.stringify(prefix)
+          breakpoints.push({
+            path: `messages[${messageIndex}].content[${contentIndex}]`,
+            type: item.type || null,
+            ttl: item.cache_control.ttl || null,
+            prefixHash: this._hashCacheDebugValue(serialized),
+            prefixBytes: Buffer.byteLength(serialized, 'utf8')
+          })
+        })
+      })
+    }
+
+    return breakpoints
+  }
+
+  _logCacheDebugSummary(requestPayload, headers, context = {}) {
+    if (!this._isCacheDebugEnabled() || !this._hasCacheControl(requestPayload)) {
+      return
+    }
+
+    try {
+      const betaHeader = this._getHeaderValueCaseInsensitive(headers, 'anthropic-beta') || ''
+      const sessionHeader =
+        this._getHeaderValueCaseInsensitive(headers, 'x-claude-code-session-id') || ''
+      const clientRequestId =
+        this._getHeaderValueCaseInsensitive(headers, 'x-client-request-id') || ''
+      const bodyString = JSON.stringify(requestPayload)
+      logger.info(
+        `🧩 Claude cache debug summary: ${JSON.stringify({
+          accountId: context.accountId || null,
+          accountType: context.accountType || null,
+          stream: context.isStream === true,
+          model: requestPayload?.model || null,
+          isRealClaudeCode: context.isRealClaudeCode === true,
+          bodyHash: this._hashCacheDebugValue(bodyString),
+          bodyBytes: Buffer.byteLength(bodyString, 'utf8'),
+          headers: {
+            beta: betaHeader,
+            hasPromptCachingScope: betaHeader.includes(PROMPT_CACHING_SCOPE_BETA),
+            hasExtendedCacheTtl: betaHeader.includes(EXTENDED_CACHE_TTL_BETA),
+            hasContextManagement: betaHeader.includes(CONTEXT_MANAGEMENT_BETA),
+            xApp: this._getHeaderValueCaseInsensitive(headers, 'x-app') || null,
+            hasClaudeCodeSessionId: Boolean(sessionHeader),
+            claudeCodeSessionIdHash: sessionHeader
+              ? this._hashCacheDebugValue(sessionHeader)
+              : null,
+            hasClientRequestId: Boolean(clientRequestId),
+            clientRequestIdHash: clientRequestId ? this._hashCacheDebugValue(clientRequestId) : null
+          },
+          breakpoints: this._collectCacheDebugBreakpoints(requestPayload)
+        })}`
+      )
+    } catch (error) {
+      logger.warn('⚠️ Failed to build Claude cache debug summary:', error.message)
+    }
+  }
+
+  _toTokenNumber(value) {
+    if (value === undefined || value === null || value === '') {
+      return undefined
+    }
+
+    const numberValue = Number(value)
+    if (!Number.isFinite(numberValue) || numberValue < 0) {
+      return undefined
+    }
+
+    return numberValue
+  }
+
+  _firstTokenValue(...values) {
+    for (const value of values) {
+      const tokenValue = this._toTokenNumber(value)
+      if (tokenValue !== undefined) {
+        return tokenValue
+      }
+    }
+
+    return undefined
+  }
+
+  _mergeClaudeUsageData(target, usage, options = {}) {
+    if (!target || !usage || typeof usage !== 'object') {
+      return false
+    }
+
+    const { includeOutput = true } = options
+    const inputDetails = usage.input_tokens_details || {}
+    let updated = false
+
+    const inputTokens = this._firstTokenValue(usage.input_tokens, usage.inputTokens)
+    if (inputTokens !== undefined) {
+      target.input_tokens = inputTokens
+      updated = true
+    }
+
+    if (includeOutput) {
+      const outputTokens = this._firstTokenValue(usage.output_tokens, usage.outputTokens)
+      if (outputTokens !== undefined) {
+        target.output_tokens = outputTokens
+        updated = true
+      }
+    }
+
+    const cacheCreationTokens = this._firstTokenValue(
+      usage.cache_creation_input_tokens,
+      usage.cacheCreateTokens,
+      usage.cacheCreationInputTokens,
+      inputDetails.cache_creation_input_tokens,
+      inputDetails.cacheCreateTokens,
+      inputDetails.cacheCreationInputTokens
+    )
+    if (cacheCreationTokens !== undefined) {
+      target.cache_creation_input_tokens = cacheCreationTokens
+      updated = true
+    }
+
+    const cacheReadTokens = this._firstTokenValue(
+      usage.cache_read_input_tokens,
+      usage.cacheReadTokens,
+      usage.cacheReadInputTokens,
+      inputDetails.cache_read_input_tokens,
+      inputDetails.cacheReadTokens,
+      inputDetails.cacheReadInputTokens,
+      inputDetails.cached_tokens
+    )
+    if (cacheReadTokens !== undefined) {
+      target.cache_read_input_tokens = cacheReadTokens
+      updated = true
+    }
+
+    if (usage.cache_creation && typeof usage.cache_creation === 'object') {
+      target.cache_creation = {
+        ephemeral_5m_input_tokens:
+          this._toTokenNumber(usage.cache_creation.ephemeral_5m_input_tokens) || 0,
+        ephemeral_1h_input_tokens:
+          this._toTokenNumber(usage.cache_creation.ephemeral_1h_input_tokens) || 0
+      }
+      updated = true
+    }
+
+    if (typeof usage.speed === 'string' && usage.speed.trim()) {
+      target.speed = usage.speed.trim().toLowerCase()
+      updated = true
+    }
+
+    return updated
   }
 
   // ⚖️ 限制带缓存控制的内容数量
@@ -1609,10 +2060,17 @@ class ClaudeRelayService {
 
     // 强制 identity 编码：finalHeaders 可能携带客户端或 Redis 缓存中的 accept-encoding（如 zstd），
     // 必须在 spread 后覆盖回 identity，因为 https.request 的手动解压只支持 gzip/deflate
+    headers.connection = 'keep-alive'
+    headers['content-type'] = 'application/json'
     headers['accept-encoding'] = 'identity'
+    headers['anthropic-version'] = this.apiVersion
 
-    // 使用统一 User-Agent 或客户端提供的，最后使用默认值
-    const userAgent = unifiedUA || headers['user-agent'] || 'claude-cli/1.0.119 (external, cli)'
+    const userAgent = this._resolveClaudeUserAgent(
+      headers,
+      requestPayload,
+      isRealClaudeCode,
+      unifiedUA
+    )
     const acceptHeader = headers['accept'] || 'application/json'
     delete headers['user-agent']
     delete headers['accept']
@@ -1624,7 +2082,14 @@ class ClaudeRelayService {
     // 根据模型和客户端传递的 anthropic-beta 动态设置 header
     const modelId = requestPayload?.model || body?.model
     const clientBetaHeader = this._getHeaderValueCaseInsensitive(clientHeaders, 'anthropic-beta')
-    headers['anthropic-beta'] = this._getBetaHeader(modelId, clientBetaHeader)
+    headers['anthropic-beta'] = this._getBetaHeader(modelId, clientBetaHeader, requestPayload)
+    this._applyClaudeCodeSessionHeaders(headers, requestPayload)
+    this._logCacheDebugSummary(requestPayload, headers, {
+      accountId,
+      accountType,
+      isStream,
+      isRealClaudeCode
+    })
     return {
       requestPayload,
       bodyString,
@@ -1873,11 +2338,39 @@ class ClaudeRelayService {
           responseStream.end()
           return
         }
+        if (error.code === 'CLAUDE_NURTURE_LIMITED') {
+          const nurtureResponse = this._buildNurtureLimitedResponse(
+            error.accountId,
+            error.nurtureReason
+          )
+          if (!responseStream.headersSent) {
+            responseStream.status(nurtureResponse.statusCode)
+            Object.entries(nurtureResponse.headers).forEach(([key, value]) => {
+              responseStream.setHeader(key, value)
+            })
+          }
+          responseStream.write(nurtureResponse.body)
+          responseStream.end()
+          return
+        }
         throw error
       }
       const { accountId } = accountSelection
       const { accountType } = accountSelection
       selectedAccountId = accountId
+
+      const nurtureBlockedResponse = await this._enforceNurtureBeforeRelay(accountId, accountType)
+      if (nurtureBlockedResponse) {
+        if (!responseStream.headersSent) {
+          responseStream.status(nurtureBlockedResponse.statusCode)
+          Object.entries(nurtureBlockedResponse.headers).forEach(([key, value]) => {
+            responseStream.setHeader(key, value)
+          })
+        }
+        responseStream.write(nurtureBlockedResponse.body)
+        responseStream.end()
+        return
+      }
 
       // 📬 用户消息队列处理：如果是用户消息请求，需要获取队列锁
       if (userMessageQueueService.isUserMessageRequest(requestBody)) {
@@ -2669,25 +3162,13 @@ class ClaudeRelayService {
                       currentUsageData = {}
                     }
 
-                    // message_start包含input tokens、cache tokens和模型信息
-                    currentUsageData.input_tokens = data.message.usage.input_tokens || 0
-                    currentUsageData.cache_creation_input_tokens =
-                      data.message.usage.cache_creation_input_tokens || 0
-                    currentUsageData.cache_read_input_tokens =
-                      data.message.usage.cache_read_input_tokens || 0
+                    // message_start通常包含input tokens、cache tokens和模型信息
+                    this._mergeClaudeUsageData(currentUsageData, data.message.usage, {
+                      includeOutput: false
+                    })
                     currentUsageData.model = data.message.model
 
-                    // 检查是否有详细的 cache_creation 对象
-                    if (
-                      data.message.usage.cache_creation &&
-                      typeof data.message.usage.cache_creation === 'object'
-                    ) {
-                      currentUsageData.cache_creation = {
-                        ephemeral_5m_input_tokens:
-                          data.message.usage.cache_creation.ephemeral_5m_input_tokens || 0,
-                        ephemeral_1h_input_tokens:
-                          data.message.usage.cache_creation.ephemeral_1h_input_tokens || 0
-                      }
+                    if (currentUsageData.cache_creation) {
                       logger.debug(
                         '📊 Collected detailed cache creation data:',
                         JSON.stringify(currentUsageData.cache_creation)
@@ -2700,16 +3181,13 @@ class ClaudeRelayService {
                     )
                   }
 
-                  // message_delta包含最终的output tokens
-                  if (
-                    data.type === 'message_delta' &&
-                    data.usage &&
-                    data.usage.output_tokens !== undefined
-                  ) {
-                    currentUsageData.output_tokens = data.usage.output_tokens || 0
+                  // message_delta通常包含output tokens，新格式也可能携带最终完整usage
+                  if (data.type === 'message_delta' && (data.usage || data.delta?.usage)) {
+                    const deltaUsage = data.usage || data.delta.usage
+                    this._mergeClaudeUsageData(currentUsageData, deltaUsage)
 
                     logger.debug(
-                      '📊 Collected output data from message_delta:',
+                      '📊 Collected usage data from message_delta:',
                       JSON.stringify(currentUsageData)
                     )
 
@@ -2923,6 +3401,8 @@ class ClaudeRelayService {
                 .catch(() => {})
             }
           } else if (res.statusCode === 200) {
+            await claudeAccountNurtureService.recordRequestSuccess(accountId)
+
             // 请求成功，清除401和500错误计数
             await this.clearUnauthorizedErrors(accountId)
             await claudeAccountService.clearInternalErrors(accountId)
