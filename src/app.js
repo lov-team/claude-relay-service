@@ -709,6 +709,16 @@ class Application {
       `🚨 Rate limit cleanup service started (checking every ${cleanupIntervalMinutes} minutes)`
     )
 
+    const accountVitalityMonitorEnabled = process.env.ACCOUNT_VITALITY_MONITOR_ENABLED !== 'false'
+    if (accountVitalityMonitorEnabled) {
+      const accountVitalityMonitorService = require('./services/accountVitalityMonitorService')
+      const vitalityIntervalMinutes =
+        parseInt(process.env.ACCOUNT_VITALITY_MONITOR_INTERVAL_MINUTES) || cleanupIntervalMinutes
+      accountVitalityMonitorService.start(vitalityIntervalMinutes)
+    } else {
+      logger.info('💓 Account vitality monitor disabled')
+    }
+
     // 🔢 启动并发计数自动清理任务（Phase 1 修复：解决并发泄漏问题）
     // 每分钟主动清理所有过期的并发项，不依赖请求触发
     setInterval(async () => {
@@ -863,6 +873,15 @@ class Application {
             logger.info('🚨 Rate limit cleanup service stopped')
           } catch (error) {
             logger.error('❌ Error stopping rate limit cleanup service:', error)
+          }
+
+          // 停止账号活力监视器
+          try {
+            const accountVitalityMonitorService = require('./services/accountVitalityMonitorService')
+            accountVitalityMonitorService.stop()
+            logger.info('💓 Account vitality monitor stopped')
+          } catch (error) {
+            logger.error('❌ Error stopping account vitality monitor:', error)
           }
 
           // 停止用户消息队列清理服务

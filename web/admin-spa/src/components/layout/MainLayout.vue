@@ -37,6 +37,7 @@ const activeTab = ref('dashboard')
 const tabRouteMap = computed(() => {
   const baseMap = {
     dashboard: '/dashboard',
+    accountVitality: '/account-vitality',
     apiKeys: '/api-keys',
     accounts: '/accounts',
     requestDetails: '/request-details',
@@ -66,6 +67,7 @@ const initActiveTab = () => {
     const routeName = route.name
     const nameToTabMap = {
       Dashboard: 'dashboard',
+      AccountVitality: 'accountVitality',
       ApiKeys: 'apiKeys',
       Accounts: 'accounts',
       RequestDetails: 'requestDetails',
@@ -96,6 +98,7 @@ watch(
       const routeName = route.name
       const nameToTabMap = {
         Dashboard: 'dashboard',
+        AccountVitality: 'accountVitality',
         ApiKeys: 'apiKeys',
         Accounts: 'accounts',
         RequestDetails: 'requestDetails',

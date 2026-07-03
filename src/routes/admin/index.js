@@ -30,6 +30,7 @@ const serviceRatesRoutes = require('./serviceRates')
 const quotaCardsRoutes = require('./quotaCards')
 const errorHistoryRoutes = require('./errorHistory')
 const requestDetailsRoutes = require('./requestDetails')
+const accountVitalityRoutes = require('./accountVitality')
 const accountNurtureConfigRoutes = require('./accountNurtureConfig')
 
 // 挂载所有子路由
@@ -52,6 +53,7 @@ router.use('/', serviceRatesRoutes)
 router.use('/', quotaCardsRoutes)
 router.use('/', errorHistoryRoutes)
 router.use('/', requestDetailsRoutes)
+router.use('/', accountVitalityRoutes)
 router.use('/', accountNurtureConfigRoutes)
 
 // 使用相对路径的模块（需要指定基础路径前缀）

@@ -14,6 +14,7 @@ class WebhookService {
       wechat_work: this.sendToWechatWork.bind(this),
       dingtalk: this.sendToDingTalk.bind(this),
       feishu: this.sendToFeishu.bind(this),
+      feishu_app: this.sendToFeishuApp.bind(this),
       slack: this.sendToSlack.bind(this),
       discord: this.sendToDiscord.bind(this),
       telegram: this.sendToTelegram.bind(this),
@@ -22,6 +23,7 @@ class WebhookService {
       smtp: this.sendToSMTP.bind(this)
     }
     this.timezone = appConfig.system.timezone || 'Asia/Shanghai'
+    this.feishuTenantTokenCache = new Map()
   }
 
   /**
@@ -145,25 +147,9 @@ class WebhookService {
    * 飞书webhook
    */
   async sendToFeishu(platform, type, data) {
-    const content = this.formatMessageForFeishu(type, data)
-
     const payload = {
       msg_type: 'interactive',
-      card: {
-        elements: [
-          {
-            tag: 'markdown',
-            content
-          }
-        ],
-        header: {
-          title: {
-            tag: 'plain_text',
-            content: this.getNotificationTitle(type)
-          },
-          template: this.getFeishuCardColor(type)
-        }
-      }
+      card: this.buildFeishuCard(type, data)
     }
 
     // 如果启用签名
@@ -175,6 +161,52 @@ class WebhookService {
     }
 
     await this.sendHttpRequest(platform.url, payload, platform.timeout || 10000)
+  }
+
+  /**
+   * 飞书自建应用机器人
+   */
+  async sendToFeishuApp(platform, type, data) {
+    const appId = platform.appId || platform.app_id
+    const appSecret = platform.appSecret || platform.app_secret
+    const receiveId = platform.receiveId || platform.chatId
+    const receiveIdType = platform.receiveIdType || 'chat_id'
+    const baseUrl = this.normalizeFeishuApiBase(platform.apiBaseUrl)
+
+    if (!appId) {
+      throw new Error('缺少飞书 App ID')
+    }
+    if (!appSecret) {
+      throw new Error('缺少飞书 App Secret')
+    }
+    if (!receiveId) {
+      throw new Error('缺少飞书 receiveId/chatId')
+    }
+
+    const tenantAccessToken = await this.getFeishuTenantAccessToken({
+      appId,
+      appSecret,
+      baseUrl,
+      timeout: platform.timeout
+    })
+    const response = await this.sendHttpRequest(
+      `${baseUrl}/open-apis/im/v1/messages?receive_id_type=${encodeURIComponent(receiveIdType)}`,
+      {
+        receive_id: receiveId,
+        msg_type: 'interactive',
+        content: JSON.stringify(this.buildFeishuCard(type, data))
+      },
+      platform.timeout || 10000,
+      {
+        headers: {
+          Authorization: `Bearer ${tenantAccessToken}`
+        }
+      }
+    )
+
+    if (response?.code && response.code !== 0) {
+      throw new Error(`飞书发送失败: ${response.msg || response.message || response.code}`)
+    }
   }
 
   /**
@@ -346,6 +378,59 @@ class WebhookService {
     }
 
     return response.data
+  }
+
+  normalizeFeishuApiBase(apiBaseUrl) {
+    return (apiBaseUrl || 'https://open.feishu.cn').replace(/\/$/, '')
+  }
+
+  buildFeishuCard(type, data) {
+    return {
+      elements: [
+        {
+          tag: 'markdown',
+          content: this.formatMessageForFeishu(type, data)
+        }
+      ],
+      header: {
+        title: {
+          tag: 'plain_text',
+          content: this.getNotificationTitle(type)
+        },
+        template: this.getFeishuCardColor(type)
+      }
+    }
+  }
+
+  async getFeishuTenantAccessToken({ appId, appSecret, baseUrl, timeout }) {
+    const cacheKey = `${baseUrl}:${appId}`
+    const cached = this.feishuTenantTokenCache.get(cacheKey)
+    if (cached && cached.expiresAt > Date.now() + 60000) {
+      return cached.token
+    }
+
+    const response = await this.sendHttpRequest(
+      `${baseUrl}/open-apis/auth/v3/tenant_access_token/internal`,
+      {
+        app_id: appId,
+        app_secret: appSecret
+      },
+      timeout || 10000
+    )
+
+    if (response?.code && response.code !== 0) {
+      throw new Error(`飞书 token 获取失败: ${response.msg || response.message || response.code}`)
+    }
+    if (!response?.tenant_access_token) {
+      throw new Error('飞书 token 获取失败: missing tenant_access_token')
+    }
+
+    this.feishuTenantTokenCache.set(cacheKey, {
+      token: response.tenant_access_token,
+      expiresAt: Date.now() + Number(response.expire || 7200) * 1000
+    })
+
+    return response.tenant_access_token
   }
 
   /**
@@ -535,6 +620,7 @@ class WebhookService {
   getNotificationTitle(type) {
     const titles = {
       accountAnomaly: '⚠️ 账号异常通知',
+      accountVitalitySummary: '💓 账号活力状态',
       quotaWarning: '📊 配额警告',
       systemError: '❌ 系统错误',
       securityAlert: '🔒 安全警报',
@@ -741,6 +827,32 @@ class WebhookService {
    * 格式化通知详情
    */
   formatNotificationDetails(data) {
+    if (data.statusCounts && data.statusLabels && data.totalAccounts !== undefined) {
+      const lines = [
+        `**账号总数**: ${data.totalAccounts}`,
+        `**触发时间**: ${data.generatedAt || getISOStringWithTimezone(new Date())}`,
+        '',
+        '**状态统计**:'
+      ]
+
+      Object.entries(data.statusLabels).forEach(([key, label]) => {
+        lines.push(`- ${label}: ${data.statusCounts[key] || 0}`)
+      })
+
+      const abnormalAccounts = data.abnormalAccounts || []
+      lines.push('', `**异常账号摘要**: ${abnormalAccounts.length} 个`)
+      abnormalAccounts.slice(0, 12).forEach((account) => {
+        lines.push(
+          `- ${account.platform}/${account.accountName}: ${account.status}（${account.reason || '无'}）`
+        )
+      })
+      if (abnormalAccounts.length > 12) {
+        lines.push(`- 其余 ${abnormalAccounts.length - 12} 个请在后台账号活力页查看`)
+      }
+
+      return lines.join('\n')
+    }
+
     const lines = []
 
     if (data.accountName) {
@@ -825,6 +937,7 @@ class WebhookService {
   getFeishuCardColor(type) {
     const colors = {
       accountAnomaly: 'orange',
+      accountVitalitySummary: 'blue',
       quotaWarning: 'yellow',
       systemError: 'red',
       securityAlert: 'red',
@@ -841,6 +954,7 @@ class WebhookService {
   getSlackEmoji(type) {
     const emojis = {
       accountAnomaly: ':warning:',
+      accountVitalitySummary: ':bar_chart:',
       quotaWarning: ':chart_with_downwards_trend:',
       systemError: ':x:',
       securityAlert: ':lock:',
@@ -857,6 +971,7 @@ class WebhookService {
   getDiscordColor(type) {
     const colors = {
       accountAnomaly: 0xff9800, // 橙色
+      accountVitalitySummary: 0x2196f3, // 蓝色
       quotaWarning: 0xffeb3b, // 黄色
       systemError: 0xf44336, // 红色
       securityAlert: 0xf44336, // 红色
