@@ -2884,12 +2884,6 @@
               7d 用量 {{ nurtureStatus.evaluation.actual.sevenDayUtil.toFixed(1) }}% / 上限
               {{ nurtureStatus.evaluation.limits?.sevenDayLimit?.toFixed?.(1) || '-' }}%
             </p>
-            <p
-              v-if="nurtureStatus?.lastBlockReason"
-              class="mb-3 text-xs text-amber-700 dark:text-amber-300"
-            >
-              最近阻断：{{ nurtureStatus.lastBlockReason }}
-            </p>
             <div class="flex flex-wrap gap-2">
               <button
                 v-if="!nurtureStatus?.nurtureEnabled"

@@ -162,3 +162,20 @@ export const formatCost = (value) => {
   if (num < 0.01) return `$${num.toFixed(6)}`
   return `$${num.toFixed(2)}`
 }
+
+const NURTURE_BLOCK_REASON_LABELS = {
+  rpm: 'RPM 限速',
+  five_hour_steady: '5小时常驻上限',
+  five_hour_curve: '5小时养号曲线',
+  seven_day_steady: '7天常驻上限',
+  seven_day_curve: '7天养号曲线',
+  seven_day_pace: '7天节奏护栏',
+  seven_day_opus: '7天 Opus 上限',
+  seven_day_velocity: '7天日增速护栏',
+  local_request_count: '本地请求计数'
+}
+
+export const formatNurtureBlockReason = (reason) => {
+  if (!reason) return ''
+  return NURTURE_BLOCK_REASON_LABELS[reason] || reason
+}

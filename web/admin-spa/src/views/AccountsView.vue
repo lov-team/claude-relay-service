@@ -791,6 +791,13 @@
                       }}
                     </span>
                     <span
+                      v-if="account.nurtureEnabled && account.nurtureLastBlockReason"
+                      class="mt-1 block max-w-xl truncate text-xs font-medium text-amber-700 dark:text-amber-300"
+                      :title="account.nurtureLastBlockReason"
+                    >
+                      养号阻断：{{ formatNurtureBlockReason(account.nurtureLastBlockReason) }}
+                    </span>
+                    <span
                       v-if="account.schedulable === false"
                       class="inline-flex items-center rounded-full bg-gray-100 px-3 py-1 text-xs font-semibold text-gray-700"
                     >
@@ -1855,6 +1862,16 @@
           </div>
 
           <div
+            v-if="account.nurtureEnabled && account.nurtureLastBlockReason"
+            class="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-800/70 dark:bg-amber-900/30 dark:text-amber-200"
+          >
+            <div class="font-semibold">养号阻断</div>
+            <div class="mt-1 break-all">
+              {{ formatNurtureBlockReason(account.nurtureLastBlockReason) }}
+            </div>
+          </div>
+
+          <div
             v-if="isAccountRoutingBlocked(account)"
             class="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-800/70 dark:bg-red-900/30 dark:text-red-300"
           >
@@ -2269,7 +2286,13 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
-import { showToast, copyText, formatNumber, formatRelativeTime } from '@/utils/tools'
+import {
+  showToast,
+  copyText,
+  formatNumber,
+  formatRelativeTime,
+  formatNurtureBlockReason
+} from '@/utils/tools'
 
 import * as httpApis from '@/utils/http_apis'
 import AccountForm from '@/components/accounts/AccountForm.vue'
