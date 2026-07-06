@@ -546,7 +546,84 @@ class ClaudeAccountNurtureService {
   }
 }
 
+const NURTURE_SCHEDULER_ERROR_CODES = {
+  DEDICATED_LIMITED: 'CLAUDE_NURTURE_LIMITED',
+  ALL_LIMITED: 'CLAUDE_ALL_NURTURE_LIMITED'
+}
+
+function calcNurtureRetryAfterSeconds(now = new Date()) {
+  const tomorrow = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0)
+  )
+  return Math.max(60, Math.ceil((tomorrow.getTime() - now.getTime()) / 1000))
+}
+
+function createNurtureSchedulerError(code, { accountId, reason, message } = {}) {
+  const error = new Error(message || 'Claude account nurture guard limit reached')
+  error.code = code
+  error.statusCode = 403
+  if (accountId) {
+    error.accountId = accountId
+  }
+  if (reason) {
+    error.nurtureReason = reason
+  }
+  return error
+}
+
+function createAllNurtureLimitedError(evaluation = null) {
+  return createNurtureSchedulerError(NURTURE_SCHEDULER_ERROR_CODES.ALL_LIMITED, {
+    reason: evaluation?.reason || null,
+    message: 'All available Claude accounts are currently blocked by nurture guard limits'
+  })
+}
+
+function createDedicatedNurtureLimitedError(accountId, evaluation = null) {
+  return createNurtureSchedulerError(NURTURE_SCHEDULER_ERROR_CODES.DEDICATED_LIMITED, {
+    accountId,
+    reason: evaluation?.reason || null,
+    message: 'Dedicated Claude account reached nurture guard limit'
+  })
+}
+
+function isNurtureSchedulerError(error) {
+  return (
+    error?.code === NURTURE_SCHEDULER_ERROR_CODES.DEDICATED_LIMITED ||
+    error?.code === NURTURE_SCHEDULER_ERROR_CODES.ALL_LIMITED
+  )
+}
+
+function buildNurtureLimitBody(reason) {
+  return {
+    error: {
+      type: 'nurture_limit_reached',
+      code: 'nurture_limit_reached',
+      message: '账号养号护栏已达今日或当前窗口上限，请稍后重试。',
+      reason: reason || null
+    }
+  }
+}
+
+function buildNurtureLimitHttpResponse(reason, statusCode = 403) {
+  return {
+    statusCode,
+    headers: {
+      'Content-Type': 'application/json',
+      'Retry-After': String(calcNurtureRetryAfterSeconds())
+    },
+    body: JSON.stringify(buildNurtureLimitBody(reason))
+  }
+}
+
 module.exports = new ClaudeAccountNurtureService()
 module.exports.getNurtureTier = getNurtureTier
 module.exports.isProAccount = isProAccount
 module.exports.isMaxAccount = isMaxAccount
+module.exports.NURTURE_SCHEDULER_ERROR_CODES = NURTURE_SCHEDULER_ERROR_CODES
+module.exports.calcNurtureRetryAfterSeconds = calcNurtureRetryAfterSeconds
+module.exports.createNurtureSchedulerError = createNurtureSchedulerError
+module.exports.createAllNurtureLimitedError = createAllNurtureLimitedError
+module.exports.createDedicatedNurtureLimitedError = createDedicatedNurtureLimitedError
+module.exports.isNurtureSchedulerError = isNurtureSchedulerError
+module.exports.buildNurtureLimitBody = buildNurtureLimitBody
+module.exports.buildNurtureLimitHttpResponse = buildNurtureLimitHttpResponse

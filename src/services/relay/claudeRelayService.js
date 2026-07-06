@@ -118,31 +118,18 @@ class ClaudeRelayService {
   }
 
   _buildNurtureLimitedResponse(accountId, reason) {
-    const retryAfterSeconds = this._calcNurtureRetryAfterSeconds()
     logger.warn(
-      `🌱 Account ${accountId} blocked by nurture guard (${reason || 'unknown'}), returning 503`
+      `🌱 Account ${accountId} blocked by nurture guard (${reason || 'unknown'}), returning 403`
     )
+    const response = claudeAccountNurtureService.buildNurtureLimitHttpResponse(reason, 403)
     return {
-      statusCode: 503,
+      ...response,
       headers: {
-        'Content-Type': 'application/json',
-        'retry-after': String(retryAfterSeconds)
+        ...response.headers,
+        'retry-after': response.headers['Retry-After']
       },
-      body: JSON.stringify({
-        error: 'nurture_limit_reached',
-        message: '账号养号护栏已达今日或当前窗口上限，请稍后重试。',
-        reason: reason || null
-      }),
       accountId
     }
-  }
-
-  _calcNurtureRetryAfterSeconds() {
-    const now = new Date()
-    const tomorrow = new Date(
-      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0)
-    )
-    return Math.max(60, Math.ceil((tomorrow.getTime() - now.getTime()) / 1000))
   }
 
   async _enforceNurtureBeforeRelay(accountId, accountType) {
@@ -640,7 +627,7 @@ class ClaudeRelayService {
             accountId: error.accountId
           }
         }
-        if (error.code === 'CLAUDE_NURTURE_LIMITED') {
+        if (claudeAccountNurtureService.isNurtureSchedulerError(error)) {
           return this._buildNurtureLimitedResponse(error.accountId, error.nurtureReason)
         }
         throw error
@@ -2347,7 +2334,7 @@ class ClaudeRelayService {
           responseStream.end()
           return
         }
-        if (error.code === 'CLAUDE_NURTURE_LIMITED') {
+        if (claudeAccountNurtureService.isNurtureSchedulerError(error)) {
           const nurtureResponse = this._buildNurtureLimitedResponse(
             error.accountId,
             error.nurtureReason

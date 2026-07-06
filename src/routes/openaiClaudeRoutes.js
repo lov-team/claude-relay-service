@@ -12,6 +12,7 @@ const claudeConsoleRelayService = require('../services/relay/claudeConsoleRelayS
 const openaiToClaude = require('../services/openaiToClaude')
 const apiKeyService = require('../services/apiKeyService')
 const unifiedClaudeScheduler = require('../services/scheduler/unifiedClaudeScheduler')
+const claudeAccountNurtureService = require('../services/account/claudeAccountNurtureService')
 const claudeCodeHeadersService = require('../services/claudeCodeHeadersService')
 const { getSafeMessage } = require('../utils/errorSanitizer')
 const sessionHelper = require('../utils/sessionHelper')
@@ -23,6 +24,14 @@ const { createRequestDetailMeta } = require('../utils/requestDetailHelper')
 // 🔧 辅助函数：检查 API Key 权限
 function checkPermissions(apiKeyData, requiredPermission = 'claude') {
   return apiKeyService.hasPermission(apiKeyData?.permissions, requiredPermission)
+}
+
+function respondToNurtureSchedulerError(res, error) {
+  const retryAfter = claudeAccountNurtureService.calcNurtureRetryAfterSeconds()
+  return res
+    .status(error.statusCode || 403)
+    .set('Retry-After', String(retryAfter))
+    .json(claudeAccountNurtureService.buildNurtureLimitBody(error.nurtureReason))
 }
 
 function queueRateLimitUpdate(
@@ -242,6 +251,9 @@ async function handleChatCompletion(req, res, apiKeyData) {
           error: 'upstream_rate_limited',
           message: limitMessage
         })
+      }
+      if (claudeAccountNurtureService.isNurtureSchedulerError(error)) {
+        return respondToNurtureSchedulerError(res, error)
       }
       throw error
     }

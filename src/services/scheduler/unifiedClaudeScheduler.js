@@ -51,13 +51,11 @@ class UnifiedClaudeScheduler {
   }
 
   _throwDedicatedNurtureError(accountId, evaluation) {
-    const error = new Error('Dedicated Claude account reached nurture limit')
-    error.code = 'CLAUDE_NURTURE_LIMITED'
-    error.accountId = accountId
-    error.nurtureReason = evaluation?.reason || null
-    error.retryAfterAt =
-      evaluation?.actual?.windowProgress !== null ? null : null
-    throw error
+    throw claudeAccountNurtureService.createDedicatedNurtureLimitedError(accountId, evaluation)
+  }
+
+  _throwAllNurtureLimitedError(evaluation) {
+    throw claudeAccountNurtureService.createAllNurtureLimitedError(evaluation)
   }
 
   // 🔍 检查账户是否支持请求的模型
@@ -487,6 +485,8 @@ class UnifiedClaudeScheduler {
   // 📋 获取所有可用账户（合并官方和Console）
   async _getAllAvailableAccounts(apiKeyData, requestedModel = null, includeCcr = false) {
     const availableAccounts = []
+    let nurtureBlockedCount = 0
+    let lastNurtureEvaluation = null
     const isOpusRequest =
       requestedModel && typeof requestedModel === 'string'
         ? requestedModel.toLowerCase().includes('opus')
@@ -680,6 +680,8 @@ class UnifiedClaudeScheduler {
 
         const nurtureEvaluation = await this.isNurtureBlocked(account.id)
         if (nurtureEvaluation) {
+          nurtureBlockedCount += 1
+          lastNurtureEvaluation = nurtureEvaluation
           logger.info(
             `🌱 Skipping account ${account.name} (${account.id}) due to nurture limit: ${nurtureEvaluation.reason}`
           )
@@ -1009,6 +1011,12 @@ class UnifiedClaudeScheduler {
         )
         error.code = 'CONSOLE_ACCOUNT_CONCURRENCY_FULL'
         throw error
+      }
+      if (nurtureBlockedCount > 0) {
+        logger.error(
+          `❌ ${nurtureBlockedCount} Claude account(s) blocked by nurture guard with no fallback available`
+        )
+        this._throwAllNurtureLimitedError(lastNurtureEvaluation)
       }
       // 否则走通用的"无可用账户"错误处理（由上层 selectAccountForApiKey 捕获）
     }
@@ -1555,6 +1563,8 @@ class UnifiedClaudeScheduler {
       }
 
       const availableAccounts = []
+      let nurtureBlockedCount = 0
+      let lastNurtureEvaluation = null
       const isOpusRequest =
         requestedModel && typeof requestedModel === 'string'
           ? requestedModel.toLowerCase().includes('opus')
@@ -1630,6 +1640,8 @@ class UnifiedClaudeScheduler {
           if (accountType === 'claude-official') {
             const nurtureEvaluation = await this.isNurtureBlocked(account.id)
             if (nurtureEvaluation) {
+              nurtureBlockedCount += 1
+              lastNurtureEvaluation = nurtureEvaluation
               logger.info(
                 `🌱 Skipping group member ${account.name} (${account.id}) due to nurture limit: ${nurtureEvaluation.reason}`
               )
@@ -1671,6 +1683,12 @@ class UnifiedClaudeScheduler {
       }
 
       if (availableAccounts.length === 0) {
+        if (nurtureBlockedCount > 0) {
+          logger.error(
+            `❌ All ${nurtureBlockedCount} nurture-eligible group member(s) in ${group.name} are under nurture guard limits`
+          )
+          this._throwAllNurtureLimitedError(lastNurtureEvaluation)
+        }
         throw new Error(`No available accounts in group ${group.name}`)
       }
 
