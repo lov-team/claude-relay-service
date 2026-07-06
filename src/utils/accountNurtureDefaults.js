@@ -259,12 +259,80 @@ function calcSevenDayPaceLimit(steadySevenDayCap, resetsAt, paceBuffer, nowMs = 
   return steadySevenDayCap * progress * paceBuffer
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000
+
+function parsePercentUtil(value) {
+  const num = Number(value)
+  return Number.isFinite(num) ? Math.max(0, num) : null
+}
+
+function calcSevenDayRemainingMs(resetsAt, nowMs = Date.now()) {
+  if (!resetsAt) {
+    return null
+  }
+  const resetMs = new Date(resetsAt).getTime()
+  if (!Number.isFinite(resetMs)) {
+    return null
+  }
+  return resetMs - nowMs
+}
+
+function calcSevenDaySteadyPaceLimit(
+  steadyCap,
+  currentUtil,
+  resetsAt,
+  paceBuffer,
+  nowMs = Date.now()
+) {
+  const remainingMs = calcSevenDayRemainingMs(resetsAt, nowMs)
+  if (remainingMs === null) {
+    return calcSevenDayPaceLimit(steadyCap, resetsAt, paceBuffer, nowMs)
+  }
+  if (remainingMs <= 0) {
+    return steadyCap * paceBuffer
+  }
+
+  const util = parsePercentUtil(currentUtil) ?? 0
+  const headroom = Math.max(0, steadyCap - util)
+  const remainingFraction = Math.min(1, remainingMs / WINDOW_MS)
+  const remainingBasedCap = steadyCap - headroom * remainingFraction
+  const linearCap = calcSevenDayPaceLimit(steadyCap, resetsAt, paceBuffer, nowMs)
+
+  return Math.min(steadyCap * paceBuffer, Math.max(remainingBasedCap * paceBuffer, linearCap ?? 0))
+}
+
+function calcSevenDaySteadyVelocityLimit(
+  steadyCap,
+  currentUtil,
+  resetsAt,
+  paceBuffer,
+  nowMs = Date.now()
+) {
+  const util = parsePercentUtil(currentUtil)
+  if (util === null) {
+    return null
+  }
+
+  const remainingMs = calcSevenDayRemainingMs(resetsAt, nowMs)
+  const headroom = Math.max(0, steadyCap - util)
+  if (remainingMs === null) {
+    return null
+  }
+  if (remainingMs <= 0) {
+    return headroom
+  }
+
+  const dailyShare = Math.min(1, DAY_MS / remainingMs)
+  return headroom * dailyShare * paceBuffer
+}
+
 function getUtcDateKey(date = new Date()) {
   return date.toISOString().slice(0, 10)
 }
 
 module.exports = {
   WINDOW_MS,
+  DAY_MS,
   MAX_CAP_PERCENT,
   DEFAULT_ACCOUNT_NURTURE_CONFIG,
   cloneDefaultConfig,
@@ -274,5 +342,8 @@ module.exports = {
   pickInRange,
   calcSevenDayWindowProgress,
   calcSevenDayPaceLimit,
+  calcSevenDayRemainingMs,
+  calcSevenDaySteadyPaceLimit,
+  calcSevenDaySteadyVelocityLimit,
   getUtcDateKey
 }

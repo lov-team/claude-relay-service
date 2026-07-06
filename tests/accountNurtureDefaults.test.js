@@ -5,6 +5,8 @@ const {
   assertSteadyCapsBelowMax,
   pickInRange,
   calcSevenDayPaceLimit,
+  calcSevenDaySteadyPaceLimit,
+  calcSevenDaySteadyVelocityLimit,
   calcSevenDayWindowProgress,
   getUtcDateKey
 } = require('../src/utils/accountNurtureDefaults')
@@ -170,6 +172,53 @@ describe('accountNurtureDefaults', () => {
     const pastReset = new Date(now - 60 * 60 * 1000).toISOString()
     expect(calcSevenDayWindowProgress(pastReset, now)).toBe(1)
     expect(calcSevenDayWindowProgress(null, now)).toBeNull()
+  })
+
+  test('steady pace limit uses remaining window when current util is ahead of linear pace', () => {
+    const defaults = cloneDefaultConfig()
+    const now = Date.parse('2026-07-10T12:00:00.000Z')
+    const resetsAt = new Date(now + 5 * 24 * 60 * 60 * 1000).toISOString()
+    const linear = calcSevenDayPaceLimit(
+      defaults.steadyCaps.pro.sevenDay,
+      resetsAt,
+      defaults.paceBuffer,
+      now
+    )
+    const steady = calcSevenDaySteadyPaceLimit(
+      defaults.steadyCaps.pro.sevenDay,
+      30,
+      resetsAt,
+      defaults.paceBuffer,
+      now
+    )
+
+    expect(steady).toBeGreaterThan(linear)
+    expect(steady).toBeGreaterThan(30)
+  })
+
+  test('steady velocity limit spreads remaining headroom across remaining days', () => {
+    const defaults = cloneDefaultConfig()
+    const now = Date.parse('2026-07-10T12:00:00.000Z')
+    const fiveDaysLeft = new Date(now + 5 * 24 * 60 * 60 * 1000).toISOString()
+    const oneDayLeft = new Date(now + 24 * 60 * 60 * 1000).toISOString()
+
+    const fiveDayLimit = calcSevenDaySteadyVelocityLimit(
+      defaults.steadyCaps.pro.sevenDay,
+      20,
+      fiveDaysLeft,
+      defaults.paceBuffer,
+      now
+    )
+    const oneDayLimit = calcSevenDaySteadyVelocityLimit(
+      defaults.steadyCaps.pro.sevenDay,
+      20,
+      oneDayLeft,
+      defaults.paceBuffer,
+      now
+    )
+
+    expect(fiveDayLimit).toBeGreaterThan(defaults.maxDailySevenDayDelta.pro)
+    expect(oneDayLimit).toBeGreaterThan(fiveDayLimit)
   })
 
   test('calcSevenDayPaceLimit equals steady cap when window is complete', () => {

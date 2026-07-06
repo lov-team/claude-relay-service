@@ -6,6 +6,8 @@ const claudeAccountService = require('./claudeAccountService')
 const {
   pickInRange,
   calcSevenDayPaceLimit,
+  calcSevenDaySteadyPaceLimit,
+  calcSevenDaySteadyVelocityLimit,
   calcSevenDayWindowProgress,
   getUtcDateKey
 } = require('../../utils/accountNurtureDefaults')
@@ -124,16 +126,31 @@ class ClaudeAccountNurtureService {
       )
     }
 
-    const paceSevenDay = calcSevenDayPaceLimit(
-      steady.sevenDay,
-      account.claudeSevenDayResetsAt,
-      config.paceBuffer
-    )
-    const paceSevenDayOpus = calcSevenDayPaceLimit(
-      steady.sevenDayOpus,
-      account.claudeSevenDayOpusResetsAt,
-      config.paceBuffer
-    )
+    const currentSevenDay = toNumberOrNull(account.claudeSevenDayUtilization)
+    const currentSevenDayOpus = toNumberOrNull(account.claudeSevenDayOpusUtilization)
+
+    const paceSevenDay =
+      phase === 'steady'
+        ? calcSevenDaySteadyPaceLimit(
+            steady.sevenDay,
+            currentSevenDay,
+            account.claudeSevenDayResetsAt,
+            config.paceBuffer
+          )
+        : calcSevenDayPaceLimit(steady.sevenDay, account.claudeSevenDayResetsAt, config.paceBuffer)
+    const paceSevenDayOpus =
+      phase === 'steady'
+        ? calcSevenDaySteadyPaceLimit(
+            steady.sevenDayOpus,
+            currentSevenDayOpus,
+            account.claudeSevenDayOpusResetsAt,
+            config.paceBuffer
+          )
+        : calcSevenDayPaceLimit(
+            steady.sevenDayOpus,
+            account.claudeSevenDayOpusResetsAt,
+            config.paceBuffer
+          )
 
     const effectiveSevenDay = Math.min(
       phase === 'nurturing' ? curve.sevenDay : Number.POSITIVE_INFINITY,
@@ -314,7 +331,18 @@ class ClaudeAccountNurtureService {
 
     if (sevenDayUtil !== null) {
       const baseline = await this.ensureSevenDayBaseline(accountId, sevenDayUtil)
-      const maxDelta = config.maxDailySevenDayDelta[tier]
+      let maxDelta = config.maxDailySevenDayDelta[tier]
+      if (limits.phase === 'steady') {
+        const steadyVelocityLimit = calcSevenDaySteadyVelocityLimit(
+          limits.steadyCaps.sevenDay,
+          sevenDayUtil,
+          account.claudeSevenDayResetsAt,
+          config.paceBuffer
+        )
+        if (steadyVelocityLimit !== null) {
+          maxDelta = steadyVelocityLimit
+        }
+      }
       if (sevenDayUtil - baseline > maxDelta) {
         return this._buildResult(true, 'seven_day_velocity', tier, limits, {
           fiveHourUtil,

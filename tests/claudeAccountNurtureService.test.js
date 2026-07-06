@@ -251,6 +251,8 @@ describe('claudeAccountNurtureService.evaluate', () => {
   test('blocks seven_day_pace when young window would allow too much usage', async () => {
     redis.getClaudeAccount.mockResolvedValue(
       buildAccount({
+        nurturePhase: 'nurturing',
+        nurtureDayIndex: '7',
         claudeSevenDayUtilization: '30',
         claudeSevenDayResetsAt: new Date(FIXED_NOW + 5 * 24 * 60 * 60 * 1000).toISOString()
       })
@@ -277,11 +279,52 @@ describe('claudeAccountNurtureService.evaluate', () => {
     expect(result.blocked).toBe(false)
   })
 
-  test('blocks seven_day_velocity when daily jump exceeds configured delta', async () => {
+  test('blocks seven_day_velocity when daily jump exceeds configured delta in nurturing', async () => {
     const config = cloneDefaultConfig()
     const sevenDayUtil = 24
     const baseline = 13
     const resetsAt = new Date(FIXED_NOW + 5 * 24 * 60 * 60 * 1000).toISOString()
+
+    setupRedisClient({ sevenDayBaseline: baseline })
+    redis.getClaudeAccount.mockResolvedValue(
+      buildAccount({
+        nurturePhase: 'nurturing',
+        nurtureDayIndex: '3',
+        claudeSevenDayUtilization: String(sevenDayUtil),
+        claudeSevenDayResetsAt: resetsAt,
+        claudeSevenDayOpusResetsAt: resetsAt
+      })
+    )
+
+    const result = await claudeAccountNurtureService.evaluate('acc-pro-1', {
+      skipUsageRefresh: true
+    })
+    expect(result.blocked).toBe(true)
+    expect(result.reason).toBe('seven_day_velocity')
+    expect(result.actual.dayDelta).toBe(sevenDayUtil - baseline)
+    expect(result.actual.dayDelta).toBeGreaterThan(config.maxDailySevenDayDelta.pro)
+    expect(sevenDayUtil).toBeLessThan(result.limits.paceSevenDay)
+  })
+
+  test('steady allows usage ahead of linear pace when remaining window supports it', async () => {
+    redis.getClaudeAccount.mockResolvedValue(
+      buildAccount({
+        claudeSevenDayUtilization: '30',
+        claudeSevenDayResetsAt: new Date(FIXED_NOW + 5 * 24 * 60 * 60 * 1000).toISOString()
+      })
+    )
+
+    const result = await claudeAccountNurtureService.evaluate('acc-pro-1', {
+      skipUsageRefresh: true
+    })
+    expect(result.blocked).toBe(false)
+    expect(result.limits.paceSevenDay).toBeGreaterThan(30)
+  })
+
+  test('steady blocks seven_day_velocity when daily jump exceeds remaining-time budget', async () => {
+    const sevenDayUtil = 75
+    const baseline = 65
+    const resetsAt = new Date(FIXED_NOW + 24 * 60 * 60 * 1000).toISOString()
 
     setupRedisClient({ sevenDayBaseline: baseline })
     redis.getClaudeAccount.mockResolvedValue(
@@ -297,9 +340,8 @@ describe('claudeAccountNurtureService.evaluate', () => {
     })
     expect(result.blocked).toBe(true)
     expect(result.reason).toBe('seven_day_velocity')
-    expect(result.actual.dayDelta).toBe(sevenDayUtil - baseline)
-    expect(result.actual.dayDelta).toBeGreaterThan(config.maxDailySevenDayDelta.pro)
-    expect(sevenDayUtil).toBeLessThan(result.limits.paceSevenDay)
+    expect(result.actual.dayDelta).toBe(10)
+    expect(result.actual.maxDailyDelta).toBeLessThan(10)
   })
 
   test('blocks seven_day_opus steady cap', async () => {
@@ -497,6 +539,8 @@ describe('claudeAccountNurtureService.evaluate', () => {
     setupRedisClient({ sevenDayBaseline: 5 })
     redis.getClaudeAccount.mockResolvedValue(
       buildAccount({
+        nurturePhase: 'nurturing',
+        nurtureDayIndex: '7',
         claudeSevenDayUtilization: '30',
         claudeSevenDayResetsAt: new Date(FIXED_NOW + 5 * 24 * 60 * 60 * 1000).toISOString()
       })
