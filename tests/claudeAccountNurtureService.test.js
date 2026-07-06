@@ -36,7 +36,17 @@ const {
 } = require('../src/utils/accountNurtureDefaults')
 
 const claudeAccountNurtureService = require('../src/services/account/claudeAccountNurtureService')
-const { getNurtureTier, isProAccount, isMaxAccount } = claudeAccountNurtureService
+const {
+  getNurtureTier,
+  isProAccount,
+  isMaxAccount,
+  NURTURE_SCHEDULER_ERROR_CODES,
+  createAllNurtureLimitedError,
+  createDedicatedNurtureLimitedError,
+  isNurtureSchedulerError,
+  buildNurtureLimitBody,
+  buildNurtureLimitHttpResponse
+} = claudeAccountNurtureService
 
 const FIXED_NOW = Date.parse('2026-07-10T12:00:00.000Z')
 
@@ -83,6 +93,41 @@ const setupRedisClient = ({ rpmCount = 0, sevenDayBaseline = null } = {}) => {
   redis.getClientSafe.mockReturnValue(client)
   redis.getClient.mockReturnValue(client)
 }
+
+describe('nurture scheduler error helpers', () => {
+  test('creates dedicated and all-account nurture errors with 403', () => {
+    const dedicated = createDedicatedNurtureLimitedError('acc-1', { reason: 'seven_day_pace' })
+    expect(dedicated.code).toBe(NURTURE_SCHEDULER_ERROR_CODES.DEDICATED_LIMITED)
+    expect(dedicated.statusCode).toBe(403)
+    expect(dedicated.accountId).toBe('acc-1')
+    expect(dedicated.nurtureReason).toBe('seven_day_pace')
+
+    const allLimited = createAllNurtureLimitedError({ reason: 'seven_day_velocity' })
+    expect(allLimited.code).toBe(NURTURE_SCHEDULER_ERROR_CODES.ALL_LIMITED)
+    expect(allLimited.statusCode).toBe(403)
+    expect(allLimited.nurtureReason).toBe('seven_day_velocity')
+    expect(isNurtureSchedulerError(dedicated)).toBe(true)
+    expect(isNurtureSchedulerError(allLimited)).toBe(true)
+    expect(isNurtureSchedulerError(new Error('other'))).toBe(false)
+  })
+
+  test('buildNurtureLimitHttpResponse uses 403 and structured body', () => {
+    jest.useFakeTimers()
+    jest.setSystemTime(Date.parse('2026-07-10T12:00:00.000Z'))
+
+    const response = buildNurtureLimitHttpResponse('seven_day_pace', 403)
+    expect(response.statusCode).toBe(403)
+    expect(response.headers['Retry-After']).toBeTruthy()
+
+    const body = JSON.parse(response.body)
+    expect(body.error.type).toBe('nurture_limit_reached')
+    expect(body.error.code).toBe('nurture_limit_reached')
+    expect(body.error.reason).toBe('seven_day_pace')
+    expect(buildNurtureLimitBody('rpm').error.reason).toBe('rpm')
+
+    jest.useRealTimers()
+  })
+})
 
 describe('nurture tier helpers', () => {
   test('detects pro and max from subscription info', () => {

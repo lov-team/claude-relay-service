@@ -14,6 +14,7 @@ const { updateRateLimitCounters } = require('../utils/rateLimitHelper')
 const claudeRelayConfigService = require('../services/claudeRelayConfigService')
 const claudeAccountService = require('../services/account/claudeAccountService')
 const claudeConsoleAccountService = require('../services/account/claudeConsoleAccountService')
+const claudeAccountNurtureService = require('../services/account/claudeAccountNurtureService')
 const {
   isWarmupRequest,
   buildMockWarmupResponse,
@@ -27,6 +28,14 @@ const {
   handleAnthropicCountTokensToGemini
 } = require('../services/anthropicGeminiBridgeService')
 const router = express.Router()
+
+function respondToNurtureSchedulerError(res, error) {
+  const retryAfter = claudeAccountNurtureService.calcNurtureRetryAfterSeconds()
+  return res
+    .status(error.statusCode || 403)
+    .set('Retry-After', String(retryAfter))
+    .json(claudeAccountNurtureService.buildNurtureLimitBody(error.nurtureReason))
+}
 
 function queueRateLimitUpdate(
   rateLimitInfo,
@@ -374,6 +383,9 @@ async function handleMessagesRequest(req, res) {
             })
           )
           return
+        }
+        if (claudeAccountNurtureService.isNurtureSchedulerError(error)) {
+          return respondToNurtureSchedulerError(res, error)
         }
         throw error
       }
@@ -1079,6 +1091,9 @@ async function handleMessagesRequest(req, res) {
             error: 'upstream_rate_limited',
             message: limitMessage
           })
+        }
+        if (claudeAccountNurtureService.isNurtureSchedulerError(error)) {
+          return respondToNurtureSchedulerError(res, error)
         }
         throw error
       }
@@ -1897,6 +1912,10 @@ router.post('/v1/messages/count_tokens', authenticateApiKey, async (req, res) =>
 
       if (error.httpStatus) {
         return res.status(error.httpStatus).json(error.errorPayload)
+      }
+
+      if (claudeAccountNurtureService.isNurtureSchedulerError(error)) {
+        return respondToNurtureSchedulerError(res, error)
       }
 
       // 客户端断开连接不是错误，使用 INFO 级别
