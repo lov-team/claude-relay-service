@@ -58,6 +58,15 @@ class UnifiedClaudeScheduler {
     throw claudeAccountNurtureService.createAllNurtureLimitedError(evaluation)
   }
 
+  _shouldEvaluateAutoStoppedNurtureAccount(account, accountType = 'claude-official') {
+    return (
+      accountType === 'claude-official' &&
+      !isSchedulable(account?.schedulable) &&
+      (account?.fiveHourAutoStopped === true || account?.fiveHourAutoStopped === 'true') &&
+      (account?.nurtureEnabled === true || account?.nurtureEnabled === 'true')
+    )
+  }
+
   // 🔍 检查账户是否支持请求的模型
   _isModelSupportedByAccount(account, accountType, requestedModel, context = '') {
     if (!requestedModel) {
@@ -650,13 +659,16 @@ class UnifiedClaudeScheduler {
         account.status !== 'error' &&
         account.status !== 'blocked' &&
         account.status !== 'temp_error' &&
-        (account.accountType === 'shared' || !account.accountType) && // 兼容旧数据
-        isSchedulable(account.schedulable)
+        (account.accountType === 'shared' || !account.accountType) // 兼容旧数据
       ) {
-        // 检查是否可调度
-
         // 检查模型支持
         if (!this._isModelSupportedByAccount(account, 'claude-official', requestedModel)) {
+          continue
+        }
+
+        const shouldEvaluateAutoStoppedNurture =
+          this._shouldEvaluateAutoStoppedNurtureAccount(account)
+        if (!isSchedulable(account.schedulable) && !shouldEvaluateAutoStoppedNurture) {
           continue
         }
 
@@ -685,6 +697,12 @@ class UnifiedClaudeScheduler {
           logger.info(
             `🌱 Skipping account ${account.name} (${account.id}) due to nurture limit: ${nurtureEvaluation.reason}`
           )
+          continue
+        }
+
+        // 仅允许 5 小时自动保护停调度的账号越过预过滤完成养号判定。
+        // 若当前并未命中养号护栏，仍保持不可调度，避免意外恢复流量。
+        if (!isSchedulable(account.schedulable)) {
           continue
         }
 
@@ -1620,9 +1638,17 @@ class UnifiedClaudeScheduler {
               ? account.status === 'active'
               : account.status === 'active'
 
-        if (isActive && status && isSchedulable(account.schedulable)) {
+        if (isActive && status) {
           // 检查模型支持
           if (!this._isModelSupportedByAccount(account, accountType, requestedModel, 'in group')) {
+            continue
+          }
+
+          const shouldEvaluateAutoStoppedNurture = this._shouldEvaluateAutoStoppedNurtureAccount(
+            account,
+            accountType
+          )
+          if (!isSchedulable(account.schedulable) && !shouldEvaluateAutoStoppedNurture) {
             continue
           }
 
@@ -1647,6 +1673,10 @@ class UnifiedClaudeScheduler {
               )
               continue
             }
+          }
+
+          if (!isSchedulable(account.schedulable)) {
+            continue
           }
 
           if (accountType === 'claude-official' && isOpusRequest) {
