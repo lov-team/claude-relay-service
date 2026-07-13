@@ -27,6 +27,10 @@ RUN --mount=type=cache,target=/root/.npm \
 # 📋 复制前端源代码
 COPY web/admin-spa/ ./
 
+# 🌐 允许部署环境在构建时覆盖管理后台 base path
+ARG VITE_APP_BASE_URL=/admin-next/
+ENV VITE_APP_BASE_URL=$VITE_APP_BASE_URL
+
 # 🏗️ 构建前端
 RUN npm run build
 
