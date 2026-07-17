@@ -387,7 +387,7 @@ class ClaudeAccountNurtureService {
       })
     }
 
-    return this._buildResult(false, null, tier, limits, {
+    const result = this._buildResult(false, null, tier, limits, {
       fiveHourUtil,
       sevenDayUtil,
       sevenDayOpusUtil,
@@ -395,6 +395,9 @@ class ClaudeAccountNurtureService {
       rpm: rpmResult,
       windowProgress: calcSevenDayWindowProgress(account.claudeSevenDayResetsAt)
     })
+
+    await this.clearStaleBlockReason(accountId, account)
+    return result
   }
 
   _buildResult(blocked, reason, tier, limits, actual) {
@@ -407,6 +410,25 @@ class ClaudeAccountNurtureService {
       dayIndex: limits.dayIndex,
       limits,
       actual
+    }
+  }
+
+  async clearStaleBlockReason(accountId, account) {
+    if (!account?.nurtureLastBlockReason) {
+      return
+    }
+
+    const previousReason = account.nurtureLastBlockReason
+    account.nurtureLastBlockReason = ''
+    account.nurtureLastEvaluatedAt = new Date().toISOString()
+
+    try {
+      await redis.setClaudeAccount(accountId, account)
+      logger.info(`Cleared stale nurture block reason ${previousReason} for account ${accountId}`)
+    } catch (error) {
+      logger.warn(
+        `Failed to clear stale nurture block reason for account ${accountId}: ${error.message}`
+      )
     }
   }
 
@@ -585,7 +607,7 @@ class ClaudeAccountNurtureService {
       nurtureDayIndex: parseInt(account?.nurtureDayIndex || '0', 10) || null,
       nurtureStartedAt: account?.nurtureStartedAt || null,
       nurtureGraduatedAt: account?.nurtureGraduatedAt || null,
-      lastBlockReason: account?.nurtureLastBlockReason || null,
+      lastBlockReason: evaluation.blocked ? evaluation.reason : null,
       evaluation
     }
   }

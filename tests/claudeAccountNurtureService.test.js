@@ -449,6 +449,7 @@ describe('claudeAccountNurtureService.evaluate', () => {
         nurturePhase: 'nurturing',
         nurtureDayIndex: '2',
         nurtureTier: 'pro',
+        nurtureLastBlockReason: 'local_request_count',
         subscriptionInfo: JSON.stringify({
           accountType: 'claude_max',
           hasClaudeMax: true,
@@ -466,7 +467,10 @@ describe('claudeAccountNurtureService.evaluate', () => {
     expect(result.limits.rpmLimit).toBe(config.maxDayPlans[1].rpm)
     expect(redis.setClaudeAccount).toHaveBeenCalledWith(
       'acc-pro-1',
-      expect.objectContaining({ nurtureTier: 'max' })
+      expect.objectContaining({
+        nurtureTier: 'max',
+        nurtureLastBlockReason: ''
+      })
     )
   })
 
@@ -692,6 +696,20 @@ describe('claudeAccountNurtureService lifecycle', () => {
     redis.getClaudeAccount.mockResolvedValue(null)
     const status = await claudeAccountNurtureService.getStatus('missing')
     expect(status).toBeNull()
+  })
+
+  test('getStatus reports the current evaluation instead of a stale stored block reason', async () => {
+    redis.getClaudeAccount.mockResolvedValue(
+      buildAccount({ nurtureLastBlockReason: 'local_request_count' })
+    )
+    const evaluateSpy = jest
+      .spyOn(claudeAccountNurtureService, 'evaluate')
+      .mockResolvedValue({ blocked: false, active: true, reason: null })
+
+    const status = await claudeAccountNurtureService.getStatus('acc-pro-1')
+
+    expect(status.lastBlockReason).toBeNull()
+    evaluateSpy.mockRestore()
   })
 
   test('rollover increments day index before graduation', async () => {
