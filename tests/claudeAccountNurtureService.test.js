@@ -441,6 +441,35 @@ describe('claudeAccountNurtureService.evaluate', () => {
     expect(result.limits.steadyCaps.sevenDayOpus).toBeLessThan(MAX_CAP_PERCENT)
   })
 
+  test('subscription tier overrides and repairs a stale stored nurture tier', async () => {
+    const config = cloneDefaultConfig()
+    setupRedisClient({ rpmCount: config.proDayPlans[1].rpm })
+    redis.getClaudeAccount.mockResolvedValue(
+      buildAccount({
+        nurturePhase: 'nurturing',
+        nurtureDayIndex: '2',
+        nurtureTier: 'pro',
+        subscriptionInfo: JSON.stringify({
+          accountType: 'claude_max',
+          hasClaudeMax: true,
+          hasClaudePro: false
+        })
+      })
+    )
+
+    const result = await claudeAccountNurtureService.evaluate('acc-pro-1', {
+      skipUsageRefresh: true
+    })
+
+    expect(result.blocked).toBe(false)
+    expect(result.tier).toBe('max')
+    expect(result.limits.rpmLimit).toBe(config.maxDayPlans[1].rpm)
+    expect(redis.setClaudeAccount).toHaveBeenCalledWith(
+      'acc-pro-1',
+      expect.objectContaining({ nurtureTier: 'max' })
+    )
+  })
+
   test('incrementRpm records a request in redis when allowed', async () => {
     setupRedisClient({ rpmCount: 0 })
     redis.getClaudeAccount.mockResolvedValue(buildAccount())

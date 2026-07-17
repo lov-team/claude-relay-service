@@ -1745,6 +1745,13 @@ class ClaudeAccountService {
         'rateLimitAutoStopped'
       )
 
+      // 429 同时会写入临时冷却键。账号连接测试或自动恢复成功后必须一起清理，
+      // 否则后台会显示已恢复，但调度器仍会在冷却期内跳过该账号。
+      await Promise.all([
+        upstreamErrorHelper.clearTempUnavailable(accountId, 'claude-official'),
+        upstreamErrorHelper.clearTempUnavailable(accountId, 'claude')
+      ])
+
       logger.success(`Rate limit removed for account: ${accountData.name} (${accountId})`)
 
       return { success: true }

@@ -73,6 +73,23 @@ function isTruthyFlag(value) {
 }
 
 class ClaudeAccountNurtureService {
+  async resolveAndSyncTier(accountId, account) {
+    const subscriptionTier = getNurtureTier(account)
+    const tier = subscriptionTier || account?.nurtureTier || null
+
+    if (subscriptionTier && account?.nurtureTier !== subscriptionTier) {
+      account.nurtureTier = subscriptionTier
+      try {
+        await redis.setClaudeAccount(accountId, account)
+        logger.info(`Synced nurture tier for account ${accountId} to ${subscriptionTier}`)
+      } catch (error) {
+        logger.warn(`Failed to persist nurture tier for account ${accountId}: ${error.message}`)
+      }
+    }
+
+    return tier
+  }
+
   async getEffectiveConfig(accountId, accountData = null) {
     const account = accountData || (await redis.getClaudeAccount(accountId))
     const systemConfig = await accountNurtureConfigService.getConfig()
@@ -258,7 +275,7 @@ class ClaudeAccountNurtureService {
       return { blocked: false, active: false, reason: null }
     }
 
-    const tier = account.nurtureTier || getNurtureTier(account)
+    const tier = await this.resolveAndSyncTier(accountId, account)
     if (!tier) {
       return { blocked: false, active: false, reason: null }
     }
@@ -564,7 +581,7 @@ class ClaudeAccountNurtureService {
       accountId,
       nurtureEnabled: isTruthyFlag(account?.nurtureEnabled),
       nurturePhase: account?.nurturePhase || null,
-      nurtureTier: account?.nurtureTier || getNurtureTier(account),
+      nurtureTier: getNurtureTier(account) || account?.nurtureTier,
       nurtureDayIndex: parseInt(account?.nurtureDayIndex || '0', 10) || null,
       nurtureStartedAt: account?.nurtureStartedAt || null,
       nurtureGraduatedAt: account?.nurtureGraduatedAt || null,
