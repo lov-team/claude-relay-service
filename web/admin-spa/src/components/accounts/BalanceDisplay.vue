@@ -51,6 +51,14 @@
         </button>
       </div>
 
+      <div class="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-300">
+        <i class="fas fa-coins text-amber-500 dark:text-amber-400"></i>
+        <span>累计成本</span>
+        <span class="font-semibold text-gray-900 dark:text-gray-100">
+          {{ totalCostText }}
+        </span>
+      </div>
+
       <!-- 配额（如适用） -->
       <div v-if="quotaInfo && isAntigravityQuota" class="space-y-2">
         <div class="flex items-center justify-between text-xs text-gray-600 dark:text-gray-400">
@@ -257,6 +265,10 @@ const primaryText = computed(() => {
   }
   const dailyCost = Number(balanceData.value?.statistics?.dailyCost || 0)
   return `今日成本 ${formatCurrency(dailyCost)}`
+})
+
+const totalCostText = computed(() => {
+  return formatCurrency(balanceData.value?.statistics?.totalCost || 0)
 })
 
 const load = async () => {
