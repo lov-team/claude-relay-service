@@ -1849,91 +1849,51 @@ class ClaudeRelayService {
       return
     }
 
-    const countCacheControlBlocks = () => {
-      let total = 0
+    // Prompt cache prefixes are ordered as tools -> system -> messages. When
+    // the client sends more than Anthropic's four-breakpoint limit, retain the
+    // deepest prefixes. A late message breakpoint covers the stable tools and
+    // system prefix too, while deleting it can make the entire conversation
+    // history fall back to full-price input tokens.
+    const breakpoints = []
 
-      if (Array.isArray(body.messages)) {
-        body.messages.forEach((message) => {
-          if (!message || !Array.isArray(message.content)) {
-            return
-          }
-          message.content.forEach((item) => {
-            if (item && item.cache_control) {
-              total += 1
-            }
-          })
-        })
-      }
-
-      if (Array.isArray(body.system)) {
-        body.system.forEach((item) => {
-          if (item && item.cache_control) {
-            total += 1
-          }
-        })
-      }
-
-      return total
+    if (Array.isArray(body.tools)) {
+      body.tools.forEach((tool) => {
+        if (tool && typeof tool === 'object' && tool.cache_control) {
+          breakpoints.push(tool)
+        }
+      })
     }
 
-    // 只移除 cache_control 属性，保留内容本身，避免丢失用户消息
-    const removeCacheControlFromMessages = () => {
-      if (!Array.isArray(body.messages)) {
-        return false
-      }
+    if (Array.isArray(body.system)) {
+      body.system.forEach((item) => {
+        if (item && typeof item === 'object' && item.cache_control) {
+          breakpoints.push(item)
+        }
+      })
+    }
 
-      for (let messageIndex = 0; messageIndex < body.messages.length; messageIndex += 1) {
-        const message = body.messages[messageIndex]
+    if (Array.isArray(body.messages)) {
+      body.messages.forEach((message) => {
         if (!message || !Array.isArray(message.content)) {
-          continue
+          return
         }
-
-        for (let contentIndex = 0; contentIndex < message.content.length; contentIndex += 1) {
-          const contentItem = message.content[contentIndex]
-          if (contentItem && contentItem.cache_control) {
-            // 只删除 cache_control 属性，保留内容
-            delete contentItem.cache_control
-            return true
+        message.content.forEach((item) => {
+          if (item && typeof item === 'object' && item.cache_control) {
+            breakpoints.push(item)
           }
-        }
-      }
-
-      return false
+        })
+      })
     }
 
-    // 只移除 cache_control 属性，保留 system 内容
-    const removeCacheControlFromSystem = () => {
-      if (!Array.isArray(body.system)) {
-        return false
-      }
-
-      for (let index = 0; index < body.system.length; index += 1) {
-        const systemItem = body.system[index]
-        if (systemItem && systemItem.cache_control) {
-          // 只删除 cache_control 属性，保留内容
-          delete systemItem.cache_control
-          return true
-        }
-      }
-
-      return false
+    const removeCount = breakpoints.length - MAX_CACHE_CONTROL_BLOCKS
+    for (let index = 0; index < removeCount; index += 1) {
+      delete breakpoints[index].cache_control
     }
 
-    let total = countCacheControlBlocks()
-
-    while (total > MAX_CACHE_CONTROL_BLOCKS) {
-      // 优先从 messages 中移除 cache_control，再从 system 中移除
-      if (removeCacheControlFromMessages()) {
-        total -= 1
-        continue
-      }
-
-      if (removeCacheControlFromSystem()) {
-        total -= 1
-        continue
-      }
-
-      break
+    if (removeCount > 0) {
+      logger.info(
+        `🧹 Trimmed ${removeCount} early cache breakpoint(s); retained ${MAX_CACHE_CONTROL_BLOCKS} deepest prefix breakpoint(s)`
+      )
     }
   }
 

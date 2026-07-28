@@ -109,6 +109,96 @@ describe('Claude relay cache_control ttl handling', () => {
     expect(processed.messages[0].content[0].cache_control).toEqual({ type: 'ephemeral' })
   })
 
+  test('retains the four deepest cache breakpoints when the request exceeds the limit', () => {
+    const body = {
+      model: 'claude-opus-4-8',
+      tools: [
+        {
+          name: 'Read',
+          input_schema: { type: 'object' },
+          cache_control: { type: 'ephemeral' }
+        }
+      ],
+      system: [
+        {
+          type: 'text',
+          text: 'early system prompt',
+          cache_control: { type: 'ephemeral' }
+        },
+        {
+          type: 'text',
+          text: 'late system prompt',
+          cache_control: { type: 'ephemeral' }
+        }
+      ],
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: 'first cached turn',
+              cache_control: { type: 'ephemeral' }
+            }
+          ]
+        },
+        {
+          role: 'assistant',
+          content: [
+            {
+              type: 'text',
+              text: 'second cached turn',
+              cache_control: { type: 'ephemeral' }
+            }
+          ]
+        },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: 'latest cached turn',
+              cache_control: { type: 'ephemeral' }
+            }
+          ]
+        }
+      ]
+    }
+
+    const processed = claudeRelayService._processRequestBody(body, null, true)
+
+    expect(processed.tools[0].cache_control).toBeUndefined()
+    expect(processed.system[0].cache_control).toBeUndefined()
+    expect(processed.system[1].cache_control).toEqual({ type: 'ephemeral' })
+    expect(processed.messages[0].content[0].cache_control).toEqual({ type: 'ephemeral' })
+    expect(processed.messages[1].content[0].cache_control).toEqual({ type: 'ephemeral' })
+    expect(processed.messages[2].content[0].cache_control).toEqual({ type: 'ephemeral' })
+  })
+
+  test('leaves requests with four cache breakpoints unchanged', () => {
+    const body = {
+      model: 'claude-opus-4-8',
+      system: [
+        {
+          type: 'text',
+          text: 'system prompt',
+          cache_control: { type: 'ephemeral' }
+        }
+      ],
+      messages: ['one', 'two', 'three'].map((text) => ({
+        role: 'user',
+        content: [{ type: 'text', text, cache_control: { type: 'ephemeral' } }]
+      }))
+    }
+
+    const processed = claudeRelayService._processRequestBody(body, null, true)
+
+    expect(processed.system[0].cache_control).toEqual({ type: 'ephemeral' })
+    processed.messages.forEach((message) => {
+      expect(message.content[0].cache_control).toEqual({ type: 'ephemeral' })
+    })
+  })
+
   test('adds extended cache ttl beta when request uses one hour cache', () => {
     const betaHeader = claudeRelayService._getBetaHeader('claude-opus-4-7', '', {
       messages: [
