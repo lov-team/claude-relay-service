@@ -931,15 +931,21 @@
                                 />
                               </div>
                               <span
-                                class="w-12 text-right text-xs font-semibold text-gray-800 dark:text-gray-100"
+                                class="w-16 text-right text-xs font-semibold text-gray-800 dark:text-gray-100"
                               >
-                                {{ formatClaudeUsagePercent(account.claudeUsage.fiveHour) }}
+                                已用 {{ formatClaudeUsagePercent(account.claudeUsage.fiveHour) }}
                               </span>
                             </div>
                           </div>
                         </div>
                         <div class="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
                           重置剩余 {{ formatClaudeRemaining(account.claudeUsage.fiveHour) }}
+                        </div>
+                        <div
+                          v-if="formatNurtureGuardUsage(account, 'fiveHour')"
+                          class="mt-0.5 text-[11px] font-medium text-emerald-700 dark:text-emerald-300"
+                        >
+                          {{ formatNurtureGuardUsage(account, 'fiveHour') }}
                         </div>
                       </div>
                       <!-- 7天窗口 -->
@@ -964,15 +970,21 @@
                                 />
                               </div>
                               <span
-                                class="w-12 text-right text-xs font-semibold text-gray-800 dark:text-gray-100"
+                                class="w-16 text-right text-xs font-semibold text-gray-800 dark:text-gray-100"
                               >
-                                {{ formatClaudeUsagePercent(account.claudeUsage.sevenDay) }}
+                                已用 {{ formatClaudeUsagePercent(account.claudeUsage.sevenDay) }}
                               </span>
                             </div>
                           </div>
                         </div>
                         <div class="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
                           重置剩余 {{ formatClaudeRemaining(account.claudeUsage.sevenDay) }}
+                        </div>
+                        <div
+                          v-if="formatNurtureGuardUsage(account, 'sevenDay')"
+                          class="mt-0.5 text-[11px] font-medium text-emerald-700 dark:text-emerald-300"
+                        >
+                          {{ formatNurtureGuardUsage(account, 'sevenDay') }}
                         </div>
                       </div>
                       <!-- 7天Opus窗口 -->
@@ -997,8 +1009,9 @@
                                 />
                               </div>
                               <span
-                                class="w-12 text-right text-xs font-semibold text-gray-800 dark:text-gray-100"
+                                class="w-16 text-right text-xs font-semibold text-gray-800 dark:text-gray-100"
                               >
+                                已用
                                 {{ formatClaudeUsagePercent(account.claudeUsage.sevenDayOpus) }}
                               </span>
                             </div>
@@ -1006,6 +1019,12 @@
                         </div>
                         <div class="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
                           重置剩余 {{ formatClaudeRemaining(account.claudeUsage.sevenDayOpus) }}
+                        </div>
+                        <div
+                          v-if="formatNurtureGuardUsage(account, 'sevenDayOpus')"
+                          class="mt-0.5 text-[11px] font-medium text-emerald-700 dark:text-emerald-300"
+                        >
+                          {{ formatNurtureGuardUsage(account, 'sevenDayOpus') }}
                         </div>
                       </div>
                     </div>
@@ -1631,15 +1650,21 @@
                           />
                         </div>
                         <span
-                          class="w-12 text-right text-xs font-semibold text-gray-800 dark:text-gray-100"
+                          class="w-16 text-right text-xs font-semibold text-gray-800 dark:text-gray-100"
                         >
-                          {{ formatClaudeUsagePercent(account.claudeUsage.fiveHour) }}
+                          已用 {{ formatClaudeUsagePercent(account.claudeUsage.fiveHour) }}
                         </span>
                       </div>
                     </div>
                   </div>
                   <div class="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
                     重置剩余 {{ formatClaudeRemaining(account.claudeUsage.fiveHour) }}
+                  </div>
+                  <div
+                    v-if="formatNurtureGuardUsage(account, 'fiveHour')"
+                    class="mt-0.5 text-[11px] font-medium text-emerald-700 dark:text-emerald-300"
+                  >
+                    {{ formatNurtureGuardUsage(account, 'fiveHour') }}
                   </div>
                 </div>
                 <!-- 7天窗口 -->
@@ -1664,15 +1689,21 @@
                           />
                         </div>
                         <span
-                          class="w-12 text-right text-xs font-semibold text-gray-800 dark:text-gray-100"
+                          class="w-16 text-right text-xs font-semibold text-gray-800 dark:text-gray-100"
                         >
-                          {{ formatClaudeUsagePercent(account.claudeUsage.sevenDay) }}
+                          已用 {{ formatClaudeUsagePercent(account.claudeUsage.sevenDay) }}
                         </span>
                       </div>
                     </div>
                   </div>
                   <div class="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
                     重置剩余 {{ formatClaudeRemaining(account.claudeUsage.sevenDay) }}
+                  </div>
+                  <div
+                    v-if="formatNurtureGuardUsage(account, 'sevenDay')"
+                    class="mt-0.5 text-[11px] font-medium text-emerald-700 dark:text-emerald-300"
+                  >
+                    {{ formatNurtureGuardUsage(account, 'sevenDay') }}
                   </div>
                 </div>
                 <!-- 7天Opus窗口 -->
@@ -1697,15 +1728,21 @@
                           />
                         </div>
                         <span
-                          class="w-12 text-right text-xs font-semibold text-gray-800 dark:text-gray-100"
+                          class="w-16 text-right text-xs font-semibold text-gray-800 dark:text-gray-100"
                         >
-                          {{ formatClaudeUsagePercent(account.claudeUsage.sevenDayOpus) }}
+                          已用 {{ formatClaudeUsagePercent(account.claudeUsage.sevenDayOpus) }}
                         </span>
                       </div>
                     </div>
                   </div>
                   <div class="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
                     重置剩余 {{ formatClaudeRemaining(account.claudeUsage.sevenDayOpus) }}
+                  </div>
+                  <div
+                    v-if="formatNurtureGuardUsage(account, 'sevenDayOpus')"
+                    class="mt-0.5 text-[11px] font-medium text-emerald-700 dark:text-emerald-300"
+                  >
+                    {{ formatNurtureGuardUsage(account, 'sevenDayOpus') }}
                   </div>
                 </div>
               </div>
@@ -4862,6 +4899,43 @@ const formatClaudeUsagePercent = (window) => {
     return '-'
   }
   return `${window.utilization}%`
+}
+
+// 显示养号护栏实际使用率与调度时采用的当前有效上限
+const formatNurtureGuardUsage = (account, windowType) => {
+  const evaluation = account?.nurtureEvaluation
+  if (!account?.nurtureEnabled || !evaluation?.active) {
+    return ''
+  }
+
+  const fieldMap = {
+    fiveHour: ['fiveHourUtil', 'fiveHourLimit'],
+    sevenDay: ['sevenDayUtil', 'sevenDayLimit'],
+    sevenDayOpus: ['sevenDayOpusUtil', 'sevenDayOpusLimit']
+  }
+  const fields = fieldMap[windowType]
+  if (!fields) {
+    return ''
+  }
+
+  const actualValue = evaluation.actual?.[fields[0]]
+  const limitValue = evaluation.limits?.[fields[1]]
+  if (
+    actualValue === null ||
+    actualValue === undefined ||
+    limitValue === null ||
+    limitValue === undefined
+  ) {
+    return ''
+  }
+
+  const actual = Number(actualValue)
+  const limit = Number(limitValue)
+  if (!Number.isFinite(actual) || !Number.isFinite(limit)) {
+    return ''
+  }
+
+  return `护栏：已用 ${actual.toFixed(1)}% / 上限 ${limit.toFixed(1)}%`
 }
 
 // 获取 Claude 使用率宽度

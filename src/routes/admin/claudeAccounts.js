@@ -424,6 +424,20 @@ router.get('/claude-accounts', authenticateAdmin, async (req, res) => {
     // 为每个账户添加使用统计信息
     const accountsWithStats = await Promise.all(
       accounts.map(async (account) => {
+        let nurtureEvaluation = null
+        if (account.nurtureEnabled) {
+          try {
+            nurtureEvaluation = await claudeAccountNurtureService.evaluate(account.id, {
+              skipUsageRefresh: true
+            })
+          } catch (nurtureError) {
+            logger.warn(
+              `Failed to get nurture guard values for account ${account.id}:`,
+              nurtureError.message
+            )
+          }
+        }
+
         try {
           const usageStats = await redis.getAccountUsageStats(account.id, 'openai')
           const groupInfos = await accountGroupService.getAccountGroups(account.id)
@@ -482,6 +496,7 @@ router.get('/claude-accounts', authenticateAdmin, async (req, res) => {
             // 转换schedulable为布尔值
             schedulable: account.schedulable === 'true' || account.schedulable === true,
             groupInfos,
+            nurtureEvaluation,
             usage: {
               daily: usageStats.daily,
               total: usageStats.total,
@@ -498,6 +513,7 @@ router.get('/claude-accounts', authenticateAdmin, async (req, res) => {
             return {
               ...formattedAccount,
               groupInfos,
+              nurtureEvaluation,
               usage: {
                 daily: { tokens: 0, requests: 0, allTokens: 0 },
                 total: { tokens: 0, requests: 0, allTokens: 0 },
@@ -514,6 +530,7 @@ router.get('/claude-accounts', authenticateAdmin, async (req, res) => {
             return {
               ...formattedAccount,
               groupInfos: [],
+              nurtureEvaluation,
               usage: {
                 daily: { tokens: 0, requests: 0, allTokens: 0 },
                 total: { tokens: 0, requests: 0, allTokens: 0 },
