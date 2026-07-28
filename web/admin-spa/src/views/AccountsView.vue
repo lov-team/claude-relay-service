@@ -1027,6 +1027,27 @@
                           {{ formatNurtureGuardUsage(account, 'sevenDayOpus') }}
                         </div>
                       </div>
+                      <div
+                        v-if="
+                          formatNurtureVelocityUsage(account) ||
+                          formatNurtureLocalRequestUsage(account) ||
+                          formatNurtureRpmUsage(account)
+                        "
+                        class="rounded-lg border border-emerald-200 bg-emerald-50 px-2 py-1.5 text-[11px] font-medium text-emerald-700 dark:border-emerald-800 dark:bg-emerald-900/20 dark:text-emerald-300"
+                      >
+                        <div v-if="formatNurtureVelocityUsage(account)">
+                          <i class="fas fa-chart-line mr-1" />
+                          {{ formatNurtureVelocityUsage(account) }}
+                        </div>
+                        <div v-if="formatNurtureLocalRequestUsage(account)">
+                          <i class="fas fa-list-ol mr-1" />
+                          {{ formatNurtureLocalRequestUsage(account) }}
+                        </div>
+                        <div v-if="formatNurtureRpmUsage(account)">
+                          <i class="fas fa-tachometer-alt mr-1" />
+                          {{ formatNurtureRpmUsage(account) }}
+                        </div>
+                      </div>
                     </div>
                     <!-- Setup Token 账户：显示原有的会话窗口时间进度 -->
                     <div
@@ -1743,6 +1764,27 @@
                     class="mt-0.5 text-[11px] font-medium text-emerald-700 dark:text-emerald-300"
                   >
                     {{ formatNurtureGuardUsage(account, 'sevenDayOpus') }}
+                  </div>
+                </div>
+                <div
+                  v-if="
+                    formatNurtureVelocityUsage(account) ||
+                    formatNurtureLocalRequestUsage(account) ||
+                    formatNurtureRpmUsage(account)
+                  "
+                  class="rounded-lg border border-emerald-200 bg-emerald-50 px-2 py-1.5 text-[11px] font-medium text-emerald-700 dark:border-emerald-800 dark:bg-emerald-900/20 dark:text-emerald-300"
+                >
+                  <div v-if="formatNurtureVelocityUsage(account)">
+                    <i class="fas fa-chart-line mr-1" />
+                    {{ formatNurtureVelocityUsage(account) }}
+                  </div>
+                  <div v-if="formatNurtureLocalRequestUsage(account)">
+                    <i class="fas fa-list-ol mr-1" />
+                    {{ formatNurtureLocalRequestUsage(account) }}
+                  </div>
+                  <div v-if="formatNurtureRpmUsage(account)">
+                    <i class="fas fa-tachometer-alt mr-1" />
+                    {{ formatNurtureRpmUsage(account) }}
                   </div>
                 </div>
               </div>
@@ -4936,6 +4978,74 @@ const formatNurtureGuardUsage = (account, windowType) => {
   }
 
   return `护栏：已用 ${actual.toFixed(1)}% / 上限 ${limit.toFixed(1)}%`
+}
+
+// 显示养号阶段的本地请求计数；常驻阶段没有此项限制
+const formatNurtureLocalRequestUsage = (account) => {
+  const evaluation = account?.nurtureEvaluation
+  if (!account?.nurtureEnabled || !evaluation?.active) {
+    return ''
+  }
+
+  const actual = Number(evaluation.actual?.localCount)
+  if (!Number.isFinite(actual)) {
+    return ''
+  }
+
+  const limitValue = evaluation.limits?.localRequestsLimit
+  if (limitValue === null || limitValue === undefined) {
+    return `本地计数：已用 ${actual} / 上限不限`
+  }
+
+  const limit = Number(limitValue)
+  if (!Number.isFinite(limit)) {
+    return ''
+  }
+
+  return `本地计数：已用 ${actual} / 上限 ${limit}`
+}
+
+// 显示当天七天窗口用量的增量及当前有效增速上限
+const formatNurtureVelocityUsage = (account) => {
+  const evaluation = account?.nurtureEvaluation
+  if (!account?.nurtureEnabled || !evaluation?.active) {
+    return ''
+  }
+
+  const deltaValue = evaluation.actual?.dayDelta
+  const limitValue = evaluation.actual?.maxDailyDelta
+  if (
+    deltaValue === null ||
+    deltaValue === undefined ||
+    limitValue === null ||
+    limitValue === undefined
+  ) {
+    return ''
+  }
+
+  const delta = Number(deltaValue)
+  const limit = Number(limitValue)
+  if (!Number.isFinite(delta) || !Number.isFinite(limit)) {
+    return ''
+  }
+
+  return `7天增速：已增 ${delta.toFixed(1)}% / 上限 ${limit.toFixed(1)}%`
+}
+
+// 显示最近一分钟内的请求计数和 RPM 上限
+const formatNurtureRpmUsage = (account) => {
+  const rpm = account?.nurtureEvaluation?.actual?.rpm
+  if (!account?.nurtureEnabled || !account?.nurtureEvaluation?.active || !rpm) {
+    return ''
+  }
+
+  const count = Number(rpm.count)
+  const limit = Number(rpm.limit)
+  if (!Number.isFinite(count) || !Number.isFinite(limit)) {
+    return ''
+  }
+
+  return `RPM：当前 ${count} / 上限 ${limit}`
 }
 
 // 获取 Claude 使用率宽度

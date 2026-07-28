@@ -266,6 +266,7 @@ describe('claudeAccountNurtureService.evaluate', () => {
   })
 
   test('allows seven_day usage under pace limit in young window', async () => {
+    setupRedisClient({ sevenDayBaseline: 18 })
     redis.getClaudeAccount.mockResolvedValue(
       buildAccount({
         claudeSevenDayUtilization: '20',
@@ -277,6 +278,8 @@ describe('claudeAccountNurtureService.evaluate', () => {
       skipUsageRefresh: true
     })
     expect(result.blocked).toBe(false)
+    expect(result.actual.dayDelta).toBe(2)
+    expect(result.actual.maxDailyDelta).toBeGreaterThan(2)
   })
 
   test('blocks seven_day_velocity when daily jump exceeds configured delta in nurturing', async () => {

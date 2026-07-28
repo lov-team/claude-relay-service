@@ -295,25 +295,43 @@ class ClaudeAccountNurtureService {
     const rpmResult = await this.checkRpm(accountId, limits.rpmLimit, {
       increment: options.incrementRpm === true
     })
+
+    let dayDelta = null
+    let maxDailyDelta = null
+    if (sevenDayUtil !== null) {
+      const baseline = await this.ensureSevenDayBaseline(accountId, sevenDayUtil)
+      dayDelta = sevenDayUtil - baseline
+      maxDailyDelta = config.maxDailySevenDayDelta[tier]
+      if (limits.phase === 'steady') {
+        const steadyVelocityLimit = calcSevenDaySteadyVelocityLimit(
+          limits.steadyCaps.sevenDay,
+          sevenDayUtil,
+          account.claudeSevenDayResetsAt,
+          config.paceBuffer
+        )
+        if (steadyVelocityLimit !== null) {
+          maxDailyDelta = steadyVelocityLimit
+        }
+      }
+    }
+
+    const actual = {
+      fiveHourUtil,
+      sevenDayUtil,
+      sevenDayOpusUtil,
+      localCount,
+      dayDelta,
+      maxDailyDelta,
+      rpm: rpmResult
+    }
+
     if (rpmResult.blocked) {
-      return this._buildResult(true, 'rpm', tier, limits, {
-        fiveHourUtil,
-        sevenDayUtil,
-        sevenDayOpusUtil,
-        localCount,
-        rpm: rpmResult
-      })
+      return this._buildResult(true, 'rpm', tier, limits, actual)
     }
 
     if (fiveHourUtil !== null && fiveHourUtil >= limits.fiveHourLimit) {
       const reason = limits.phase === 'steady' ? 'five_hour_steady' : 'five_hour_curve'
-      return this._buildResult(true, reason, tier, limits, {
-        fiveHourUtil,
-        sevenDayUtil,
-        sevenDayOpusUtil,
-        localCount,
-        rpm: rpmResult
-      })
+      return this._buildResult(true, reason, tier, limits, actual)
     }
 
     if (sevenDayUtil !== null && sevenDayUtil >= limits.sevenDayLimit) {
@@ -327,50 +345,15 @@ class ClaudeAccountNurtureService {
       ) {
         reason = 'seven_day_pace'
       }
-      return this._buildResult(true, reason, tier, limits, {
-        fiveHourUtil,
-        sevenDayUtil,
-        sevenDayOpusUtil,
-        localCount,
-        rpm: rpmResult
-      })
+      return this._buildResult(true, reason, tier, limits, actual)
     }
 
     if (sevenDayOpusUtil !== null && sevenDayOpusUtil >= limits.sevenDayOpusLimit) {
-      return this._buildResult(true, 'seven_day_opus', tier, limits, {
-        fiveHourUtil,
-        sevenDayUtil,
-        sevenDayOpusUtil,
-        localCount,
-        rpm: rpmResult
-      })
+      return this._buildResult(true, 'seven_day_opus', tier, limits, actual)
     }
 
-    if (sevenDayUtil !== null) {
-      const baseline = await this.ensureSevenDayBaseline(accountId, sevenDayUtil)
-      let maxDelta = config.maxDailySevenDayDelta[tier]
-      if (limits.phase === 'steady') {
-        const steadyVelocityLimit = calcSevenDaySteadyVelocityLimit(
-          limits.steadyCaps.sevenDay,
-          sevenDayUtil,
-          account.claudeSevenDayResetsAt,
-          config.paceBuffer
-        )
-        if (steadyVelocityLimit !== null) {
-          maxDelta = steadyVelocityLimit
-        }
-      }
-      if (sevenDayUtil - baseline > maxDelta) {
-        return this._buildResult(true, 'seven_day_velocity', tier, limits, {
-          fiveHourUtil,
-          sevenDayUtil,
-          sevenDayOpusUtil,
-          localCount,
-          dayDelta: sevenDayUtil - baseline,
-          maxDailyDelta: maxDelta,
-          rpm: rpmResult
-        })
-      }
+    if (dayDelta !== null && maxDailyDelta !== null && dayDelta > maxDailyDelta) {
+      return this._buildResult(true, 'seven_day_velocity', tier, limits, actual)
     }
 
     if (
@@ -378,21 +361,11 @@ class ClaudeAccountNurtureService {
       limits.localRequestsLimit !== null &&
       localCount >= limits.localRequestsLimit
     ) {
-      return this._buildResult(true, 'local_request_count', tier, limits, {
-        fiveHourUtil,
-        sevenDayUtil,
-        sevenDayOpusUtil,
-        localCount,
-        rpm: rpmResult
-      })
+      return this._buildResult(true, 'local_request_count', tier, limits, actual)
     }
 
     const result = this._buildResult(false, null, tier, limits, {
-      fiveHourUtil,
-      sevenDayUtil,
-      sevenDayOpusUtil,
-      localCount,
-      rpm: rpmResult,
+      ...actual,
       windowProgress: calcSevenDayWindowProgress(account.claudeSevenDayResetsAt)
     })
 
@@ -538,7 +511,6 @@ class ClaudeAccountNurtureService {
       return { processed: 0, graduated: 0 }
     }
 
-    const client = redis.getClientSafe()
     const dateKey = getUtcDateKey()
     const lockKey = `nurture:rollover:${dateKey}`
     const lockValue = `${Date.now()}_${crypto.randomBytes(4).toString('hex')}`
