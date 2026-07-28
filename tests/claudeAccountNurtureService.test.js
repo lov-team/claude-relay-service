@@ -215,6 +215,7 @@ describe('claudeAccountNurtureService.evaluate', () => {
     expect(result.limits.steadyCaps.fiveHour).toBeLessThan(MAX_CAP_PERCENT)
     expect(result.limits.steadyCaps.sevenDay).toBeLessThan(MAX_CAP_PERCENT)
     expect(result.limits.paceSevenDay).toBeGreaterThan(sevenDayUtil)
+    expect(result.actual.maxDailyDelta).toBeLessThanOrEqual(config.steadyCaps.pro.sevenDayVelocity)
   })
 
   test('steady pro blocks five_hour_steady at permanent cap', async () => {
@@ -324,9 +325,10 @@ describe('claudeAccountNurtureService.evaluate', () => {
     expect(result.limits.paceSevenDay).toBeGreaterThan(30)
   })
 
-  test('steady blocks seven_day_velocity when daily jump exceeds remaining-time budget', async () => {
+  test('steady blocks seven_day_velocity when daily jump exceeds dynamic cap', async () => {
+    const config = cloneDefaultConfig()
     const sevenDayUtil = 75
-    const baseline = 65
+    const baseline = 64
     const resetsAt = new Date(FIXED_NOW + 24 * 60 * 60 * 1000).toISOString()
 
     setupRedisClient({ sevenDayBaseline: baseline })
@@ -343,8 +345,8 @@ describe('claudeAccountNurtureService.evaluate', () => {
     })
     expect(result.blocked).toBe(true)
     expect(result.reason).toBe('seven_day_velocity')
-    expect(result.actual.dayDelta).toBe(10)
-    expect(result.actual.maxDailyDelta).toBeLessThan(10)
+    expect(result.actual.dayDelta).toBe(11)
+    expect(result.actual.maxDailyDelta).toBeLessThanOrEqual(config.steadyCaps.pro.sevenDayVelocity)
   })
 
   test('blocks seven_day_opus steady cap', async () => {
@@ -442,6 +444,9 @@ describe('claudeAccountNurtureService.evaluate', () => {
     expect(result.limits.steadyCaps.fiveHour).toBeLessThan(MAX_CAP_PERCENT)
     expect(result.limits.steadyCaps.sevenDay).toBeLessThan(MAX_CAP_PERCENT)
     expect(result.limits.steadyCaps.sevenDayOpus).toBeLessThan(MAX_CAP_PERCENT)
+    expect(result.limits.steadyCaps.sevenDayVelocity).toBeGreaterThan(
+      config.steadyCaps.pro.sevenDayVelocity
+    )
   })
 
   test('subscription tier overrides and repairs a stale stored nurture tier', async () => {
@@ -626,6 +631,26 @@ describe('claudeAccountNurtureService.evaluate', () => {
     expect(nurturing.limits.rpmLimit).toBe(config.proDayPlans[0].rpm)
     expect(steady.limits.rpmLimit).toBe(config.steadyCaps.pro.rpm)
     expect(nurturing.limits.rpmLimit).toBeLessThan(steady.limits.rpmLimit)
+  })
+
+  test('steady local request cap matches Day 7 and blocks at the cap', async () => {
+    const config = cloneDefaultConfig()
+    const steadyLimit = config.steadyCaps.pro.localRequests
+    expect(steadyLimit).toBe(config.proDayPlans[6].localRequestsMax)
+
+    redis.getClaudeAccount.mockResolvedValue(
+      buildAccount({
+        nurturePhase: 'steady',
+        nurtureLocalRequestCount: String(steadyLimit)
+      })
+    )
+
+    const result = await claudeAccountNurtureService.evaluate('acc-pro-1', {
+      skipUsageRefresh: true
+    })
+    expect(result.limits.localRequestsLimit).toBe(steadyLimit)
+    expect(result.blocked).toBe(true)
+    expect(result.reason).toBe('local_request_count')
   })
 })
 

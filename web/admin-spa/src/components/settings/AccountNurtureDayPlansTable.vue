@@ -10,7 +10,10 @@
         </p>
       </div>
       <div class="text-right text-xs text-gray-500 dark:text-gray-400">
-        <p>毕业后常驻顶：5h {{ steadyCaps.fiveHour }}% / 7d {{ steadyCaps.sevenDay }}%</p>
+        <p>
+          毕业后常驻顶：5h {{ steadyCaps.fiveHour }}% / 7d {{ steadyCaps.sevenDay }}% / 本地
+          {{ steadyCaps.localRequests }} / 日增速封顶 {{ steadyCaps.sevenDayVelocity }}%
+        </p>
         <p>百分比字段须 &lt; 90%</p>
       </div>
     </div>
@@ -191,6 +194,11 @@
                 </div>
                 <div class="relative h-2 rounded-full bg-gray-200 dark:bg-gray-700">
                   <div
+                    class="absolute bottom-0 top-0 w-0.5 bg-amber-400/90 dark:bg-amber-300"
+                    :style="referenceStyle(steadyCaps.localRequests, localScale)"
+                    title="毕业后本地请求常驻顶"
+                  />
+                  <div
                     class="absolute top-0 h-full rounded-full bg-emerald-500/75 dark:bg-emerald-400/80"
                     :class="rangeBarClass(plan.localRequestsMin, plan.localRequestsMax)"
                     :style="rangeBarStyle(plan.localRequestsMin, plan.localRequestsMax, localScale)"
@@ -232,7 +240,7 @@ const percentScale = 90
 const localScale = computed(() => {
   const maxValue = props.plans.reduce(
     (current, plan) => Math.max(current, Number(plan.localRequestsMax) || 0),
-    480
+    Math.max(Number(props.steadyCaps.localRequests) || 0, 480)
   )
   return Math.max(maxValue, 100)
 })
@@ -275,11 +283,11 @@ const rangeBarStyle = (min, max, scale) => {
   }
 }
 
-const referenceStyle = (reference) => {
+const referenceStyle = (reference, scale = percentScale) => {
   if (reference === null || reference === undefined) {
     return { display: 'none' }
   }
-  return { left: `${(reference / percentScale) * 100}%` }
+  return { left: `${(reference / scale) * 100}%` }
 }
 
 const readNumber = (event) => Number(event.target.value)

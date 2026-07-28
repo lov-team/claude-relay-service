@@ -22,6 +22,14 @@ describe('accountNurtureDefaults', () => {
     expect(defaults.steadyCaps.max.fiveHour).toBeLessThan(MAX_CAP_PERCENT)
     expect(defaults.steadyCaps.max.sevenDay).toBeLessThan(MAX_CAP_PERCENT)
     expect(defaults.steadyCaps.max.sevenDayOpus).toBeLessThan(MAX_CAP_PERCENT)
+    expect(defaults.steadyCaps.pro.sevenDayVelocity).toBe(10)
+    expect(defaults.steadyCaps.max.sevenDayVelocity).toBe(15)
+  })
+
+  test('default steady local request caps match Day 7 maximums', () => {
+    const defaults = cloneDefaultConfig()
+    expect(defaults.steadyCaps.pro.localRequests).toBe(defaults.proDayPlans[6].localRequestsMax)
+    expect(defaults.steadyCaps.max.localRequests).toBe(defaults.maxDayPlans[6].localRequestsMax)
   })
 
   test('accepts 89 as steady cap and rejects 90', () => {
@@ -64,6 +72,33 @@ describe('accountNurtureDefaults', () => {
         proDayPlans: defaults.proDayPlans.slice(0, 3)
       })
     ).toThrow(/exactly 7 day plans/)
+  })
+
+  test('fills missing steady local cap and rejects values below Day 7 maximum', () => {
+    const defaults = cloneDefaultConfig()
+    const legacySteadyCaps = JSON.parse(JSON.stringify(defaults.steadyCaps))
+    delete legacySteadyCaps.pro.localRequests
+    delete legacySteadyCaps.max.localRequests
+
+    const normalized = normalizeAccountNurtureConfig({
+      ...defaults,
+      steadyCaps: legacySteadyCaps
+    })
+    expect(normalized.steadyCaps.pro.localRequests).toBe(defaults.proDayPlans[6].localRequestsMax)
+    expect(normalized.steadyCaps.max.localRequests).toBe(defaults.maxDayPlans[6].localRequestsMax)
+
+    expect(() =>
+      normalizeAccountNurtureConfig({
+        ...defaults,
+        steadyCaps: {
+          ...defaults.steadyCaps,
+          pro: {
+            ...defaults.steadyCaps.pro,
+            localRequests: defaults.proDayPlans[6].localRequestsMax - 1
+          }
+        }
+      })
+    ).toThrow(/at or above Day 7 maximum/)
   })
 
   test('rejects invalid paceBuffer and usageSnapshotMaxAgeMs', () => {
@@ -131,7 +166,7 @@ describe('accountNurtureDefaults', () => {
 
   test('all default day plan curve ceilings stay below 90%', () => {
     const defaults = cloneDefaultConfig()
-    const checkPlans = (plans, tier) => {
+    const checkPlans = (plans) => {
       plans.forEach((plan) => {
         expect(plan.fiveHourMax).toBeLessThan(MAX_CAP_PERCENT)
         expect(plan.sevenDayMax).toBeLessThan(MAX_CAP_PERCENT)
@@ -144,8 +179,8 @@ describe('accountNurtureDefaults', () => {
       expect(plans.map((p) => p.day)).toEqual([1, 2, 3, 4, 5, 6, 7])
     }
 
-    checkPlans(defaults.proDayPlans, 'pro')
-    checkPlans(defaults.maxDayPlans, 'max')
+    checkPlans(defaults.proDayPlans)
+    checkPlans(defaults.maxDayPlans)
   })
 
   test('max steady caps are strictly higher than pro for each percent field', () => {
@@ -156,11 +191,14 @@ describe('accountNurtureDefaults', () => {
       defaults.steadyCaps.pro.sevenDayOpus
     )
     expect(defaults.steadyCaps.max.rpm).toBeGreaterThan(defaults.steadyCaps.pro.rpm)
+    expect(defaults.steadyCaps.max.sevenDayVelocity).toBeGreaterThan(
+      defaults.steadyCaps.pro.sevenDayVelocity
+    )
   })
 
   test('assertSteadyCapsBelowMax rejects every percent field at 90', () => {
     const defaults = cloneDefaultConfig()
-    ;['fiveHour', 'sevenDay', 'sevenDayOpus'].forEach((field) => {
+    ;['fiveHour', 'sevenDay', 'sevenDayOpus', 'sevenDayVelocity'].forEach((field) => {
       const broken = JSON.parse(JSON.stringify(defaults.steadyCaps))
       broken.pro[field] = 90
       expect(() => assertSteadyCapsBelowMax(broken)).toThrow(/below 90/)

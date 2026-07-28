@@ -33,6 +33,10 @@ describe('accountNurtureConfigService', () => {
 
     expect(config.enabled).toBe(true)
     expect(config.steadyCaps.pro.sevenDay).toBeLessThan(MAX_CAP_PERCENT)
+    expect(config.steadyCaps.pro.localRequests).toBe(config.proDayPlans[6].localRequestsMax)
+    expect(config.steadyCaps.max.localRequests).toBe(config.maxDayPlans[6].localRequestsMax)
+    expect(config.steadyCaps.pro.sevenDayVelocity).toBe(10)
+    expect(config.steadyCaps.max.sevenDayVelocity).toBe(15)
     expect(config.proDayPlans).toHaveLength(7)
   })
 

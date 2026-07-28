@@ -42,8 +42,22 @@ const DEFAULT_ACCOUNT_NURTURE_CONFIG = {
   paceBuffer: 1.08,
   maxDailySevenDayDelta: { pro: 10, max: 15 },
   steadyCaps: {
-    pro: { rpm: 30, fiveHour: 86, sevenDay: 82, sevenDayOpus: 78 },
-    max: { rpm: 50, fiveHour: 88, sevenDay: 86, sevenDayOpus: 84 }
+    pro: {
+      rpm: 30,
+      fiveHour: 86,
+      sevenDay: 82,
+      sevenDayOpus: 78,
+      sevenDayVelocity: 10,
+      localRequests: 260
+    },
+    max: {
+      rpm: 50,
+      fiveHour: 88,
+      sevenDay: 86,
+      sevenDayOpus: 84,
+      sevenDayVelocity: 15,
+      localRequests: 480
+    }
   },
   proDayPlans: DEFAULT_PRO_DAY_PLANS,
   maxDayPlans: DEFAULT_MAX_DAY_PLANS,
@@ -77,7 +91,7 @@ function normalizeCapPercent(value, label) {
 
 function assertSteadyCapsBelowMax(steadyCaps) {
   ;['pro', 'max'].forEach((tier) => {
-    ;['fiveHour', 'sevenDay', 'sevenDayOpus'].forEach((field) => {
+    ;['fiveHour', 'sevenDay', 'sevenDayOpus', 'sevenDayVelocity'].forEach((field) => {
       const value = steadyCaps?.[tier]?.[field]
       if (!Number.isFinite(value) || value >= MAX_CAP_PERCENT) {
         throw new Error(`steadyCaps.${tier}.${field} must be below ${MAX_CAP_PERCENT}`)
@@ -160,6 +174,11 @@ function normalizeAccountNurtureConfig(input = {}) {
     throw new Error('maxDailySevenDayDelta must be positive numbers')
   }
 
+  const proDayPlans = normalizeDayPlans(merged.proDayPlans, 'proDayPlans')
+  const maxDayPlans = normalizeDayPlans(merged.maxDayPlans, 'maxDayPlans')
+  const proDaySevenMax = proDayPlans[proDayPlans.length - 1].localRequestsMax
+  const maxDaySevenMax = maxDayPlans[maxDayPlans.length - 1].localRequestsMax
+
   const steadyCaps = {
     pro: {
       rpm: Number(merged.steadyCaps?.pro?.rpm ?? base.steadyCaps.pro.rpm),
@@ -174,6 +193,14 @@ function normalizeAccountNurtureConfig(input = {}) {
       sevenDayOpus: normalizeCapPercent(
         merged.steadyCaps?.pro?.sevenDayOpus ?? base.steadyCaps.pro.sevenDayOpus,
         'steadyCaps.pro.sevenDayOpus'
+      ),
+      sevenDayVelocity: normalizeCapPercent(
+        merged.steadyCaps?.pro?.sevenDayVelocity ?? base.steadyCaps.pro.sevenDayVelocity,
+        'steadyCaps.pro.sevenDayVelocity'
+      ),
+      localRequests: Number(
+        merged.steadyCaps?.pro?.localRequests ??
+          Math.max(base.steadyCaps.pro.localRequests, proDaySevenMax)
       )
     },
     max: {
@@ -189,6 +216,14 @@ function normalizeAccountNurtureConfig(input = {}) {
       sevenDayOpus: normalizeCapPercent(
         merged.steadyCaps?.max?.sevenDayOpus ?? base.steadyCaps.max.sevenDayOpus,
         'steadyCaps.max.sevenDayOpus'
+      ),
+      sevenDayVelocity: normalizeCapPercent(
+        merged.steadyCaps?.max?.sevenDayVelocity ?? base.steadyCaps.max.sevenDayVelocity,
+        'steadyCaps.max.sevenDayVelocity'
+      ),
+      localRequests: Number(
+        merged.steadyCaps?.max?.localRequests ??
+          Math.max(base.steadyCaps.max.localRequests, maxDaySevenMax)
       )
     }
   }
@@ -199,6 +234,15 @@ function normalizeAccountNurtureConfig(input = {}) {
   if (!Number.isFinite(steadyCaps.max.rpm) || steadyCaps.max.rpm < 1) {
     throw new Error('steadyCaps.max.rpm must be >= 1')
   }
+  ;['pro', 'max'].forEach((tier) => {
+    const { localRequests } = steadyCaps[tier]
+    const daySevenMax = tier === 'pro' ? proDaySevenMax : maxDaySevenMax
+    if (!Number.isInteger(localRequests) || localRequests < daySevenMax) {
+      throw new Error(
+        `steadyCaps.${tier}.localRequests must be an integer at or above Day 7 maximum`
+      )
+    }
+  })
 
   assertSteadyCapsBelowMax(steadyCaps)
 
@@ -210,8 +254,8 @@ function normalizeAccountNurtureConfig(input = {}) {
     paceBuffer,
     maxDailySevenDayDelta,
     steadyCaps,
-    proDayPlans: normalizeDayPlans(merged.proDayPlans, 'proDayPlans'),
-    maxDayPlans: normalizeDayPlans(merged.maxDayPlans, 'maxDayPlans'),
+    proDayPlans,
+    maxDayPlans,
     updatedAt: merged.updatedAt || null,
     updatedBy: merged.updatedBy || null
   }

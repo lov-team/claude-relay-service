@@ -44,7 +44,9 @@
             />
           </div>
           <div>
-            <label class="text-sm text-gray-600 dark:text-gray-300">Pro 日增速上限 (%)</label>
+            <label class="text-sm text-gray-600 dark:text-gray-300"
+              >养号期 Pro 日增速上限 (%)</label
+            >
             <input
               v-model.number="form.maxDailySevenDayDelta.pro"
               class="mt-1 w-full rounded-lg border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white"
@@ -53,7 +55,9 @@
             />
           </div>
           <div>
-            <label class="text-sm text-gray-600 dark:text-gray-300">Max 日增速上限 (%)</label>
+            <label class="text-sm text-gray-600 dark:text-gray-300"
+              >养号期 Max 日增速上限 (%)</label
+            >
             <input
               v-model.number="form.maxDailySevenDayDelta.max"
               class="mt-1 w-full rounded-lg border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white"
@@ -88,13 +92,13 @@
         <h4 class="mb-4 text-lg font-semibold uppercase text-gray-900 dark:text-gray-100">
           {{ tier }} 常驻上限
         </h4>
-        <div class="grid gap-4 md:grid-cols-4">
+        <div class="grid gap-4 md:grid-cols-3 xl:grid-cols-6">
           <div v-for="field in steadyFields" :key="`${tier}-${field.key}`">
             <label class="text-sm text-gray-600 dark:text-gray-300">{{ field.label }}</label>
             <input
               v-model.number="form.steadyCaps[tier][field.key]"
               class="mt-1 w-full rounded-lg border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white"
-              :max="field.key === 'rpm' ? undefined : 89"
+              :max="['rpm', 'localRequests'].includes(field.key) ? undefined : 89"
               min="1"
               type="number"
               @change="saveConfig"
@@ -139,8 +143,22 @@ const form = ref({
   paceBuffer: 1.08,
   maxDailySevenDayDelta: { pro: 10, max: 15 },
   steadyCaps: {
-    pro: { rpm: 30, fiveHour: 86, sevenDay: 82, sevenDayOpus: 78 },
-    max: { rpm: 50, fiveHour: 88, sevenDay: 86, sevenDayOpus: 84 }
+    pro: {
+      rpm: 30,
+      fiveHour: 86,
+      sevenDay: 82,
+      sevenDayOpus: 78,
+      sevenDayVelocity: 10,
+      localRequests: 260
+    },
+    max: {
+      rpm: 50,
+      fiveHour: 88,
+      sevenDay: 86,
+      sevenDayOpus: 84,
+      sevenDayVelocity: 15,
+      localRequests: 480
+    }
   },
   proDayPlans: [],
   maxDayPlans: []
@@ -150,7 +168,9 @@ const steadyFields = [
   { key: 'rpm', label: 'RPM' },
   { key: 'fiveHour', label: '5h %' },
   { key: 'sevenDay', label: '7d %' },
-  { key: 'sevenDayOpus', label: '7d Opus %' }
+  { key: 'sevenDayOpus', label: '7d Opus %' },
+  { key: 'sevenDayVelocity', label: '7天日增速封顶 %' },
+  { key: 'localRequests', label: '本地请求数' }
 ]
 
 const loadConfig = async () => {
@@ -178,9 +198,17 @@ const hasInvalidDayPlans = (plans) =>
       plan.sevenDayMax >= 90
   )
 
+const hasInvalidSteadyLocalCaps = () =>
+  form.value.steadyCaps.pro.localRequests < form.value.proDayPlans[6].localRequestsMax ||
+  form.value.steadyCaps.max.localRequests < form.value.maxDayPlans[6].localRequestsMax
+
 const saveConfig = async () => {
   if (hasInvalidDayPlans(form.value.proDayPlans) || hasInvalidDayPlans(form.value.maxDayPlans)) {
     showToast('七天曲线存在无效区间（min > max 或百分比 ≥ 90%）', 'error')
+    return
+  }
+  if (hasInvalidSteadyLocalCaps()) {
+    showToast('常驻本地请求数不能低于对应套餐的 Day7 上限', 'error')
     return
   }
 

@@ -791,11 +791,11 @@
                       }}
                     </span>
                     <span
-                      v-if="account.nurtureEnabled && account.nurtureLastBlockReason"
+                      v-if="account.nurtureEnabled && getCurrentNurtureBlockReason(account)"
                       class="mt-1 block max-w-xl truncate text-xs font-medium text-amber-700 dark:text-amber-300"
-                      :title="account.nurtureLastBlockReason"
+                      :title="formatNurtureBlockDetail(account)"
                     >
-                      养号阻断：{{ formatNurtureBlockReason(account.nurtureLastBlockReason) }}
+                      养号阻断：{{ formatNurtureBlockDetail(account) }}
                     </span>
                     <span
                       v-if="account.schedulable === false"
@@ -1941,12 +1941,12 @@
           </div>
 
           <div
-            v-if="account.nurtureEnabled && account.nurtureLastBlockReason"
+            v-if="account.nurtureEnabled && getCurrentNurtureBlockReason(account)"
             class="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-800/70 dark:bg-amber-900/30 dark:text-amber-200"
           >
             <div class="font-semibold">养号阻断</div>
             <div class="mt-1 break-all">
-              {{ formatNurtureBlockReason(account.nurtureLastBlockReason) }}
+              {{ formatNurtureBlockDetail(account) }}
             </div>
           </div>
 
@@ -4980,7 +4980,7 @@ const formatNurtureGuardUsage = (account, windowType) => {
   return `护栏：已用 ${actual.toFixed(1)}% / 上限 ${limit.toFixed(1)}%`
 }
 
-// 显示养号阶段的本地请求计数；常驻阶段没有此项限制
+// 显示养号或常驻阶段的本地请求计数
 const formatNurtureLocalRequestUsage = (account) => {
   const evaluation = account?.nurtureEvaluation
   if (!account?.nurtureEnabled || !evaluation?.active) {
@@ -5046,6 +5046,61 @@ const formatNurtureRpmUsage = (account) => {
   }
 
   return `RPM：当前 ${count} / 上限 ${limit}`
+}
+
+// 优先显示实时评估结果，避免 Redis 中已清理前的历史阻断原因误导
+const getCurrentNurtureBlockReason = (account) => {
+  const evaluation = account?.nurtureEvaluation
+  if (evaluation) {
+    return evaluation.blocked ? evaluation.reason || '' : ''
+  }
+  return account?.nurtureLastBlockReason || ''
+}
+
+// 为每种养号阻断补充触发时的实际值和有效上限
+const formatNurtureBlockDetail = (account) => {
+  const reason = getCurrentNurtureBlockReason(account)
+  if (!reason) {
+    return ''
+  }
+
+  const evaluation = account?.nurtureEvaluation
+  const actual = evaluation?.actual
+  const limits = evaluation?.limits
+  const percentDetail = (value, limit, action = '已用') => {
+    const actualNumber = Number(value)
+    const limitNumber = Number(limit)
+    if (!Number.isFinite(actualNumber) || !Number.isFinite(limitNumber)) {
+      return ''
+    }
+    return `${action} ${actualNumber.toFixed(1)}% / 上限 ${limitNumber.toFixed(1)}%`
+  }
+
+  let detail = ''
+  if (['five_hour_curve', 'five_hour_steady'].includes(reason)) {
+    detail = percentDetail(actual?.fiveHourUtil, limits?.fiveHourLimit)
+  } else if (['seven_day_curve', 'seven_day_pace', 'seven_day_steady'].includes(reason)) {
+    detail = percentDetail(actual?.sevenDayUtil, limits?.sevenDayLimit)
+  } else if (reason === 'seven_day_opus') {
+    detail = percentDetail(actual?.sevenDayOpusUtil, limits?.sevenDayOpusLimit)
+  } else if (reason === 'seven_day_velocity') {
+    detail = percentDetail(actual?.dayDelta, actual?.maxDailyDelta, '已增')
+  } else if (reason === 'local_request_count') {
+    const count = Number(actual?.localCount)
+    const limit = Number(limits?.localRequestsLimit)
+    if (Number.isFinite(count) && Number.isFinite(limit)) {
+      detail = `已用 ${count} / 上限 ${limit}`
+    }
+  } else if (reason === 'rpm') {
+    const count = Number(actual?.rpm?.count)
+    const limit = Number(actual?.rpm?.limit)
+    if (Number.isFinite(count) && Number.isFinite(limit)) {
+      detail = `当前 ${count} / 上限 ${limit}`
+    }
+  }
+
+  const label = formatNurtureBlockReason(reason)
+  return detail ? `${label}（${detail}）` : label
 }
 
 // 获取 Claude 使用率宽度

@@ -186,7 +186,8 @@ class ClaudeAccountNurtureService {
       fiveHourLimit: phase === 'nurturing' ? curve.fiveHour : steady.fiveHour,
       sevenDayLimit: effectiveSevenDay,
       sevenDayOpusLimit: effectiveSevenDayOpus,
-      localRequestsLimit: phase === 'nurturing' ? Math.round(curve.localRequests) : null,
+      localRequestsLimit:
+        phase === 'nurturing' ? Math.round(curve.localRequests) : steady.localRequests,
       paceSevenDay,
       paceSevenDayOpus,
       steadyCaps: steady,
@@ -301,16 +302,19 @@ class ClaudeAccountNurtureService {
     if (sevenDayUtil !== null) {
       const baseline = await this.ensureSevenDayBaseline(accountId, sevenDayUtil)
       dayDelta = sevenDayUtil - baseline
-      maxDailyDelta = config.maxDailySevenDayDelta[tier]
+      maxDailyDelta =
+        limits.phase === 'steady'
+          ? limits.steadyCaps.sevenDayVelocity
+          : config.maxDailySevenDayDelta[tier]
       if (limits.phase === 'steady') {
-        const steadyVelocityLimit = calcSevenDaySteadyVelocityLimit(
+        const dynamicVelocityLimit = calcSevenDaySteadyVelocityLimit(
           limits.steadyCaps.sevenDay,
           sevenDayUtil,
           account.claudeSevenDayResetsAt,
           config.paceBuffer
         )
-        if (steadyVelocityLimit !== null) {
-          maxDailyDelta = steadyVelocityLimit
+        if (dynamicVelocityLimit !== null) {
+          maxDailyDelta = Math.min(maxDailyDelta, dynamicVelocityLimit)
         }
       }
     }
@@ -356,11 +360,7 @@ class ClaudeAccountNurtureService {
       return this._buildResult(true, 'seven_day_velocity', tier, limits, actual)
     }
 
-    if (
-      limits.phase === 'nurturing' &&
-      limits.localRequestsLimit !== null &&
-      localCount >= limits.localRequestsLimit
-    ) {
+    if (limits.localRequestsLimit !== null && localCount >= limits.localRequestsLimit) {
       return this._buildResult(true, 'local_request_count', tier, limits, actual)
     }
 
