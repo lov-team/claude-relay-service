@@ -780,7 +780,7 @@ class ClaudeRelayService {
       }
 
       const makeRequestWithRetries = async (requestOptions) => {
-        const maxRetries = this._shouldRetryOn403(accountType) ? 2 : 0
+        const maxRetries = this._shouldRetryOn403(accountType, isDedicatedOfficialAccount) ? 2 : 0
         let retryCount = 0
         let response
         let shouldRetry = false
@@ -871,6 +871,10 @@ class ClaudeRelayService {
       if (clientResponse) {
         clientResponse.removeListener('close', handleClientDisconnect)
       }
+
+      // 供非 2xx 错误处理和后续共享账号故障切换共同使用。
+      // 必须在分支外声明：成功响应也会继续执行故障切换判定。
+      let shouldFailoverForRateLimit = false
 
       // 检查响应是否为限流错误或认证错误
       if (response.statusCode !== 200 && response.statusCode !== 201) {
@@ -1067,6 +1071,8 @@ class ClaudeRelayService {
             }
           }
         }
+
+        shouldFailoverForRateLimit = isRateLimited
       } else if (response.statusCode === 200 || response.statusCode === 201) {
         // 提取5小时会话窗口状态
         // 使用大小写不敏感的方式获取响应头
@@ -1123,6 +1129,38 @@ class ClaudeRelayService {
           this.isRealClaudeCodeRequest(requestBody)
         ) {
           await claudeCodeHeadersService.storeAccountHeaders(accountId, clientHeaders)
+        }
+      }
+
+      // 共享账号的单账号 403/429 已在上面被隔离。不要把它立即升级为
+      // 整个上游渠道的错误：重新调度一次，让当前请求有机会使用健康账号。
+      if (
+        this._shouldFailoverToAnotherSharedAccount(
+          response.statusCode,
+          shouldFailoverForRateLimit,
+          accountType,
+          isDedicatedOfficialAccount,
+          options
+        )
+      ) {
+        const failoverAttempt = (options.accountFailoverAttempt || 0) + 1
+        logger.warn(
+          `🔄 Retrying non-stream request on another account after ${response.statusCode} from ${accountId} (failover ${failoverAttempt}/1)`
+        )
+        try {
+          return await this.relayRequest(
+            requestBody,
+            apiKeyData,
+            clientRequest,
+            clientResponse,
+            clientHeaders,
+            { ...options, accountFailoverAttempt: failoverAttempt }
+          )
+        } catch (failoverError) {
+          // 候选池确实耗尽时，保留本次上游的原始错误语义。
+          logger.warn(
+            `⚠️ No healthy account available for non-stream failover after ${response.statusCode} from ${accountId}: ${failoverError.message}`
+          )
         }
       }
 
@@ -2467,7 +2505,11 @@ class ClaudeRelayService {
         {
           ...options,
           bodyStoreId,
-          isRealClaudeCodeRequest
+          isRealClaudeCodeRequest,
+          // 账号级故障切换时需要从最初的请求重新进行账号选择与请求体处理。
+          originalRequestBody: requestBody,
+          apiKeyData,
+          accountFailoverAttempt: options.accountFailoverAttempt || 0
         },
         isDedicatedOfficialAccount,
         // 📬 新增回调：在收到响应头时释放队列锁
@@ -2641,6 +2683,10 @@ class ClaudeRelayService {
               ? res.headers['anthropic-ratelimit-unified-reset']
               : null
             const parsedResetTimestamp = resetHeader ? parseInt(resetHeader, 10) : NaN
+            const isAgentViewAuxiliaryRequest = this._isAgentViewAuxiliaryRequest(
+              body,
+              clientHeaders
+            )
 
             if (isOpusModelRequest) {
               if (!Number.isNaN(parsedResetTimestamp)) {
@@ -2673,10 +2719,6 @@ class ClaudeRelayService {
               const rateLimitResetTimestamp = Number.isNaN(parsedResetTimestamp)
                 ? null
                 : parsedResetTimestamp
-              const isAgentViewAuxiliaryRequest = this._isAgentViewAuxiliaryRequest(
-                body,
-                clientHeaders
-              )
               if (isAgentViewAuxiliaryRequest) {
                 logger.warn(
                   `🚫 [Stream] Agent View auxiliary request hit 429 for account ${accountId}; skipping account-level rate-limit marking`
@@ -2714,6 +2756,33 @@ class ClaudeRelayService {
                   })
                 )
                 responseStream.end()
+                resolve()
+                return
+              }
+            }
+
+            if (
+              this._shouldFailoverToAnotherSharedAccount(
+                res.statusCode,
+                !isAgentViewAuxiliaryRequest,
+                accountType,
+                isDedicatedOfficialAccount,
+                requestOptions
+              )
+            ) {
+              const retried = await this._retryStreamWithAnotherSharedAccount({
+                accountId,
+                accountType,
+                responseStream,
+                clientHeaders,
+                usageCallback,
+                streamTransformer,
+                requestOptions,
+                isDedicatedOfficialAccount,
+                onResponseStart,
+                statusCode: res.statusCode
+              })
+              if (retried) {
                 resolve()
                 return
               }
@@ -2764,7 +2833,7 @@ class ClaudeRelayService {
           // 否则重试时旧响应的 on('end') 会与新请求产生竞态条件
           if (res.statusCode === 403) {
             const canRetry =
-              this._shouldRetryOn403(accountType) &&
+              this._shouldRetryOn403(accountType, isDedicatedOfficialAccount) &&
               retryCount < maxRetries &&
               !responseStream.headersSent
 
@@ -2902,11 +2971,6 @@ class ClaudeRelayService {
             }
           }
 
-          // 调用异步错误处理函数
-          handleErrorResponse().catch((err) => {
-            logger.error('❌ Error in stream error handler:', err)
-          })
-
           logger.error(
             `❌ Claude API returned error status: ${res.statusCode} | Account: ${account?.name || accountId}`
           )
@@ -2921,6 +2985,13 @@ class ClaudeRelayService {
               `❌ Claude API error response (Account: ${account?.name || accountId}):`,
               errorData
             )
+            try {
+              // 必须等到完整错误体读取后再处理，才能正确识别封禁类 403，
+              // 也确保重选账号前旧账号已被隔离。
+              await handleErrorResponse()
+            } catch (errorHandlerError) {
+              logger.error('❌ Error in stream error handler:', errorHandlerError)
+            }
             if (
               this._isClaudeCodeCredentialError(errorData) &&
               requestOptions.useRandomizedToolNames !== true &&
@@ -2958,24 +3029,31 @@ class ClaudeRelayService {
               }
               return
             }
-            if (this._isOrganizationDisabledError(res.statusCode, errorData)) {
-              ;(async () => {
-                try {
-                  logger.error(
-                    `🚫 [Stream] Organization disabled error (400) detected for account ${accountId}, marking as blocked`
-                  )
-                  await unifiedClaudeScheduler.markAccountBlocked(
-                    accountId,
-                    accountType,
-                    sessionHash
-                  )
-                } catch (markError) {
-                  logger.error(
-                    `❌ [Stream] Failed to mark account ${accountId} as blocked after organization disabled error:`,
-                    markError
-                  )
-                }
-              })()
+            if (
+              this._shouldFailoverToAnotherSharedAccount(
+                res.statusCode,
+                false,
+                accountType,
+                isDedicatedOfficialAccount,
+                requestOptions
+              )
+            ) {
+              const retried = await this._retryStreamWithAnotherSharedAccount({
+                accountId,
+                accountType,
+                responseStream,
+                clientHeaders,
+                usageCallback,
+                streamTransformer,
+                requestOptions,
+                isDedicatedOfficialAccount,
+                onResponseStart,
+                statusCode: res.statusCode
+              })
+              if (retried) {
+                resolve()
+                return
+              }
             }
             if (isStreamWritable(responseStream)) {
               // 解析 Claude API 返回的错误详情
@@ -3978,10 +4056,81 @@ class ClaudeRelayService {
     }
   }
 
-  // 🔄 判断账户是否应该在 403 错误时进行重试
-  // 仅 claude-official 类型账户（OAuth 或 Setup Token 授权）需要重试
-  _shouldRetryOn403(accountType) {
-    return accountType === 'claude-official'
+  // 🔄 专属账号没有候选池，保留原有同账号 403 重试；共享账号直接故障切换。
+  _shouldRetryOn403(accountType, isDedicatedOfficialAccount = false) {
+    return accountType === 'claude-official' && isDedicatedOfficialAccount
+  }
+
+  // 仅共享 Claude 官方账号允许账号级故障切换；专属账号仍保留明确报错语义。
+  _shouldFailoverToAnotherSharedAccount(
+    statusCode,
+    isRateLimited,
+    accountType,
+    isDedicatedOfficialAccount,
+    options = {}
+  ) {
+    const failoverAttempt = Number(options.accountFailoverAttempt || 0)
+    return (
+      accountType === 'claude-official' &&
+      !isDedicatedOfficialAccount &&
+      failoverAttempt < 1 &&
+      (statusCode === 403 || (statusCode === 429 && isRateLimited))
+    )
+  }
+
+  async _retryStreamWithAnotherSharedAccount({
+    accountId,
+    accountType,
+    responseStream,
+    clientHeaders,
+    usageCallback,
+    streamTransformer,
+    requestOptions,
+    isDedicatedOfficialAccount,
+    onResponseStart,
+    statusCode
+  }) {
+    if (
+      responseStream.headersSent ||
+      !this._shouldFailoverToAnotherSharedAccount(
+        statusCode,
+        statusCode === 429,
+        accountType,
+        isDedicatedOfficialAccount,
+        requestOptions
+      ) ||
+      !requestOptions.originalRequestBody ||
+      !requestOptions.apiKeyData
+    ) {
+      return false
+    }
+
+    const failoverAttempt = (requestOptions.accountFailoverAttempt || 0) + 1
+    logger.warn(
+      `🔄 Retrying stream request on another account after ${statusCode} from ${accountId} (failover ${failoverAttempt}/1)`
+    )
+
+    try {
+      // 失败响应没有触发成功响应回调；在重选账号前释放旧账号的队列锁。
+      if (onResponseStart) {
+        await onResponseStart()
+      }
+      await this.relayStreamRequestWithUsageCapture(
+        requestOptions.originalRequestBody,
+        requestOptions.apiKeyData,
+        responseStream,
+        clientHeaders,
+        usageCallback,
+        streamTransformer,
+        { ...requestOptions, accountFailoverAttempt: failoverAttempt }
+      )
+      return true
+    } catch (error) {
+      logger.warn(
+        `⚠️ No healthy account available for stream failover after ${statusCode} from ${accountId}: ${error.message}`
+      )
+      return false
+    }
   }
 
   // ⏱️ 等待指定毫秒数
