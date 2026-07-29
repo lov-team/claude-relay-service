@@ -35,6 +35,7 @@ const claudeAccountService = require('../src/services/account/claudeAccountServi
 describe('claudeAccountService.removeAccountRateLimit', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    jest.setSystemTime(new Date('2026-07-29T00:00:00.000Z'))
     redis.client.hdel.mockResolvedValue(1)
     redis.setClaudeAccount.mockResolvedValue(true)
     upstreamErrorHelper.clearTempUnavailable.mockResolvedValue(undefined)
@@ -65,5 +66,72 @@ describe('claudeAccountService.removeAccountRateLimit', () => {
       'claude-official'
     )
     expect(upstreamErrorHelper.clearTempUnavailable).toHaveBeenCalledWith('account-1', 'claude')
+  })
+
+  test('keeps an active cooldown when an in-flight request succeeds', async () => {
+    redis.getClaudeAccount.mockResolvedValue({
+      id: 'account-1',
+      name: 'max-account',
+      schedulable: 'false',
+      rateLimitAutoStopped: 'true',
+      rateLimitStatus: 'limited',
+      rateLimitedAt: '2026-07-28T23:59:00.000Z',
+      rateLimitEndAt: '2026-07-29T05:00:00.000Z'
+    })
+
+    const result = await claudeAccountService.removeAccountRateLimit('account-1')
+
+    expect(result).toEqual({
+      success: true,
+      cleared: false,
+      reason: 'cooldown_active',
+      rateLimitEndAt: '2026-07-29T05:00:00.000Z'
+    })
+    expect(redis.client.hdel).not.toHaveBeenCalled()
+    expect(redis.setClaudeAccount).not.toHaveBeenCalled()
+    expect(upstreamErrorHelper.clearTempUnavailable).not.toHaveBeenCalled()
+  })
+
+  test('allows an explicit force clear before the cooldown expires', async () => {
+    redis.getClaudeAccount.mockResolvedValue({
+      id: 'account-1',
+      name: 'max-account',
+      schedulable: 'false',
+      rateLimitAutoStopped: 'true',
+      rateLimitStatus: 'limited',
+      rateLimitedAt: '2026-07-28T23:59:00.000Z',
+      rateLimitEndAt: '2026-07-29T05:00:00.000Z'
+    })
+
+    const result = await claudeAccountService.removeAccountRateLimit('account-1', { force: true })
+
+    expect(result).toEqual({ success: true, cleared: true })
+    expect(redis.setClaudeAccount).toHaveBeenCalledWith(
+      'account-1',
+      expect.objectContaining({ schedulable: 'true' })
+    )
+    expect(upstreamErrorHelper.clearTempUnavailable).toHaveBeenCalledTimes(2)
+  })
+
+  test('keeps the legacy one-hour cooldown when rateLimitEndAt is missing', async () => {
+    redis.getClaudeAccount.mockResolvedValue({
+      id: 'account-1',
+      name: 'max-account',
+      schedulable: 'false',
+      rateLimitAutoStopped: 'true',
+      rateLimitStatus: 'limited',
+      rateLimitedAt: '2026-07-28T23:30:00.000Z'
+    })
+
+    const result = await claudeAccountService.removeAccountRateLimit('account-1')
+
+    expect(result).toEqual({
+      success: true,
+      cleared: false,
+      reason: 'cooldown_active',
+      rateLimitEndAt: '2026-07-29T00:30:00.000Z'
+    })
+    expect(redis.setClaudeAccount).not.toHaveBeenCalled()
+    expect(upstreamErrorHelper.clearTempUnavailable).not.toHaveBeenCalled()
   })
 })

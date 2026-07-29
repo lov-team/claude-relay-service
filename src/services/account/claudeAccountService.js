@@ -1699,11 +1699,35 @@ class ClaudeAccountService {
   }
 
   // ✅ 移除账号的限流状态
-  async removeAccountRateLimit(accountId) {
+  async removeAccountRateLimit(accountId, options = {}) {
     try {
       const accountData = await redis.getClaudeAccount(accountId)
       if (!accountData || Object.keys(accountData).length === 0) {
         throw new Error('Account not found')
+      }
+
+      // 429 后可能仍有更早发出的并发请求成功返回。成功响应不能作为限流已经
+      // 恢复的证据，否则会在几秒内清掉数小时的冷却并把账号重新放回流量池。
+      // 仅允许冷却自然到期，或由明确的人工操作强制解除。
+      const force = options.force === true
+      const explicitEndAtMs = Date.parse(accountData.rateLimitEndAt || '')
+      const rateLimitedAtMs = Date.parse(accountData.rateLimitedAt || '')
+      const cooldownEndAtMs = Number.isFinite(explicitEndAtMs)
+        ? explicitEndAtMs
+        : Number.isFinite(rateLimitedAtMs)
+          ? rateLimitedAtMs + 60 * 60 * 1000
+          : NaN
+      if (!force && Number.isFinite(cooldownEndAtMs) && Date.now() < cooldownEndAtMs) {
+        const cooldownEndAt = new Date(cooldownEndAtMs).toISOString()
+        logger.info(
+          `⏳ Keeping rate limit for account ${accountId} until ${cooldownEndAt}; successful in-flight responses do not end the cooldown`
+        )
+        return {
+          success: true,
+          cleared: false,
+          reason: 'cooldown_active',
+          rateLimitEndAt: cooldownEndAt
+        }
       }
 
       const accountKey = `claude:account:${accountId}`
@@ -1754,7 +1778,7 @@ class ClaudeAccountService {
 
       logger.success(`Rate limit removed for account: ${accountData.name} (${accountId})`)
 
-      return { success: true }
+      return { success: true, cleared: true }
     } catch (error) {
       logger.error(`❌ Failed to remove rate limit for account: ${accountId}`, error)
       throw error
