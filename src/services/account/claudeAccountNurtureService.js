@@ -654,6 +654,30 @@ function buildNurtureLimitHttpResponse(reason, statusCode = 403) {
   }
 }
 
+function buildRetryableNurtureLimitHttpResponse(reason) {
+  return {
+    statusCode: 429,
+    headers: {
+      'Content-Type': 'application/json',
+      'Retry-After': '1'
+    },
+    body: JSON.stringify({
+      error: {
+        type: 'rate_limit_error',
+        code: 'crs_rate_limited',
+        message: 'CRS selected account reached its nurture guard limit; retry another channel.',
+        metadata: {
+          source: 'claude-relay-service',
+          retryable: true,
+          disable_channel: false,
+          limit_kind: 'nurture',
+          nurture_reason: reason || null
+        }
+      }
+    })
+  }
+}
+
 module.exports = new ClaudeAccountNurtureService()
 module.exports.getNurtureTier = getNurtureTier
 module.exports.isProAccount = isProAccount
@@ -666,3 +690,4 @@ module.exports.createDedicatedNurtureLimitedError = createDedicatedNurtureLimite
 module.exports.isNurtureSchedulerError = isNurtureSchedulerError
 module.exports.buildNurtureLimitBody = buildNurtureLimitBody
 module.exports.buildNurtureLimitHttpResponse = buildNurtureLimitHttpResponse
+module.exports.buildRetryableNurtureLimitHttpResponse = buildRetryableNurtureLimitHttpResponse

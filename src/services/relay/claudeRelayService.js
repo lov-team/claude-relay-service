@@ -132,6 +132,21 @@ class ClaudeRelayService {
     }
   }
 
+  _buildRetryableNurtureResponse(accountId, reason) {
+    logger.warn(
+      `🌱 Account ${accountId} blocked by nurture guard (${reason || 'unknown'}), returning retryable 429`
+    )
+    const response = claudeAccountNurtureService.buildRetryableNurtureLimitHttpResponse(reason)
+    return {
+      ...response,
+      headers: {
+        ...response.headers,
+        'retry-after': response.headers['Retry-After']
+      },
+      accountId
+    }
+  }
+
   async _enforceNurtureBeforeRelay(accountId, accountType) {
     if (accountType !== 'claude-official') {
       return null
@@ -142,7 +157,7 @@ class ClaudeRelayService {
     })
     if (evaluation.blocked) {
       await claudeAccountNurtureService.recordBlocked(accountId, evaluation)
-      return this._buildNurtureLimitedResponse(accountId, evaluation.reason)
+      return this._buildRetryableNurtureResponse(accountId, evaluation.reason)
     }
 
     return null

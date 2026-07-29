@@ -45,7 +45,8 @@ const {
   createDedicatedNurtureLimitedError,
   isNurtureSchedulerError,
   buildNurtureLimitBody,
-  buildNurtureLimitHttpResponse
+  buildNurtureLimitHttpResponse,
+  buildRetryableNurtureLimitHttpResponse
 } = claudeAccountNurtureService
 
 const FIXED_NOW = Date.parse('2026-07-10T12:00:00.000Z')
@@ -126,6 +127,25 @@ describe('nurture scheduler error helpers', () => {
     expect(buildNurtureLimitBody('rpm').error.reason).toBe('rpm')
 
     jest.useRealTimers()
+  })
+
+  test('builds a retryable 429 that tells new-api not to disable the channel', () => {
+    const response = buildRetryableNurtureLimitHttpResponse('rpm')
+    const body = JSON.parse(response.body)
+
+    expect(response.statusCode).toBe(429)
+    expect(response.headers['Retry-After']).toBe('1')
+    expect(body.error).toMatchObject({
+      type: 'rate_limit_error',
+      code: 'crs_rate_limited',
+      metadata: {
+        source: 'claude-relay-service',
+        retryable: true,
+        disable_channel: false,
+        limit_kind: 'nurture',
+        nurture_reason: 'rpm'
+      }
+    })
   })
 })
 
