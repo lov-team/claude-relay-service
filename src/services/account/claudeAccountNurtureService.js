@@ -15,6 +15,8 @@ const {
 const RPM_KEY_PREFIX = 'nurture:rpm:'
 const BASELINE_KEY_PREFIX = 'nurture:7d:baseline:'
 const RPM_WINDOW_MS = 60000
+const FIVE_HOUR_GUARD_JITTER_MS = 60 * 60 * 1000
+const FIVE_HOUR_BLOCK_REASONS = new Set(['five_hour_curve', 'five_hour_steady'])
 
 function parseSubscriptionInfo(account) {
   if (!account?.subscriptionInfo) {
@@ -70,6 +72,22 @@ function toNumberOrNull(value) {
 
 function isTruthyFlag(value) {
   return value === true || value === 'true'
+}
+
+function isFiveHourBlockReason(reason) {
+  return FIVE_HOUR_BLOCK_REASONS.has(reason)
+}
+
+function calcFiveHourGuardReleaseAt(accountId, resetsAt) {
+  const resetAtMs = Date.parse(resetsAt)
+  if (!accountId || !Number.isFinite(resetAtMs)) {
+    return null
+  }
+
+  const seed = `${accountId}:${new Date(resetAtMs).toISOString()}`
+  const offsetMs =
+    crypto.createHash('sha256').update(seed).digest().readUInt32BE(0) % FIVE_HOUR_GUARD_JITTER_MS
+  return new Date(resetAtMs + offsetMs).toISOString()
 }
 
 class ClaudeAccountNurtureService {
@@ -243,10 +261,11 @@ class ClaudeAccountNurtureService {
     return baseline
   }
 
-  async maybeRefreshUsageSnapshot(accountId, account, config) {
+  async maybeRefreshUsageSnapshot(accountId, account, config, options = {}) {
     const updatedAt = account.claudeUsageUpdatedAt
     const maxAge = config.usageSnapshotMaxAgeMs
-    const stale = !updatedAt || Date.now() - new Date(updatedAt).getTime() > maxAge
+    const stale =
+      options.force === true || !updatedAt || Date.now() - new Date(updatedAt).getTime() > maxAge
 
     if (!stale) {
       return account
@@ -265,6 +284,34 @@ class ClaudeAccountNurtureService {
     return account
   }
 
+  resolveFiveHourGuard(accountId, account) {
+    const reason = account?.nurtureLastBlockReason
+    if (!isFiveHourBlockReason(reason)) {
+      return { active: false, expired: false, reason: null, releaseAt: null }
+    }
+
+    const releaseAt =
+      account.nurtureFiveHourGuardReleaseAt ||
+      calcFiveHourGuardReleaseAt(accountId, account.claudeFiveHourResetsAt)
+    const releaseAtMs = Date.parse(releaseAt)
+    if (!Number.isFinite(releaseAtMs)) {
+      return { active: false, expired: false, reason, releaseAt: null }
+    }
+
+    return {
+      active: Date.now() < releaseAtMs,
+      expired: Date.now() >= releaseAtMs,
+      reason,
+      releaseAt
+    }
+  }
+
+  isFiveHourSnapshotExpired(accountId, account) {
+    const releaseAt = calcFiveHourGuardReleaseAt(accountId, account?.claudeFiveHourResetsAt)
+    const releaseAtMs = Date.parse(releaseAt)
+    return Number.isFinite(releaseAtMs) && Date.now() >= releaseAtMs
+  }
+
   async evaluate(accountId, options = {}) {
     const systemConfig = await accountNurtureConfigService.getConfig()
     if (!systemConfig.enabled) {
@@ -281,14 +328,23 @@ class ClaudeAccountNurtureService {
       return { blocked: false, active: false, reason: null }
     }
 
-    if (!options.skipUsageRefresh) {
-      account = await this.maybeRefreshUsageSnapshot(accountId, account, systemConfig)
+    let fiveHourGuard = this.resolveFiveHourGuard(accountId, account)
+    const expiredFiveHourSnapshot = this.isFiveHourSnapshotExpired(accountId, account)
+
+    if (!options.skipUsageRefresh && !fiveHourGuard.active) {
+      account = await this.maybeRefreshUsageSnapshot(accountId, account, systemConfig, {
+        force: fiveHourGuard.expired || expiredFiveHourSnapshot
+      })
+      fiveHourGuard = this.resolveFiveHourGuard(accountId, account)
     }
 
     const config = await this.getEffectiveConfig(accountId, account)
     const limits = this.resolveDailyLimits(config, account, tier)
 
-    const fiveHourUtil = toNumberOrNull(account.claudeFiveHourUtilization)
+    const fiveHourSnapshotExpired = this.isFiveHourSnapshotExpired(accountId, account)
+    const fiveHourUtil = fiveHourSnapshotExpired
+      ? null
+      : toNumberOrNull(account.claudeFiveHourUtilization)
     const sevenDayUtil = toNumberOrNull(account.claudeSevenDayUtilization)
     const sevenDayOpusUtil = toNumberOrNull(account.claudeSevenDayOpusUtilization)
     const localCount = parseInt(account.nurtureLocalRequestCount || '0', 10)
@@ -333,9 +389,18 @@ class ClaudeAccountNurtureService {
       return this._buildResult(true, 'rpm', tier, limits, actual)
     }
 
+    if (fiveHourGuard.active) {
+      return this._buildResult(true, fiveHourGuard.reason, tier, limits, actual, {
+        blockExpiresAt: fiveHourGuard.releaseAt
+      })
+    }
+
     if (fiveHourUtil !== null && fiveHourUtil >= limits.fiveHourLimit) {
       const reason = limits.phase === 'steady' ? 'five_hour_steady' : 'five_hour_curve'
-      return this._buildResult(true, reason, tier, limits, actual)
+      return this._buildResult(true, reason, tier, limits, actual, {
+        blockExpiresAt: calcFiveHourGuardReleaseAt(accountId, account.claudeFiveHourResetsAt),
+        blockWindowResetAt: account.claudeFiveHourResetsAt || null
+      })
     }
 
     if (sevenDayUtil !== null && sevenDayUtil >= limits.sevenDayLimit) {
@@ -373,7 +438,7 @@ class ClaudeAccountNurtureService {
     return result
   }
 
-  _buildResult(blocked, reason, tier, limits, actual) {
+  _buildResult(blocked, reason, tier, limits, actual, metadata = {}) {
     return {
       blocked,
       active: true,
@@ -382,7 +447,8 @@ class ClaudeAccountNurtureService {
       phase: limits.phase,
       dayIndex: limits.dayIndex,
       limits,
-      actual
+      actual,
+      ...metadata
     }
   }
 
@@ -394,6 +460,8 @@ class ClaudeAccountNurtureService {
     const previousReason = account.nurtureLastBlockReason
     account.nurtureLastBlockReason = ''
     account.nurtureLastEvaluatedAt = new Date().toISOString()
+    delete account.nurtureFiveHourGuardReleaseAt
+    delete account.nurtureFiveHourGuardWindowResetAt
 
     try {
       await redis.setClaudeAccount(accountId, account)
@@ -422,6 +490,8 @@ class ClaudeAccountNurtureService {
 
     account.nurtureLastBlockReason = ''
     account.nurtureLastEvaluatedAt = new Date().toISOString()
+    delete account.nurtureFiveHourGuardReleaseAt
+    delete account.nurtureFiveHourGuardWindowResetAt
     await redis.setClaudeAccount(accountId, account)
   }
 
@@ -432,6 +502,17 @@ class ClaudeAccountNurtureService {
     }
     account.nurtureLastBlockReason = evaluation.reason || ''
     account.nurtureLastEvaluatedAt = new Date().toISOString()
+    if (isFiveHourBlockReason(evaluation.reason)) {
+      const releaseAt =
+        evaluation.blockExpiresAt ||
+        calcFiveHourGuardReleaseAt(accountId, account.claudeFiveHourResetsAt)
+      account.nurtureFiveHourGuardReleaseAt = releaseAt || ''
+      account.nurtureFiveHourGuardWindowResetAt =
+        evaluation.blockWindowResetAt || account.claudeFiveHourResetsAt || ''
+    } else {
+      delete account.nurtureFiveHourGuardReleaseAt
+      delete account.nurtureFiveHourGuardWindowResetAt
+    }
     await redis.setClaudeAccount(accountId, account)
   }
 
@@ -450,7 +531,9 @@ class ClaudeAccountNurtureService {
       nurtureOverrideEnabled: 'false',
       nurtureOverrideSteadyCaps: '',
       nurtureLastBlockReason: '',
-      nurtureLastEvaluatedAt: ''
+      nurtureLastEvaluatedAt: '',
+      nurtureFiveHourGuardReleaseAt: '',
+      nurtureFiveHourGuardWindowResetAt: ''
     }
   }
 
@@ -490,6 +573,8 @@ class ClaudeAccountNurtureService {
     account.nurtureLocalRequestCount = '0'
     account.nurtureLocalCountDate = getUtcDateKey()
     account.nurtureLastBlockReason = ''
+    delete account.nurtureFiveHourGuardReleaseAt
+    delete account.nurtureFiveHourGuardWindowResetAt
     await redis.setClaudeAccount(accountId, account)
     return account
   }
@@ -501,6 +586,9 @@ class ClaudeAccountNurtureService {
     }
     account.nurtureEnabled = 'false'
     account.nurturePhase = ''
+    account.nurtureLastBlockReason = ''
+    delete account.nurtureFiveHourGuardReleaseAt
+    delete account.nurtureFiveHourGuardWindowResetAt
     await redis.setClaudeAccount(accountId, account)
     return account
   }
@@ -682,6 +770,7 @@ module.exports = new ClaudeAccountNurtureService()
 module.exports.getNurtureTier = getNurtureTier
 module.exports.isProAccount = isProAccount
 module.exports.isMaxAccount = isMaxAccount
+module.exports.calcFiveHourGuardReleaseAt = calcFiveHourGuardReleaseAt
 module.exports.NURTURE_SCHEDULER_ERROR_CODES = NURTURE_SCHEDULER_ERROR_CODES
 module.exports.calcNurtureRetryAfterSeconds = calcNurtureRetryAfterSeconds
 module.exports.createNurtureSchedulerError = createNurtureSchedulerError

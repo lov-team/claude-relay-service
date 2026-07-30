@@ -40,6 +40,7 @@ const {
   getNurtureTier,
   isProAccount,
   isMaxAccount,
+  calcFiveHourGuardReleaseAt,
   NURTURE_SCHEDULER_ERROR_CODES,
   createAllNurtureLimitedError,
   createDedicatedNurtureLimitedError,
@@ -72,6 +73,7 @@ const buildAccount = (overrides = {}) => {
     nurtureDailySeed: '2026-07-10',
     nurtureLocalRequestCount: '0',
     claudeFiveHourUtilization: '10',
+    claudeFiveHourResetsAt: new Date(FIXED_NOW + 2 * 60 * 60 * 1000).toISOString(),
     claudeSevenDayUtilization: '10',
     claudeSevenDayOpusUtilization: '5',
     claudeSevenDayResetsAt: defaultResetsAt,
@@ -165,6 +167,20 @@ describe('nurture tier helpers', () => {
   })
 })
 
+describe('five-hour guard release jitter', () => {
+  test('is deterministic per account and window and stays within one hour after reset', () => {
+    const resetAt = '2026-07-10T17:00:00.000Z'
+    const first = calcFiveHourGuardReleaseAt('acc-pro-1', resetAt)
+    const second = calcFiveHourGuardReleaseAt('acc-pro-1', resetAt)
+
+    expect(first).toBe(second)
+    expect(Date.parse(first)).toBeGreaterThanOrEqual(Date.parse(resetAt))
+    expect(Date.parse(first)).toBeLessThan(Date.parse(resetAt) + 60 * 60 * 1000)
+    expect(calcFiveHourGuardReleaseAt('', resetAt)).toBeNull()
+    expect(calcFiveHourGuardReleaseAt('acc-pro-1', 'invalid')).toBeNull()
+  })
+})
+
 describe('claudeAccountNurtureService.evaluate', () => {
   beforeEach(() => {
     jest.clearAllMocks()
@@ -251,6 +267,53 @@ describe('claudeAccountNurtureService.evaluate', () => {
     })
     expect(result.blocked).toBe(true)
     expect(result.reason).toBe('five_hour_steady')
+    expect(Date.parse(result.blockExpiresAt)).toBeGreaterThan(
+      Date.parse(buildAccount().claudeFiveHourResetsAt)
+    )
+    expect(Date.parse(result.blockExpiresAt)).toBeLessThan(
+      Date.parse(buildAccount().claudeFiveHourResetsAt) + 60 * 60 * 1000
+    )
+  })
+
+  test('keeps an active five-hour guard blocked until its randomized release time', async () => {
+    const releaseAt = new Date(FIXED_NOW + 30 * 60 * 1000).toISOString()
+    redis.getClaudeAccount.mockResolvedValue(
+      buildAccount({
+        claudeFiveHourUtilization: '0',
+        nurtureLastBlockReason: 'five_hour_steady',
+        nurtureFiveHourGuardReleaseAt: releaseAt
+      })
+    )
+
+    const result = await claudeAccountNurtureService.evaluate('acc-pro-1')
+
+    expect(result.blocked).toBe(true)
+    expect(result.reason).toBe('five_hour_steady')
+    expect(result.blockExpiresAt).toBe(releaseAt)
+    expect(claudeAccountService.fetchOAuthUsage).not.toHaveBeenCalled()
+  })
+
+  test('releases an expired five-hour guard even when the old usage snapshot cannot refresh', async () => {
+    const resetAt = new Date(FIXED_NOW - 2 * 60 * 60 * 1000).toISOString()
+    redis.getClaudeAccount.mockResolvedValue(
+      buildAccount({
+        claudeFiveHourUtilization: '99',
+        claudeFiveHourResetsAt: resetAt,
+        nurtureLastBlockReason: 'five_hour_steady',
+        nurtureFiveHourGuardReleaseAt: new Date(FIXED_NOW - 60 * 60 * 1000).toISOString()
+      })
+    )
+    claudeAccountService.fetchOAuthUsage.mockRejectedValue(new Error('usage unavailable'))
+
+    const result = await claudeAccountNurtureService.evaluate('acc-pro-1')
+
+    expect(claudeAccountService.fetchOAuthUsage).toHaveBeenCalledWith('acc-pro-1')
+    expect(result.blocked).toBe(false)
+    expect(result.actual.fiveHourUtil).toBeNull()
+    expect(redis.setClaudeAccount).toHaveBeenCalledWith(
+      'acc-pro-1',
+      expect.not.objectContaining({ nurtureFiveHourGuardReleaseAt: expect.anything() })
+    )
   })
 
   test('steady pro blocks seven_day_steady before hitting 90%', async () => {
@@ -700,6 +763,28 @@ describe('claudeAccountNurtureService lifecycle', () => {
 
     const saved = redis.setClaudeAccount.mock.calls[0][1]
     expect(saved.nurtureLocalRequestCount).toBe('3')
+    expect(saved.nurtureFiveHourGuardReleaseAt).toBeUndefined()
+  })
+
+  test('recordBlocked persists the randomized five-hour guard release time', async () => {
+    const account = buildAccount()
+    redis.getClaudeAccount.mockResolvedValue(account)
+    const releaseAt = calcFiveHourGuardReleaseAt('acc-pro-1', account.claudeFiveHourResetsAt)
+
+    await claudeAccountNurtureService.recordBlocked('acc-pro-1', {
+      reason: 'five_hour_steady',
+      blockExpiresAt: releaseAt,
+      blockWindowResetAt: account.claudeFiveHourResetsAt
+    })
+
+    expect(redis.setClaudeAccount).toHaveBeenCalledWith(
+      'acc-pro-1',
+      expect.objectContaining({
+        nurtureLastBlockReason: 'five_hour_steady',
+        nurtureFiveHourGuardReleaseAt: releaseAt,
+        nurtureFiveHourGuardWindowResetAt: account.claudeFiveHourResetsAt
+      })
+    )
   })
 
   test('rollover graduates after day 7 and resets counters', async () => {
