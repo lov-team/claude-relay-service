@@ -7,7 +7,13 @@ jest.mock('../src/utils/logger', () => ({
 
 jest.mock('../src/utils/modelHelper', () => ({
   parseVendorPrefixedModel: jest.fn((model) => ({ vendor: null, baseModel: model })),
-  isOpus45OrNewer: jest.fn(() => true)
+  isOpus45OrNewer: jest.fn(() => true),
+  getRateLimitModelFamily: jest.fn((model) => {
+    const normalized = typeof model === 'string' ? model.toLowerCase() : ''
+    return (
+      ['opus', 'sonnet', 'haiku', 'fable'].find((family) => normalized.includes(family)) || null
+    )
+  })
 }))
 
 jest.mock('../src/utils/commonHelper', () => ({
@@ -27,6 +33,9 @@ jest.mock('../src/models/redis', () => ({
 
 jest.mock('../src/services/account/claudeAccountService', () => ({
   isAccountRateLimited: jest.fn().mockResolvedValue(false),
+  isAccountModelRateLimited: jest.fn().mockResolvedValue(false),
+  clearExpiredModelRateLimit: jest.fn().mockResolvedValue(undefined),
+  getAccountModelRateLimitInfo: jest.fn().mockResolvedValue(null),
   isAccountOpusRateLimited: jest.fn().mockResolvedValue(false),
   clearExpiredOpusRateLimit: jest.fn().mockResolvedValue(undefined)
 }))
