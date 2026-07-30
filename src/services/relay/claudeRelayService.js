@@ -394,6 +394,63 @@ class ClaudeRelayService {
     return message.toLowerCase().includes('extra usage')
   }
 
+  // Anthropic 的 unified-reset 既可能指向 5 小时整号窗口，也可能指向模型家族周限额。
+  // 只有明确排除 5 小时窗口后，才允许把账号继续用于其它模型。
+  _isModelFamilyRateLimit(headers, resetTimestamp, body = null) {
+    if (!Number.isFinite(resetTimestamp) || resetTimestamp <= 0) {
+      return false
+    }
+
+    const fiveHourStatus = String(
+      this._getHeaderValueCaseInsensitive(headers, 'anthropic-ratelimit-unified-5h-status') || ''
+    )
+      .trim()
+      .toLowerCase()
+
+    // 上游已有实测：5h-status=allowed 且返回 429 时，命中的是独立周限额。
+    if (fiveHourStatus === 'allowed') {
+      return true
+    }
+    // 只要上游明确给出其它 5 小时状态，就保守按整号限流处理。
+    if (fiveHourStatus) {
+      return false
+    }
+
+    const message = this._extractErrorMessage(body).toLowerCase()
+    if (/\bweekly\b|\b7[\s-]?day\b|\bseven[\s-]?day\b/.test(message)) {
+      return true
+    }
+
+    // 无状态头时，超过一个完整 5 小时窗口的 reset 才可能是周级限额。
+    // 额外留 10 分钟时钟偏差，避免把 5 小时整号限额误判成模型级。
+    const resetDelayMs = resetTimestamp * 1000 - Date.now()
+    return resetDelayMs > (5 * 60 + 10) * 60 * 1000
+  }
+
+  async _applyNoResetRateLimitCooldown(accountId, accountType, sessionHash, context = '') {
+    if (accountType === 'claude-official') {
+      const account = await claudeAccountService.getAccount(accountId).catch(() => null)
+      if (account?.disableAutoProtection === true || account?.disableAutoProtection === 'true') {
+        logger.info(
+          `🛡️ Account ${account.name || accountId} (${accountId}) has auto-protection disabled, skipping headerless 429 cooldown`
+        )
+        upstreamErrorHelper
+          .recordErrorHistory(accountId, accountType, 429, 'rate_limit')
+          .catch(() => {})
+        return { success: true, skipped: true }
+      }
+    }
+
+    logger.warn(
+      `⚠️ ${context ? `${context} ` : ''}429 without authoritative reset header for account ${accountId}; applying short cooldown`
+    )
+    await upstreamErrorHelper.markTempUnavailable(accountId, accountType, 429).catch(() => {})
+    if (sessionHash) {
+      await unifiedClaudeScheduler.clearSessionMapping(sessionHash).catch(() => {})
+    }
+    return { success: true }
+  }
+
   _toPascalCaseToolName(name) {
     const parts = name.split(/[_-]/).filter(Boolean)
     if (parts.length === 0) {
@@ -910,6 +967,7 @@ class ClaudeRelayService {
       // 检查响应是否为限流错误或认证错误
       if (response.statusCode !== 200 && response.statusCode !== 201) {
         let isRateLimited = false
+        let isModelFamilyRateLimited = false
         let rateLimitResetTimestamp = null
         let dedicatedRateLimitMessage = null
         const organizationDisabledError = this._isOrganizationDisabledError(
@@ -998,24 +1056,34 @@ class ClaudeRelayService {
               : null
             const parsedResetTimestamp = resetHeader ? parseInt(resetHeader, 10) : NaN
 
-            if (requestModelFamily && !Number.isNaN(parsedResetTimestamp)) {
+            if (
+              requestModelFamily &&
+              !Number.isNaN(parsedResetTimestamp) &&
+              this._isModelFamilyRateLimit(response.headers, parsedResetTimestamp, response.body)
+            ) {
               // 模型级限额：只停用该模型家族，不改写为账号级限流
-              await claudeAccountService.markAccountModelRateLimited(
+              const modelRateLimitResult = await claudeAccountService.markAccountModelRateLimited(
                 accountId,
                 requestModelFamily,
                 parsedResetTimestamp
               )
-              logger.warn(
-                `🚫 Account ${accountId} hit ${requestModelFamily} limit, resets at ${new Date(parsedResetTimestamp * 1000).toISOString()}`
-              )
+              const modelRateLimitApplied = modelRateLimitResult?.skipped !== true
+              if (modelRateLimitApplied) {
+                logger.warn(
+                  `🚫 Account ${accountId} hit ${requestModelFamily} limit, resets at ${new Date(parsedResetTimestamp * 1000).toISOString()}`
+                )
+                isModelFamilyRateLimited = true
+              }
 
-              if (isOpusModelRequest && isDedicatedOfficialAccount) {
-                const limitMessage = this._buildOpusLimitMessage(parsedResetTimestamp)
+              if (isDedicatedOfficialAccount && modelRateLimitApplied) {
+                const limitMessage = isOpusModelRequest
+                  ? this._buildOpusLimitMessage(parsedResetTimestamp)
+                  : this._buildStandardRateLimitMessage(parsedResetTimestamp)
                 return {
                   statusCode: 403,
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({
-                    error: 'opus_weekly_limit',
+                    error: isOpusModelRequest ? 'opus_weekly_limit' : 'upstream_rate_limited',
                     message: limitMessage
                   }),
                   accountId
@@ -1073,9 +1141,12 @@ class ClaudeRelayService {
             )
           } else {
             if (!rateLimitResetTimestamp) {
-              // 无权威 reset 头的 429 大概率不是真实限流，不标记账号、不进入冷却，直接透传错误
-              logger.warn(
-                `⚠️ Rate limit without reset header for account ${accountId}, status: ${response.statusCode}, skipping rate limit marking`
+              // 不按 5 小时窗口封号，但必须短暂隔离并清除粘性会话，确保共享池换到其它账号。
+              await this._applyNoResetRateLimitCooldown(
+                accountId,
+                accountType,
+                sessionHash,
+                'Non-stream'
               )
             } else {
               if (isDedicatedOfficialAccount && !dedicatedRateLimitMessage) {
@@ -1117,7 +1188,7 @@ class ClaudeRelayService {
           }
         }
 
-        shouldFailoverForRateLimit = isRateLimited
+        shouldFailoverForRateLimit = isRateLimited || isModelFamilyRateLimited
       } else if (response.statusCode === 200 || response.statusCode === 201) {
         // 提取5小时会话窗口状态
         // 使用大小写不敏感的方式获取响应头
@@ -2751,28 +2822,35 @@ class ClaudeRelayService {
               clientHeaders
             )
 
-            if (requestModelFamily) {
-              if (!Number.isNaN(parsedResetTimestamp)) {
-                // 模型级限额：只停用该模型家族，不改写为账号级限流
-                await claudeAccountService.markAccountModelRateLimited(
-                  accountId,
-                  requestModelFamily,
-                  parsedResetTimestamp
-                )
+            if (
+              requestModelFamily &&
+              !Number.isNaN(parsedResetTimestamp) &&
+              this._isModelFamilyRateLimit(res.headers, parsedResetTimestamp, errorBody429)
+            ) {
+              // 模型级限额：只停用该模型家族，不改写为账号级限流
+              const modelRateLimitResult = await claudeAccountService.markAccountModelRateLimited(
+                accountId,
+                requestModelFamily,
+                parsedResetTimestamp
+              )
+              const modelRateLimitApplied = modelRateLimitResult?.skipped !== true
+              if (modelRateLimitApplied) {
                 logger.warn(
                   `🚫 [Stream] Account ${accountId} hit ${requestModelFamily} limit, resets at ${new Date(parsedResetTimestamp * 1000).toISOString()}`
                 )
               }
 
-              if (isOpusModelRequest && isDedicatedOfficialAccount) {
-                const limitMessage = this._buildOpusLimitMessage(parsedResetTimestamp)
+              if (isDedicatedOfficialAccount && modelRateLimitApplied) {
+                const limitMessage = isOpusModelRequest
+                  ? this._buildOpusLimitMessage(parsedResetTimestamp)
+                  : this._buildStandardRateLimitMessage(parsedResetTimestamp)
                 if (!responseStream.headersSent) {
                   responseStream.status(403)
                   responseStream.setHeader('Content-Type', 'application/json')
                 }
                 responseStream.write(
                   JSON.stringify({
-                    error: 'opus_weekly_limit',
+                    error: isOpusModelRequest ? 'opus_weekly_limit' : 'upstream_rate_limited',
                     message: limitMessage
                   })
                 )
@@ -2789,9 +2867,12 @@ class ClaudeRelayService {
                   `🚫 [Stream] Agent View auxiliary request hit 429 for account ${accountId}; skipping account-level rate-limit marking`
                 )
               } else if (!rateLimitResetTimestamp) {
-                // 无权威 reset 头的 429 大概率不是真实限流，不标记账号、不进入冷却，直接透传错误
-                logger.warn(
-                  `⚠️ [Stream] 429 without reset header for account ${accountId}, skipping rate limit marking`
+                // 保留原始 429，但短暂隔离账号并清除粘性会话，确保换号不会再次选中它。
+                await this._applyNoResetRateLimitCooldown(
+                  accountId,
+                  accountType,
+                  sessionHash,
+                  'Stream'
                 )
               } else {
                 await unifiedClaudeScheduler.markAccountRateLimited(
@@ -3470,7 +3551,11 @@ class ClaudeRelayService {
               : null
             const parsedResetTimestamp = resetHeader ? parseInt(resetHeader, 10) : NaN
 
-            if (requestModelFamily && !Number.isNaN(parsedResetTimestamp)) {
+            if (
+              requestModelFamily &&
+              !Number.isNaN(parsedResetTimestamp) &&
+              this._isModelFamilyRateLimit(res.headers, parsedResetTimestamp)
+            ) {
               // 模型级限额：只停用该模型家族，不改写为账号级限流
               await claudeAccountService.markAccountModelRateLimited(
                 accountId,
@@ -3485,9 +3570,12 @@ class ClaudeRelayService {
                 `🚫 [Stream] Agent View auxiliary request hit rate limit at stream end for account ${accountId}; skipping account-level rate-limit marking`
               )
             } else if (Number.isNaN(parsedResetTimestamp)) {
-              // 无权威 reset 头的 429 大概率不是真实限流，不标记账号、不进入冷却，直接透传错误
-              logger.warn(
-                `⚠️ [Stream] Rate limit at stream end without reset header for account ${accountId}, skipping rate limit marking`
+              // 流已开始，无法安全重放；至少隔离账号并清除粘性会话，保护后续请求。
+              await this._applyNoResetRateLimitCooldown(
+                accountId,
+                accountType,
+                sessionHash,
+                'Stream-end'
               )
             } else {
               logger.info(

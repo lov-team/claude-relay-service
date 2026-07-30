@@ -1966,10 +1966,10 @@ class UnifiedClaudeScheduler {
    * 注意：此方法仅用于 claude-official 类型账户，其他类型不受会话绑定限制
    * @param {string} accountId - 账户ID
    * @param {string} accountType - 账户类型（应为 'claude-official'）
-   * @param {string} _requestedModel - 请求的模型（保留参数，当前未使用）
+   * @param {string} requestedModel - 请求的模型，用于检查独立模型家族限流
    * @returns {Promise<boolean>}
    */
-  async _isAccountAvailableForSessionBinding(accountId, accountType, _requestedModel = null) {
+  async _isAccountAvailableForSessionBinding(accountId, accountType, requestedModel = null) {
     try {
       // 此方法仅处理 claude-official 类型
       if (accountType !== 'claude-official') {
@@ -2003,6 +2003,18 @@ class UnifiedClaudeScheduler {
       // 检查是否被限流
       if (await claudeAccountService.isAccountRateLimited(accountId)) {
         logger.warn(`Session binding: Claude OAuth account ${accountId} is rate limited`)
+        return false
+      }
+
+      // 强制会话绑定不能绕过模型家族限流，否则 sticky session 会持续命中同一 429 账号。
+      const requestedModelFamily = getRateLimitModelFamily(requestedModel)
+      if (
+        requestedModelFamily &&
+        (await claudeAccountService.isAccountModelRateLimited(accountId, requestedModelFamily))
+      ) {
+        logger.warn(
+          `Session binding: Claude OAuth account ${accountId} is rate limited for ${requestedModelFamily}`
+        )
         return false
       }
 

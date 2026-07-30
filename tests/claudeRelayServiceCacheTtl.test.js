@@ -33,20 +33,30 @@ jest.mock('../src/utils/performanceOptimizer', () => ({
 }))
 
 jest.mock('../src/utils/proxyHelper', () => ({}))
-jest.mock('../src/services/account/claudeAccountService', () => ({}))
-jest.mock('../src/services/scheduler/unifiedClaudeScheduler', () => ({}))
+jest.mock('../src/services/account/claudeAccountService', () => ({
+  getAccount: jest.fn()
+}))
+jest.mock('../src/services/scheduler/unifiedClaudeScheduler', () => ({
+  clearSessionMapping: jest.fn()
+}))
 jest.mock('../src/services/claudeCodeHeadersService', () => ({}))
 jest.mock('../src/services/requestIdentityService', () => ({
   transform: jest.fn(({ body, headers }) => ({ body, headers }))
 }))
 jest.mock('../src/services/userMessageQueueService', () => ({}))
-jest.mock('../src/utils/upstreamErrorHelper', () => ({}))
+jest.mock('../src/utils/upstreamErrorHelper', () => ({
+  markTempUnavailable: jest.fn(),
+  recordErrorHistory: jest.fn()
+}))
 jest.mock('../src/validators/clients/claudeCodeValidator', () => ({
   includesClaudeCodeSystemPrompt: jest.fn(() => true)
 }))
 
 const claudeRelayService = require('../src/services/relay/claudeRelayService')
 const ClaudeCodeValidator = require('../src/validators/clients/claudeCodeValidator')
+const claudeAccountService = require('../src/services/account/claudeAccountService')
+const unifiedClaudeScheduler = require('../src/services/scheduler/unifiedClaudeScheduler')
+const upstreamErrorHelper = require('../src/utils/upstreamErrorHelper')
 
 describe('Claude relay cache_control ttl handling', () => {
   beforeEach(() => {
@@ -335,5 +345,91 @@ describe('Claude relay cache_control ttl handling', () => {
         null
       )
     ).toBe('claude-cli/2.1.150 (external, cli)')
+  })
+})
+
+describe('Claude relay CC rate-limit policy', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    upstreamErrorHelper.markTempUnavailable.mockResolvedValue({ success: true })
+    upstreamErrorHelper.recordErrorHistory.mockResolvedValue(undefined)
+    claudeAccountService.getAccount.mockResolvedValue(null)
+    unifiedClaudeScheduler.clearSessionMapping.mockResolvedValue(true)
+  })
+
+  test('treats 5h-status=allowed as an independent model-family limit', () => {
+    const resetTimestamp = Math.floor(Date.now() / 1000) + 60 * 60
+    expect(
+      claudeRelayService._isModelFamilyRateLimit(
+        { 'Anthropic-Ratelimit-Unified-5h-Status': 'allowed' },
+        resetTimestamp
+      )
+    ).toBe(true)
+  })
+
+  test('treats an explicit non-allowed 5h status as an account-wide limit', () => {
+    const resetTimestamp = Math.floor(Date.now() / 1000) + 6 * 24 * 60 * 60
+    expect(
+      claudeRelayService._isModelFamilyRateLimit(
+        { 'anthropic-ratelimit-unified-5h-status': 'rejected' },
+        resetTimestamp,
+        { error: { message: 'weekly limit reached' } }
+      )
+    ).toBe(false)
+  })
+
+  test('uses weekly error text or a reset beyond the 5h window as model-family evidence', () => {
+    const shortReset = Math.floor(Date.now() / 1000) + 60 * 60
+    const longReset = Math.floor(Date.now() / 1000) + 6 * 60 * 60
+
+    expect(
+      claudeRelayService._isModelFamilyRateLimit({}, shortReset, {
+        error: { message: 'Weekly model limit reached' }
+      })
+    ).toBe(true)
+    expect(claudeRelayService._isModelFamilyRateLimit({}, longReset)).toBe(true)
+    expect(claudeRelayService._isModelFamilyRateLimit({}, shortReset)).toBe(false)
+  })
+
+  test('applies a short cooldown and clears sticky mapping for a headerless 429', async () => {
+    await claudeRelayService._applyNoResetRateLimitCooldown(
+      'account-1',
+      'claude-official',
+      'session-1',
+      'test'
+    )
+
+    expect(upstreamErrorHelper.markTempUnavailable).toHaveBeenCalledWith(
+      'account-1',
+      'claude-official',
+      429
+    )
+    expect(unifiedClaudeScheduler.clearSessionMapping).toHaveBeenCalledWith('session-1')
+  })
+
+  test('does not alter routing for a headerless 429 when auto-protection is disabled', async () => {
+    claudeAccountService.getAccount.mockResolvedValue({
+      id: 'account-1',
+      name: 'protected-account',
+      disableAutoProtection: 'true'
+    })
+
+    await expect(
+      claudeRelayService._applyNoResetRateLimitCooldown(
+        'account-1',
+        'claude-official',
+        'session-1',
+        'test'
+      )
+    ).resolves.toEqual({ success: true, skipped: true })
+
+    expect(upstreamErrorHelper.markTempUnavailable).not.toHaveBeenCalled()
+    expect(unifiedClaudeScheduler.clearSessionMapping).not.toHaveBeenCalled()
+    expect(upstreamErrorHelper.recordErrorHistory).toHaveBeenCalledWith(
+      'account-1',
+      'claude-official',
+      429,
+      'rate_limit'
+    )
   })
 })

@@ -48,6 +48,7 @@ global.setInterval = (fn, ms, ...args) => {
   return timer
 }
 const claudeAccountService = require('../src/services/account/claudeAccountService')
+const upstreamErrorHelper = require('../src/utils/upstreamErrorHelper')
 global.setInterval = _realSetInterval
 
 const ACCOUNT_ID = 'acct-model-test'
@@ -119,5 +120,26 @@ describe('per-model rate-limit buckets (claudeAccountService)', () => {
     expect(await claudeAccountService.isAccountOpusRateLimited(ACCOUNT_ID)).toBe(true)
     expect(await claudeAccountService.isAccountFableRateLimited(ACCOUNT_ID)).toBe(true)
     expect(stored.schedulable).not.toBe('false')
+  })
+
+  it('respects disableAutoProtection for every model-family 429 bucket', async () => {
+    mockStore.set(ACCOUNT_ID, {
+      ...mockStore.get(ACCOUNT_ID),
+      disableAutoProtection: 'true'
+    })
+
+    await expect(
+      claudeAccountService.markAccountModelRateLimited(ACCOUNT_ID, 'sonnet', futureTs())
+    ).resolves.toEqual({ success: true, skipped: true })
+
+    const stored = mockStore.get(ACCOUNT_ID)
+    expect(stored.sonnetRateLimitedAt).toBeUndefined()
+    expect(stored.sonnetRateLimitEndAt).toBeUndefined()
+    expect(upstreamErrorHelper.recordErrorHistory).toHaveBeenCalledWith(
+      ACCOUNT_ID,
+      'claude-official',
+      429,
+      'rate_limit'
+    )
   })
 })

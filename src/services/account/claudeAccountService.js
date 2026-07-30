@@ -1549,6 +1549,21 @@ class ClaudeAccountService {
         throw new Error('Account not found')
       }
 
+      // 与账号级 429 保护保持同一开关语义：用户明确关闭自动保护后，
+      // 新增的模型家族桶也只能记录错误，不能自动改变调度状态。
+      if (
+        accountData.disableAutoProtection === true ||
+        accountData.disableAutoProtection === 'true'
+      ) {
+        logger.info(
+          `🛡️ Account ${accountData.name} (${accountId}) has auto-protection disabled, skipping ${family} model rate limit marking`
+        )
+        upstreamErrorHelper
+          .recordErrorHistory(accountId, 'claude-official', 429, 'rate_limit')
+          .catch(() => {})
+        return { success: true, skipped: true }
+      }
+
       const { atField, endField } = this._modelRateLimitFields(family)
       const updatedAccountData = { ...accountData }
       updatedAccountData[atField] = new Date().toISOString()

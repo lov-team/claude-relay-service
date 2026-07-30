@@ -117,6 +117,24 @@ describe('dedicated (bound) Claude account never silently falls back to the shar
     ).rejects.toMatchObject({ code: 'CLAUDE_DEDICATED_RATE_LIMITED', modelFamily: 'sonnet' })
   })
 
+  it('rejects a forced session binding when the requested model family is limited', async () => {
+    redis.getClaudeAccount.mockResolvedValue(healthyAccount)
+    claudeAccountService.isAccountModelRateLimited.mockResolvedValue(true)
+
+    await expect(
+      scheduler.selectAccountForApiKey(
+        { id: 'shared-key', name: 'shared' },
+        'session-1',
+        'claude-sonnet-4-5',
+        { accountId: BOUND_ID, accountType: 'claude-official' }
+      )
+    ).rejects.toMatchObject({
+      code: 'SESSION_BINDING_ACCOUNT_UNAVAILABLE',
+      accountId: BOUND_ID
+    })
+    expect(claudeAccountService.isAccountModelRateLimited).toHaveBeenCalledWith(BOUND_ID, 'sonnet')
+  })
+
   it('throws CLAUDE_DEDICATED_UNAVAILABLE when only temporarily unavailable', async () => {
     redis.getClaudeAccount.mockResolvedValue(healthyAccount)
     tempSpy.mockResolvedValue(true)
