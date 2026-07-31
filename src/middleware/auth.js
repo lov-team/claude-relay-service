@@ -10,6 +10,10 @@ const ClaudeCodeValidator = require('../validators/clients/claudeCodeValidator')
 const claudeRelayConfigService = require('../services/claudeRelayConfigService')
 const { calculateWaitTimeStats } = require('../utils/statsHelper')
 const { isClaudeFamilyModel } = require('../utils/modelHelper')
+const {
+  sanitizeRequestPayloadForLog,
+  sanitizeResponsePayloadForLog
+} = require('../utils/requestLogSanitizer')
 
 // 工具函数
 function sleep(ms) {
@@ -1781,7 +1785,10 @@ const requestLogger = (req, res, next) => {
   if (req.originalUrl !== '/health') {
     logger.debug(`▶ [${requestId}] ${req.method} ${req.originalUrl}`, {
       ip: clientIP,
-      body: req.body && Object.keys(req.body).length > 0 ? req.body : undefined
+      body:
+        req.body && Object.keys(req.body).length > 0
+          ? sanitizeRequestPayloadForLog(req.body, req.originalUrl)
+          : undefined
     })
   }
 
@@ -1812,7 +1819,7 @@ const requestLogger = (req, res, next) => {
 
     // 请求体（非 GET 且有内容时显示）
     if (req.method !== 'GET' && req.body && Object.keys(req.body).length > 0) {
-      meta.req = req.body
+      meta.req = sanitizeRequestPayloadForLog(req.body, req.originalUrl)
     }
 
     // 查询参数（GET 请求且有查询参数时单独显示）
@@ -1823,7 +1830,7 @@ const requestLogger = (req, res, next) => {
 
     // 响应体
     if (res._responseBody) {
-      meta.res = res._responseBody
+      meta.res = sanitizeResponsePayloadForLog(res._responseBody)
     }
 
     // API Key 信息（合并到同一条日志）

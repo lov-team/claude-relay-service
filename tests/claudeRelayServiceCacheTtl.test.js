@@ -23,7 +23,8 @@ jest.mock('../src/models/redis', () => ({
     get: jest.fn(),
     setex: jest.fn(),
     expire: jest.fn()
-  }
+  },
+  getAllClaudeAccounts: jest.fn()
 }))
 
 jest.mock('../src/utils/performanceOptimizer', () => ({
@@ -34,7 +35,8 @@ jest.mock('../src/utils/performanceOptimizer', () => ({
 
 jest.mock('../src/utils/proxyHelper', () => ({}))
 jest.mock('../src/services/account/claudeAccountService', () => ({
-  getAccount: jest.fn()
+  getAccount: jest.fn(),
+  getAllAccounts: jest.fn()
 }))
 jest.mock('../src/services/scheduler/unifiedClaudeScheduler', () => ({
   clearSessionMapping: jest.fn()
@@ -57,6 +59,7 @@ const ClaudeCodeValidator = require('../src/validators/clients/claudeCodeValidat
 const claudeAccountService = require('../src/services/account/claudeAccountService')
 const unifiedClaudeScheduler = require('../src/services/scheduler/unifiedClaudeScheduler')
 const upstreamErrorHelper = require('../src/utils/upstreamErrorHelper')
+const redis = require('../src/models/redis')
 
 describe('Claude relay cache_control ttl handling', () => {
   beforeEach(() => {
@@ -376,6 +379,68 @@ describe('Claude relay CC rate-limit policy', () => {
         { error: { message: 'weekly limit reached' } }
       )
     ).toBe(false)
+  })
+
+  test('recognizes the internal security monitor as an auxiliary request', () => {
+    expect(
+      claudeRelayService._isAgentViewAuxiliaryRequest(
+        {
+          model: 'claude-sonnet-5',
+          stream: false,
+          max_tokens: 64,
+          system: 'You are a security monitor for autonomous AI coding agents.',
+          messages: [{ role: 'user', content: '<transcript>sample</transcript>' }],
+          stop_sequences: ['</block>']
+        },
+        { 'user-agent': 'Go-http-client/2.0' }
+      )
+    ).toBe(true)
+  })
+
+  test('does not classify ordinary Sonnet requests as auxiliary', () => {
+    expect(
+      claudeRelayService._isAgentViewAuxiliaryRequest(
+        {
+          model: 'claude-sonnet-5',
+          stream: false,
+          max_tokens: 64,
+          system: 'ordinary request',
+          messages: [{ role: 'user', content: '<transcript>sample</transcript>' }]
+        },
+        {}
+      )
+    ).toBe(false)
+  })
+
+  test('reports eligible, limited, nurture-blocked and error pool capacity', async () => {
+    redis.getAllClaudeAccounts.mockResolvedValue([
+      { isActive: 'true', status: 'active', schedulable: 'true' },
+      {
+        isActive: 'true',
+        status: 'active',
+        schedulable: 'false',
+        rateLimitStatus: { isRateLimited: true }
+      },
+      {
+        isActive: 'true',
+        status: 'active',
+        schedulable: 'true',
+        nurtureLastBlockReason: 'five_hour_curve'
+      },
+      { isActive: 'true', status: 'error', schedulable: 'true' }
+    ])
+
+    await expect(claudeRelayService.healthCheck()).resolves.toMatchObject({
+      healthy: true,
+      degraded: true,
+      eligibleAccounts: 1,
+      schedulableAccounts: 2,
+      activeAccounts: 3,
+      rateLimitedAccounts: 1,
+      nurtureBlockedAccounts: 1,
+      errorAccounts: 1,
+      totalAccounts: 4
+    })
   })
 
   test('uses weekly error text or a reset beyond the 5h window as model-family evidence', () => {

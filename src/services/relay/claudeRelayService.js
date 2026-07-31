@@ -347,14 +347,11 @@ class ClaudeRelayService {
   }
 
   _isAgentViewAuxiliaryRequest(requestBody, clientHeaders) {
-    const appHeader = this._getHeaderValueCaseInsensitive(clientHeaders, 'x-app')
-    if (appHeader !== 'cli-bg') {
-      return false
-    }
     if (requestBody?.stream === true) {
       return false
     }
 
+    const appHeader = this._getHeaderValueCaseInsensitive(clientHeaders, 'x-app')
     const systemText = this._extractSystemText(requestBody?.system)
     const messageText = Array.isArray(requestBody?.messages)
       ? requestBody.messages
@@ -362,10 +359,23 @@ class ClaudeRelayService {
           .join('\n')
       : ''
 
-    return (
-      systemText.includes('A user kicked off a Claude Code agent') ||
-      messageText.includes('2-4 word lowercase label for this job')
-    )
+    const isLegacyAgentViewRequest =
+      appHeader === 'cli-bg' &&
+      (systemText.includes('A user kicked off a Claude Code agent') ||
+        messageText.includes('2-4 word lowercase label for this job'))
+
+    // new-api 的安全监控请求是内部辅助判定，不代表承载业务请求的账号已经耗尽。
+    // 使用多字段联合签名，避免仅凭一段可伪造文本绕过账号保护。
+    const isSecurityMonitorRequest =
+      /^claude-sonnet-5(?:$|[-.])/.test(String(requestBody?.model || '').toLowerCase()) &&
+      Number(requestBody?.max_tokens) > 0 &&
+      Number(requestBody?.max_tokens) <= 64 &&
+      systemText.includes('You are a security monitor for autonomous AI coding agents.') &&
+      messageText.includes('<transcript>') &&
+      Array.isArray(requestBody?.stop_sequences) &&
+      requestBody.stop_sequences.includes('</block>')
+
+    return isLegacyAgentViewRequest || isSecurityMonitorRequest
   }
 
   _isClaudeCodeCredentialError(body) {
@@ -963,6 +973,7 @@ class ClaudeRelayService {
       // 供非 2xx 错误处理和后续共享账号故障切换共同使用。
       // 必须在分支外声明：成功响应也会继续执行故障切换判定。
       let shouldFailoverForRateLimit = false
+      let suppressFailoverForAuxiliaryRequest = false
 
       // 检查响应是否为限流错误或认证错误
       if (response.statusCode !== 200 && response.statusCode !== 201) {
@@ -1136,6 +1147,7 @@ class ClaudeRelayService {
             clientHeaders
           )
           if (isAgentViewAuxiliaryRequest) {
+            suppressFailoverForAuxiliaryRequest = true
             logger.warn(
               `🚫 Agent View auxiliary request hit 429 for account ${accountId}; skipping account-level rate-limit marking`
             )
@@ -1188,7 +1200,8 @@ class ClaudeRelayService {
           }
         }
 
-        shouldFailoverForRateLimit = isRateLimited || isModelFamilyRateLimited
+        shouldFailoverForRateLimit =
+          (isRateLimited || isModelFamilyRateLimited) && !suppressFailoverForAuxiliaryRequest
       } else if (response.statusCode === 200 || response.statusCode === 201) {
         // 提取5小时会话窗口状态
         // 使用大小写不敏感的方式获取响应头
@@ -4209,12 +4222,34 @@ class ClaudeRelayService {
   // 🎯 健康检查
   async healthCheck() {
     try {
-      const accounts = await claudeAccountService.getAllAccounts()
-      const activeAccounts = accounts.filter((acc) => acc.isActive && acc.status === 'active')
+      // 健康检查只读取调度字段，避免高频 /health 请求触发账号解密或外部刷新。
+      const accounts = await redis.getAllClaudeAccounts()
+      const activeAccounts = accounts.filter(
+        (account) =>
+          (account.isActive === true || account.isActive === 'true') && account.status === 'active'
+      )
+      const isRateLimited = (account) =>
+        account.rateLimitStatus === 'limited' || account.rateLimitStatus?.isRateLimited === true
+      const isNurtureBlocked = (account) => Boolean(account.nurtureLastBlockReason)
+      const schedulableAccounts = activeAccounts.filter(
+        (account) => account.schedulable !== false && account.schedulable !== 'false'
+      )
+      const eligibleAccounts = schedulableAccounts.filter(
+        (account) => !isRateLimited(account) && !isNurtureBlocked(account)
+      )
+      const rateLimitedAccounts = accounts.filter(isRateLimited)
+      const nurtureBlockedAccounts = accounts.filter(isNurtureBlocked)
+      const errorAccounts = accounts.filter((account) => account.status === 'error')
 
       return {
-        healthy: activeAccounts.length > 0,
+        healthy: eligibleAccounts.length > 0,
+        degraded: eligibleAccounts.length > 0 && eligibleAccounts.length < 3,
+        eligibleAccounts: eligibleAccounts.length,
+        schedulableAccounts: schedulableAccounts.length,
         activeAccounts: activeAccounts.length,
+        rateLimitedAccounts: rateLimitedAccounts.length,
+        nurtureBlockedAccounts: nurtureBlockedAccounts.length,
+        errorAccounts: errorAccounts.length,
         totalAccounts: accounts.length,
         timestamp: new Date().toISOString()
       }

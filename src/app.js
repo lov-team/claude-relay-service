@@ -378,9 +378,11 @@ class Application {
           const timer = logger.timer('health-check')
 
           // 检查各个组件健康状态
-          const [redisHealth, loggerHealth] = await Promise.all([
+          const claudeRelayService = require('./services/relay/claudeRelayService')
+          const [redisHealth, loggerHealth, claudePoolHealth] = await Promise.all([
             this.checkRedisHealth(),
-            this.checkLoggerHealth()
+            this.checkLoggerHealth(),
+            claudeRelayService.healthCheck()
           ])
 
           const memory = process.memoryUsage()
@@ -419,7 +421,15 @@ class Application {
             },
             components: {
               redis: redisHealth,
-              logger: loggerHealth
+              logger: loggerHealth,
+              claudePool: {
+                status: claudePoolHealth.healthy
+                  ? claudePoolHealth.degraded
+                    ? 'degraded'
+                    : 'healthy'
+                  : 'unhealthy',
+                ...claudePoolHealth
+              }
             },
             stats: logger.getStats()
           }
