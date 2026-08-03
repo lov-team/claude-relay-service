@@ -297,9 +297,9 @@
                   <i v-else class="fas fa-sort ml-1 text-gray-400" />
                 </th>
                 <th
-                  class="min-w-[150px] px-3 py-4 text-left text-xs font-bold uppercase tracking-wider text-gray-700 dark:text-gray-300"
+                  class="min-w-[250px] px-3 py-4 text-left text-xs font-bold uppercase tracking-wider text-gray-700 dark:text-gray-300"
                 >
-                  今日使用
+                  今日 / 累计消耗
                 </th>
                 <th
                   class="min-w-[220px] px-3 py-4 text-left text-xs font-bold uppercase tracking-wider text-gray-700 dark:text-gray-300"
@@ -852,30 +852,32 @@
                   </div>
                 </td>
                 <td class="whitespace-nowrap px-3 py-4 text-sm">
-                  <div v-if="account.usage && account.usage.daily" class="space-y-1">
-                    <div class="flex items-center gap-2">
-                      <div class="h-2 w-2 rounded-full bg-blue-500" />
-                      <span class="text-sm font-medium text-gray-900 dark:text-gray-100"
-                        >{{ account.usage.daily.requests || 0 }} 次</span
-                      >
+                  <div v-if="account.usage" class="grid grid-cols-2 gap-4">
+                    <div class="space-y-1">
+                      <div class="text-[11px] font-medium text-gray-500 dark:text-gray-400">
+                        今日
+                      </div>
+                      <div class="text-sm font-medium text-gray-900 dark:text-gray-100">
+                        {{ account.usage.daily?.requests || 0 }} 次
+                      </div>
+                      <div class="text-xs text-gray-600 dark:text-gray-300">
+                        {{ formatNumber(account.usage.daily?.allTokens || 0) }} Token
+                      </div>
+                      <div class="text-xs text-gray-600 dark:text-gray-300">
+                        ${{ calculateDailyCost(account) }}
+                      </div>
                     </div>
-                    <div class="flex items-center gap-2">
-                      <div class="h-2 w-2 rounded-full bg-purple-500" />
-                      <span class="text-xs text-gray-600 dark:text-gray-300">{{
-                        formatNumber(account.usage.daily.allTokens || 0)
-                      }}</span>
-                    </div>
-                    <div class="flex items-center gap-2">
-                      <div class="h-2 w-2 rounded-full bg-green-500" />
-                      <span class="text-xs text-gray-600 dark:text-gray-300"
-                        >${{ calculateDailyCost(account) }}</span
-                      >
-                    </div>
-                    <div
-                      v-if="account.usage.averages && account.usage.averages.rpm > 0"
-                      class="text-xs text-gray-500 dark:text-gray-400"
-                    >
-                      平均 {{ account.usage.averages.rpm.toFixed(2) }} RPM
+                    <div class="space-y-1 border-l border-gray-200 pl-4 dark:border-gray-600">
+                      <div class="text-[11px] font-medium text-gray-500 dark:text-gray-400">
+                        累计
+                      </div>
+                      <div class="text-sm font-medium text-gray-900 dark:text-gray-100">
+                        {{ account.usage.total?.requests || 0 }} 次
+                      </div>
+                      <div class="text-xs text-gray-600 dark:text-gray-300">
+                        {{ formatNumber(account.usage.total?.allTokens || 0) }} Token
+                      </div>
+                      <div class="text-[11px] text-gray-500 dark:text-gray-400">接入以来</div>
                     </div>
                   </div>
                   <div v-else class="text-xs text-gray-400">暂无数据</div>
@@ -1575,45 +1577,30 @@
           <!-- 使用统计 -->
           <div class="mb-3 grid grid-cols-2 gap-3">
             <div>
-              <p class="text-xs text-gray-500 dark:text-gray-400">今日使用</p>
-              <div class="space-y-1">
-                <div class="flex items-center gap-1.5">
-                  <div class="h-1.5 w-1.5 rounded-full bg-blue-500" />
-                  <p class="text-sm font-semibold text-gray-900 dark:text-gray-100">
-                    {{ account.usage?.daily?.requests || 0 }} 次
-                  </p>
-                </div>
-                <div class="flex items-center gap-1.5">
-                  <div class="h-1.5 w-1.5 rounded-full bg-purple-500" />
-                  <p class="text-xs text-gray-600 dark:text-gray-400">
-                    {{ formatNumber(account.usage?.daily?.allTokens || 0) }}
-                  </p>
-                </div>
-                <div class="flex items-center gap-1.5">
-                  <div class="h-1.5 w-1.5 rounded-full bg-green-500" />
-                  <p class="text-xs text-gray-600 dark:text-gray-400">
-                    ${{ calculateDailyCost(account) }}
-                  </p>
-                </div>
+              <p class="text-xs font-medium text-gray-500 dark:text-gray-400">今日消耗</p>
+              <div class="mt-1 space-y-1">
+                <p class="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                  {{ account.usage?.daily?.requests || 0 }} 次
+                </p>
+                <p class="text-xs text-gray-600 dark:text-gray-400">
+                  {{ formatNumber(account.usage?.daily?.allTokens || 0) }} Token
+                </p>
+                <p class="text-xs text-gray-600 dark:text-gray-400">
+                  ${{ calculateDailyCost(account) }}
+                </p>
               </div>
             </div>
-            <div>
-              <p class="text-xs text-gray-500 dark:text-gray-400">会话窗口</p>
-              <div v-if="account.usage && account.usage.sessionWindow" class="space-y-1">
-                <div class="flex items-center gap-1.5">
-                  <div class="h-1.5 w-1.5 rounded-full bg-purple-500" />
-                  <p class="text-sm font-semibold text-gray-900 dark:text-gray-100">
-                    {{ formatNumber(account.usage.sessionWindow.totalTokens) }}
-                  </p>
-                </div>
-                <div class="flex items-center gap-1.5">
-                  <div class="h-1.5 w-1.5 rounded-full bg-green-500" />
-                  <p class="text-xs text-gray-600 dark:text-gray-400">
-                    ${{ formatCost(account.usage.sessionWindow.totalCost) }}
-                  </p>
-                </div>
+            <div class="border-l border-gray-200 pl-3 dark:border-gray-600">
+              <p class="text-xs font-medium text-gray-500 dark:text-gray-400">累计消耗</p>
+              <div class="mt-1 space-y-1">
+                <p class="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                  {{ account.usage?.total?.requests || 0 }} 次
+                </p>
+                <p class="text-xs text-gray-600 dark:text-gray-400">
+                  {{ formatNumber(account.usage?.total?.allTokens || 0) }} Token
+                </p>
+                <p class="text-[11px] text-gray-500 dark:text-gray-400">账户接入以来</p>
               </div>
-              <div v-else class="text-sm font-semibold text-gray-400">-</div>
             </div>
           </div>
 
