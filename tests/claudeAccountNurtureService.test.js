@@ -495,6 +495,46 @@ describe('claudeAccountNurtureService.evaluate', () => {
     })
     expect(local.blocked).toBe(true)
     expect(local.reason).toBe('local_request_count')
+    expect(Date.parse(local.blockExpiresAt)).toBeGreaterThan(
+      Date.parse(buildAccount().claudeFiveHourResetsAt)
+    )
+  })
+
+  test('allows local requests after the randomized five-hour counter window expires', async () => {
+    redis.getClaudeAccount.mockResolvedValue(
+      buildAccount({
+        nurtureLocalRequestCount: '999',
+        nurtureLocalWindowResetAt: new Date(FIXED_NOW - 2 * 60 * 60 * 1000).toISOString(),
+        nurtureLocalWindowReleaseAt: new Date(FIXED_NOW - 60 * 60 * 1000).toISOString()
+      })
+    )
+
+    const result = await claudeAccountNurtureService.evaluate('acc-pro-1', {
+      skipUsageRefresh: true
+    })
+
+    expect(result.blocked).toBe(false)
+    expect(result.actual.localCount).toBe(0)
+  })
+
+  test('keeps the stored local counter window when the usage snapshot moves to the next window early', async () => {
+    const storedReleaseAt = new Date(FIXED_NOW + 30 * 60 * 1000).toISOString()
+    redis.getClaudeAccount.mockResolvedValue(
+      buildAccount({
+        claudeFiveHourResetsAt: new Date(FIXED_NOW + 5 * 60 * 60 * 1000).toISOString(),
+        nurtureLocalRequestCount: '999',
+        nurtureLocalWindowResetAt: new Date(FIXED_NOW - 30 * 60 * 1000).toISOString(),
+        nurtureLocalWindowReleaseAt: storedReleaseAt
+      })
+    )
+
+    const result = await claudeAccountNurtureService.evaluate('acc-pro-1', {
+      skipUsageRefresh: true
+    })
+
+    expect(result.blocked).toBe(true)
+    expect(result.reason).toBe('local_request_count')
+    expect(result.blockExpiresAt).toBe(storedReleaseAt)
   })
 
   test('max tier steady caps are higher than pro but still below 90%', async () => {
@@ -748,7 +788,7 @@ describe('claudeAccountNurtureService lifecycle', () => {
     claudeAccountService.getAllAccounts.mockResolvedValue([{ id: 'acc-1', nurtureEnabled: true }])
   })
 
-  test('recordRequestSuccess increments local count for same utc day', async () => {
+  test('recordRequestSuccess increments local count in the same five-hour window', async () => {
     redis.getClaudeAccount.mockResolvedValue(
       buildAccount({
         nurtureLocalCountDate: '2026-07-10',
@@ -763,7 +803,33 @@ describe('claudeAccountNurtureService lifecycle', () => {
 
     const saved = redis.setClaudeAccount.mock.calls[0][1]
     expect(saved.nurtureLocalRequestCount).toBe('3')
+    expect(saved.nurtureLocalWindowResetAt).toBe(buildAccount().claudeFiveHourResetsAt)
+    expect(Date.parse(saved.nurtureLocalWindowReleaseAt)).toBeGreaterThan(
+      Date.parse(buildAccount().claudeFiveHourResetsAt)
+    )
     expect(saved.nurtureFiveHourGuardReleaseAt).toBeUndefined()
+  })
+
+  test('recordRequestSuccess resets an expired local counter and advances its five-hour window', async () => {
+    const expiredResetAt = new Date(FIXED_NOW - 2 * 60 * 60 * 1000).toISOString()
+    redis.getClaudeAccount.mockResolvedValue(
+      buildAccount({
+        claudeFiveHourResetsAt: expiredResetAt,
+        nurtureLocalRequestCount: '40',
+        nurtureLocalWindowResetAt: expiredResetAt,
+        nurtureLocalWindowReleaseAt: new Date(FIXED_NOW - 60 * 60 * 1000).toISOString()
+      })
+    )
+
+    jest.useFakeTimers()
+    jest.setSystemTime(FIXED_NOW)
+    await claudeAccountNurtureService.recordRequestSuccess('acc-pro-1')
+    jest.useRealTimers()
+
+    const saved = redis.setClaudeAccount.mock.calls[0][1]
+    expect(saved.nurtureLocalRequestCount).toBe('1')
+    expect(Date.parse(saved.nurtureLocalWindowResetAt)).toBeGreaterThan(FIXED_NOW)
+    expect(Date.parse(saved.nurtureLocalWindowReleaseAt)).toBeGreaterThan(FIXED_NOW)
   })
 
   test('recordBlocked persists the randomized five-hour guard release time', async () => {
@@ -787,7 +853,28 @@ describe('claudeAccountNurtureService lifecycle', () => {
     )
   })
 
-  test('rollover graduates after day 7 and resets counters', async () => {
+  test('recordBlocked persists the local counter window release time', async () => {
+    const account = buildAccount()
+    redis.getClaudeAccount.mockResolvedValue(account)
+    const releaseAt = calcFiveHourGuardReleaseAt('acc-pro-1', account.claudeFiveHourResetsAt)
+
+    await claudeAccountNurtureService.recordBlocked('acc-pro-1', {
+      reason: 'local_request_count',
+      blockExpiresAt: releaseAt,
+      blockWindowResetAt: account.claudeFiveHourResetsAt
+    })
+
+    expect(redis.setClaudeAccount).toHaveBeenCalledWith(
+      'acc-pro-1',
+      expect.objectContaining({
+        nurtureLastBlockReason: 'local_request_count',
+        nurtureLocalWindowResetAt: account.claudeFiveHourResetsAt,
+        nurtureLocalWindowReleaseAt: releaseAt
+      })
+    )
+  })
+
+  test('rollover graduates after day 7 without resetting the five-hour counter', async () => {
     redis.getClaudeAccount.mockResolvedValue({
       id: 'acc-1',
       nurtureEnabled: 'true',
@@ -805,7 +892,7 @@ describe('claudeAccountNurtureService lifecycle', () => {
     expect(result.graduated).toBe(1)
     const saved = redis.setClaudeAccount.mock.calls[0][1]
     expect(saved.nurturePhase).toBe('steady')
-    expect(saved.nurtureLocalRequestCount).toBe('0')
+    expect(saved.nurtureLocalRequestCount).toBe('12')
   })
 
   test('advanceToSteady and resetToDayOne mutate expected fields', async () => {
@@ -845,7 +932,7 @@ describe('claudeAccountNurtureService lifecycle', () => {
     evaluateSpy.mockRestore()
   })
 
-  test('rollover increments day index before graduation', async () => {
+  test('rollover increments day index without creating a daily local counter reset', async () => {
     redis.getClaudeAccount.mockResolvedValue({
       id: 'acc-1',
       nurtureEnabled: 'true',
@@ -864,7 +951,7 @@ describe('claudeAccountNurtureService lifecycle', () => {
     const saved = redis.setClaudeAccount.mock.calls[0][1]
     expect(saved.nurtureDayIndex).toBe('4')
     expect(saved.nurturePhase).toBe('nurturing')
-    expect(saved.nurtureLocalRequestCount).toBe('0')
+    expect(saved.nurtureLocalRequestCount).toBeUndefined()
   })
 
   test('rollover skips when lock is not acquired', async () => {
@@ -916,7 +1003,7 @@ describe('claudeAccountNurtureService lifecycle', () => {
     expect(fields.nurtureLocalRequestCount).toBe('0')
   })
 
-  test('recordRequestSuccess resets count on new utc day', async () => {
+  test('recordRequestSuccess does not reset a five-hour counter at utc midnight', async () => {
     redis.getClaudeAccount.mockResolvedValue(
       buildAccount({
         nurtureLocalCountDate: '2026-07-09',
@@ -931,6 +1018,6 @@ describe('claudeAccountNurtureService lifecycle', () => {
 
     const saved = redis.setClaudeAccount.mock.calls[0][1]
     expect(saved.nurtureLocalCountDate).toBe('2026-07-10')
-    expect(saved.nurtureLocalRequestCount).toBe('1')
+    expect(saved.nurtureLocalRequestCount).toBe('41')
   })
 })

@@ -15,6 +15,7 @@ const {
 const RPM_KEY_PREFIX = 'nurture:rpm:'
 const BASELINE_KEY_PREFIX = 'nurture:7d:baseline:'
 const RPM_WINDOW_MS = 60000
+const FIVE_HOUR_WINDOW_MS = 5 * 60 * 60 * 1000
 const FIVE_HOUR_GUARD_JITTER_MS = 60 * 60 * 1000
 const FIVE_HOUR_BLOCK_REASONS = new Set(['five_hour_curve', 'five_hour_steady'])
 
@@ -312,6 +313,53 @@ class ClaudeAccountNurtureService {
     return Number.isFinite(releaseAtMs) && Date.now() >= releaseAtMs
   }
 
+  resolveLocalRequestWindow(accountId, account) {
+    const storedResetAt = account?.nurtureLocalWindowResetAt
+    const storedReleaseAt = account?.nurtureLocalWindowReleaseAt
+    const storedReleaseAtMs = Date.parse(storedReleaseAt)
+    if (Number.isFinite(storedReleaseAtMs)) {
+      return {
+        resetAt: storedResetAt || null,
+        releaseAt: storedReleaseAt,
+        expired: Date.now() >= storedReleaseAtMs
+      }
+    }
+
+    const resetAt = account?.claudeFiveHourResetsAt || null
+    const releaseAt = calcFiveHourGuardReleaseAt(accountId, resetAt)
+    const releaseAtMs = Date.parse(releaseAt)
+    return {
+      resetAt,
+      releaseAt,
+      expired: Number.isFinite(releaseAtMs) && Date.now() >= releaseAtMs
+    }
+  }
+
+  resolveNextLocalRequestWindow(accountId, account) {
+    const currentWindow = this.resolveLocalRequestWindow(accountId, account)
+    if (currentWindow.releaseAt && !currentWindow.expired) {
+      return currentWindow
+    }
+
+    let resetAtMs = Date.parse(account?.claudeFiveHourResetsAt)
+    if (!Number.isFinite(resetAtMs)) {
+      resetAtMs = Date.parse(currentWindow.resetAt)
+    }
+    if (!Number.isFinite(resetAtMs)) {
+      return { resetAt: null, releaseAt: null, expired: false }
+    }
+
+    let resetAt = new Date(resetAtMs).toISOString()
+    let releaseAt = calcFiveHourGuardReleaseAt(accountId, resetAt)
+    while (Date.parse(releaseAt) <= Date.now()) {
+      resetAtMs += FIVE_HOUR_WINDOW_MS
+      resetAt = new Date(resetAtMs).toISOString()
+      releaseAt = calcFiveHourGuardReleaseAt(accountId, resetAt)
+    }
+
+    return { resetAt, releaseAt, expired: false }
+  }
+
   async evaluate(accountId, options = {}) {
     const systemConfig = await accountNurtureConfigService.getConfig()
     if (!systemConfig.enabled) {
@@ -347,7 +395,13 @@ class ClaudeAccountNurtureService {
       : toNumberOrNull(account.claudeFiveHourUtilization)
     const sevenDayUtil = toNumberOrNull(account.claudeSevenDayUtilization)
     const sevenDayOpusUtil = toNumberOrNull(account.claudeSevenDayOpusUtilization)
-    const localCount = parseInt(account.nurtureLocalRequestCount || '0', 10)
+    const localWindow = this.resolveLocalRequestWindow(accountId, account)
+    const legacyLocalWindowExpired =
+      !localWindow.releaseAt && account.nurtureLocalCountDate !== getUtcDateKey()
+    const localCount =
+      localWindow.expired || legacyLocalWindowExpired
+        ? 0
+        : parseInt(account.nurtureLocalRequestCount || '0', 10)
 
     const rpmResult = await this.checkRpm(accountId, limits.rpmLimit, {
       increment: options.incrementRpm === true
@@ -380,6 +434,8 @@ class ClaudeAccountNurtureService {
       sevenDayUtil,
       sevenDayOpusUtil,
       localCount,
+      localWindowResetAt: localWindow.resetAt,
+      localWindowReleaseAt: localWindow.releaseAt,
       dayDelta,
       maxDailyDelta,
       rpm: rpmResult
@@ -426,7 +482,10 @@ class ClaudeAccountNurtureService {
     }
 
     if (limits.localRequestsLimit !== null && localCount >= limits.localRequestsLimit) {
-      return this._buildResult(true, 'local_request_count', tier, limits, actual)
+      return this._buildResult(true, 'local_request_count', tier, limits, actual, {
+        blockExpiresAt: localWindow.releaseAt,
+        blockWindowResetAt: localWindow.resetAt
+      })
     }
 
     const result = this._buildResult(false, null, tier, limits, {
@@ -480,12 +539,23 @@ class ClaudeAccountNurtureService {
     }
 
     const dateKey = getUtcDateKey()
-    if (account.nurtureLocalCountDate !== dateKey) {
+    const localWindow = this.resolveLocalRequestWindow(accountId, account)
+    const nextLocalWindow = this.resolveNextLocalRequestWindow(accountId, account)
+    if (localWindow.expired) {
+      account.nurtureLocalCountDate = dateKey
+      account.nurtureLocalRequestCount = '1'
+    } else if (!localWindow.releaseAt && account.nurtureLocalCountDate !== dateKey) {
       account.nurtureLocalCountDate = dateKey
       account.nurtureLocalRequestCount = '1'
     } else {
       const current = parseInt(account.nurtureLocalRequestCount || '0', 10)
       account.nurtureLocalRequestCount = String(current + 1)
+      account.nurtureLocalCountDate = dateKey
+    }
+
+    if (nextLocalWindow.releaseAt) {
+      account.nurtureLocalWindowResetAt = nextLocalWindow.resetAt
+      account.nurtureLocalWindowReleaseAt = nextLocalWindow.releaseAt
     }
 
     account.nurtureLastBlockReason = ''
@@ -509,6 +579,12 @@ class ClaudeAccountNurtureService {
       account.nurtureFiveHourGuardReleaseAt = releaseAt || ''
       account.nurtureFiveHourGuardWindowResetAt =
         evaluation.blockWindowResetAt || account.claudeFiveHourResetsAt || ''
+    } else if (evaluation.reason === 'local_request_count') {
+      const localWindow = this.resolveNextLocalRequestWindow(accountId, account)
+      account.nurtureLocalWindowResetAt = evaluation.blockWindowResetAt || localWindow.resetAt || ''
+      account.nurtureLocalWindowReleaseAt = evaluation.blockExpiresAt || localWindow.releaseAt || ''
+      delete account.nurtureFiveHourGuardReleaseAt
+      delete account.nurtureFiveHourGuardWindowResetAt
     } else {
       delete account.nurtureFiveHourGuardReleaseAt
       delete account.nurtureFiveHourGuardWindowResetAt
@@ -528,6 +604,8 @@ class ClaudeAccountNurtureService {
       nurtureGraduatedAt: '',
       nurtureLocalRequestCount: '0',
       nurtureLocalCountDate: getUtcDateKey(),
+      nurtureLocalWindowResetAt: '',
+      nurtureLocalWindowReleaseAt: '',
       nurtureOverrideEnabled: 'false',
       nurtureOverrideSteadyCaps: '',
       nurtureLastBlockReason: '',
@@ -572,6 +650,8 @@ class ClaudeAccountNurtureService {
     account.nurtureGraduatedAt = ''
     account.nurtureLocalRequestCount = '0'
     account.nurtureLocalCountDate = getUtcDateKey()
+    delete account.nurtureLocalWindowResetAt
+    delete account.nurtureLocalWindowReleaseAt
     account.nurtureLastBlockReason = ''
     delete account.nurtureFiveHourGuardReleaseAt
     delete account.nurtureFiveHourGuardWindowResetAt
@@ -641,8 +721,6 @@ class ClaudeAccountNurtureService {
         }
 
         fullAccount.nurtureDailySeed = dateKey
-        fullAccount.nurtureLocalRequestCount = '0'
-        fullAccount.nurtureLocalCountDate = dateKey
         fullAccount.nurtureLastRolloverDate = dateKey
         await redis.setClaudeAccount(account.id, fullAccount)
       }
