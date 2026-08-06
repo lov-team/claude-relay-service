@@ -32,6 +32,7 @@ const PROMPT_CACHING_SCOPE_BETA = 'prompt-caching-scope-2026-01-05'
 const CONTEXT_MANAGEMENT_BETA = 'context-management-2025-06-27'
 const VALID_CACHE_CONTROL_TTLS = new Set(['5m', '1h'])
 const CACHE_DEBUG_ENV = 'ANTHROPIC_CACHE_DEBUG'
+const SHARED_ACCOUNT_FAILOVER_MAX_ATTEMPTS = 2
 
 // structuredClone polyfill for Node < 17
 const safeClone =
@@ -144,6 +145,35 @@ class ClaudeRelayService {
         ...response.headers,
         'retry-after': response.headers['Retry-After']
       },
+      accountId
+    }
+  }
+
+  _buildRetryableSharedPoolRateLimitResponse(accountId) {
+    logger.warn(
+      `All shared Claude accounts tried for this request are temporarily rate limited; returning retryable 429`
+    )
+    return {
+      statusCode: 429,
+      headers: {
+        'Content-Type': 'application/json',
+        'Retry-After': '1',
+        'retry-after': '1'
+      },
+      body: JSON.stringify({
+        error: {
+          type: 'rate_limit_error',
+          code: 'crs_rate_limited',
+          message:
+            'CRS shared account pool is temporarily rate limited; retry another upstream channel.',
+          metadata: {
+            source: 'claude-relay-service',
+            retryable: true,
+            disable_channel: false,
+            limit_kind: 'shared_pool'
+          }
+        }
+      }),
       accountId
     }
   }
@@ -1274,7 +1304,7 @@ class ClaudeRelayService {
       ) {
         const failoverAttempt = (options.accountFailoverAttempt || 0) + 1
         logger.warn(
-          `🔄 Retrying non-stream request on another account after ${response.statusCode} from ${accountId} (failover ${failoverAttempt}/1)`
+          `🔄 Retrying non-stream request on another account after ${response.statusCode} from ${accountId} (failover ${failoverAttempt}/${SHARED_ACCOUNT_FAILOVER_MAX_ATTEMPTS})`
         )
         try {
           return await this.relayRequest(
@@ -1291,6 +1321,15 @@ class ClaudeRelayService {
             `⚠️ No healthy account available for non-stream failover after ${response.statusCode} from ${accountId}: ${failoverError.message}`
           )
         }
+      }
+
+      if (
+        response.statusCode === 429 &&
+        shouldFailoverForRateLimit &&
+        accountType === 'claude-official' &&
+        !isDedicatedOfficialAccount
+      ) {
+        return this._buildRetryableSharedPoolRateLimitResponse(accountId)
       }
 
       // 记录成功的API调用并打印详细的usage数据
@@ -2958,6 +2997,23 @@ class ClaudeRelayService {
               }
             }
 
+            if (
+              !isAgentViewAuxiliaryRequest &&
+              accountType === 'claude-official' &&
+              !isDedicatedOfficialAccount &&
+              isStreamWritable(responseStream) &&
+              !responseStream.headersSent
+            ) {
+              const retryableResponse = this._buildRetryableSharedPoolRateLimitResponse(accountId)
+              responseStream.status(retryableResponse.statusCode)
+              Object.entries(retryableResponse.headers).forEach(([key, value]) => {
+                responseStream.setHeader(key, value)
+              })
+              responseStream.end(retryableResponse.body)
+              resolve()
+              return
+            }
+
             // 非专属账户的真正限流：透传错误给客户端（body 已读完，无需 fall-through）
             logger.error(
               `❌ Claude API returned error status: 429 | Account: ${account?.name || accountId}`
@@ -4280,7 +4336,7 @@ class ClaudeRelayService {
     return (
       accountType === 'claude-official' &&
       !isDedicatedOfficialAccount &&
-      failoverAttempt < 1 &&
+      failoverAttempt < SHARED_ACCOUNT_FAILOVER_MAX_ATTEMPTS &&
       (statusCode === 403 || (statusCode === 429 && isRateLimited))
     )
   }
@@ -4314,7 +4370,7 @@ class ClaudeRelayService {
 
     const failoverAttempt = (requestOptions.accountFailoverAttempt || 0) + 1
     logger.warn(
-      `🔄 Retrying stream request on another account after ${statusCode} from ${accountId} (failover ${failoverAttempt}/1)`
+      `🔄 Retrying stream request on another account after ${statusCode} from ${accountId} (failover ${failoverAttempt}/${SHARED_ACCOUNT_FAILOVER_MAX_ATTEMPTS})`
     )
 
     try {
