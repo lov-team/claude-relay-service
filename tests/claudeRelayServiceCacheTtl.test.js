@@ -497,4 +497,46 @@ describe('Claude relay CC rate-limit policy', () => {
       'rate_limit'
     )
   })
+
+  test('tries two alternate shared accounts before surfacing a rate limit', () => {
+    const canFailover = (accountFailoverAttempt) =>
+      claudeRelayService._shouldFailoverToAnotherSharedAccount(
+        429,
+        true,
+        'claude-official',
+        false,
+        { accountFailoverAttempt }
+      )
+
+    expect(canFailover(0)).toBe(true)
+    expect(canFailover(1)).toBe(true)
+    expect(canFailover(2)).toBe(false)
+    expect(
+      claudeRelayService._shouldFailoverToAnotherSharedAccount(429, true, 'claude-official', true, {
+        accountFailoverAttempt: 0
+      })
+    ).toBe(false)
+  })
+
+  test('returns a structured retryable 429 after the shared pool is exhausted', () => {
+    const response = claudeRelayService._buildRetryableSharedPoolRateLimitResponse('account-3')
+
+    expect(response.statusCode).toBe(429)
+    expect(response.headers['Retry-After']).toBe('1')
+    expect(JSON.parse(response.body)).toEqual({
+      error: {
+        type: 'rate_limit_error',
+        code: 'crs_rate_limited',
+        message:
+          'CRS shared account pool is temporarily rate limited; retry another upstream channel.',
+        metadata: {
+          source: 'claude-relay-service',
+          retryable: true,
+          disable_channel: false,
+          limit_kind: 'shared_pool'
+        }
+      }
+    })
+    expect(response.accountId).toBe('account-3')
+  })
 })
