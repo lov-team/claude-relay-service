@@ -7,6 +7,7 @@ const logger = require('../utils/logger')
 const redis = require('../models/redis')
 const webhookConfigService = require('./webhookConfigService')
 const { getISOStringWithTimezone } = require('../utils/dateHelper')
+const { getAppVersion } = require('../utils/commonHelper')
 const appConfig = require('../../config/config')
 
 class WebhookService {
@@ -191,24 +192,7 @@ class WebhookService {
     const token = await this._getFeishuAppTenantToken(platform, apiBaseUrl)
     const chatId = await this._resolveFeishuAppChatId(platform, apiBaseUrl, token)
 
-    const content = this.formatMessageForFeishu(type, data)
-
-    // 复用飞书webhook机器人的卡片结构
-    const card = {
-      elements: [
-        {
-          tag: 'markdown',
-          content
-        }
-      ],
-      header: {
-        title: {
-          tag: 'plain_text',
-          content: this.getNotificationTitle(type)
-        },
-        template: this.getFeishuCardColor(type)
-      }
-    }
+    const card = this._buildFeishuAppCard(type, data)
 
     const payload = {
       receive_id: chatId,
@@ -230,6 +214,56 @@ class WebhookService {
     // 飞书业务错误：HTTP 200 但 code 不为 0
     if (response && response.code !== 0) {
       throw new Error(`飞书API错误: code=${response.code}, msg=${response.msg || '未知错误'}`)
+    }
+  }
+
+  /**
+   * 构建飞书自建应用的结构化卡片（标题 + 副标题 + 字段列表 + 时间/版本页脚）
+   */
+  _buildFeishuAppCard(type, data) {
+    const subtitles = {
+      accountAnomaly: '账号状态异常，请及时检查处理',
+      quotaWarning: 'API 调用配额不足，请关注用量',
+      systemError: '系统运行出现错误',
+      securityAlert: '检测到安全相关警报',
+      rateLimitRecovery: '限流状态已恢复，账号重新可用',
+      test: '验证 Webhook 通知功能是否正常'
+    }
+    const subtitle = subtitles[type] || '系统通知'
+
+    const truncate = (value, max = 500) => {
+      const text = String(value ?? '')
+        .replace(/\r/g, ' ')
+        .trim()
+      return text.length > max ? `${text.slice(0, max - 3)}...` : text
+    }
+
+    const fieldLines = this.buildNotificationDetails(data).map(
+      (detail) => `**${detail.label}:** ${truncate(detail.value)}`
+    )
+    if (fieldLines.length === 0) {
+      fieldLines.push('**消息:** 无详细信息')
+    }
+
+    const timestamp = getISOStringWithTimezone(new Date())
+    const footer = `**时间:** ${timestamp}\n**服务:** Claude Relay Service  **版本:** ${getAppVersion()}`
+
+    return {
+      config: { wide_screen_mode: true },
+      header: {
+        title: {
+          tag: 'plain_text',
+          content: this.getNotificationTitle(type)
+        },
+        template: this.getFeishuCardColor(type)
+      },
+      elements: [
+        { tag: 'div', text: { tag: 'lark_md', content: subtitle } },
+        { tag: 'hr' },
+        { tag: 'div', text: { tag: 'lark_md', content: fieldLines.join('\n') } },
+        { tag: 'hr' },
+        { tag: 'div', text: { tag: 'lark_md', content: footer } }
+      ]
     }
   }
 

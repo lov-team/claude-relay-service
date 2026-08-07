@@ -107,8 +107,12 @@ describe('webhookService - feishu_app', () => {
     const card = JSON.parse(messagePayload.content)
     expect(card.header.title.content).toBe('🧪 测试通知')
     expect(card.header.template).toBe('blue')
-    expect(card.elements[0].tag).toBe('markdown')
-    expect(card.elements[0].content).toContain('测试消息')
+    expect(card.elements[0].tag).toBe('div')
+    expect(card.elements[0].text.tag).toBe('lark_md')
+    expect(card.elements[0].text.content).toContain('验证 Webhook 通知功能')
+    expect(card.elements[2].text.content).toContain('**消息:** 测试消息')
+    expect(card.elements[4].text.content).toContain('**时间:**')
+    expect(card.elements[4].text.content).toContain('**版本:**')
 
     // token 写入缓存，TTL = expire - 120
     expect(mockRedisClient.set).toHaveBeenCalledWith(
