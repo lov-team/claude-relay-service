@@ -276,4 +276,41 @@ describe('accountNurtureDefaults', () => {
   test('pickInRange returns exact value when min equals max', () => {
     expect(pickInRange(42, 42, '2026-07-01', 'acc-1', 'rpm')).toBe(42)
   })
+
+  test('normalizes request guardrails and OAuth error patterns', () => {
+    const defaults = cloneDefaultConfig()
+    const normalized = normalizeAccountNurtureConfig({
+      ...defaults,
+      trafficGuardrails: {
+        ...defaults.trafficGuardrails,
+        maxMessages: '150',
+        enabled: 'false'
+      },
+      oauthErrorPatterns: {
+        blocked: 'tenant frozen\ntenant suspended',
+        revoked: ['credential withdrawn', 'credential withdrawn']
+      }
+    })
+
+    expect(normalized.trafficGuardrails.enabled).toBe(false)
+    expect(normalized.trafficGuardrails.maxMessages).toBe(150)
+    expect(normalized.oauthErrorPatterns.blocked).toEqual(['tenant frozen', 'tenant suspended'])
+    expect(normalized.oauthErrorPatterns.revoked).toEqual(['credential withdrawn'])
+  })
+
+  test('rejects invalid request guardrail limits', () => {
+    const defaults = cloneDefaultConfig()
+    expect(() =>
+      normalizeAccountNurtureConfig({
+        ...defaults,
+        trafficGuardrails: { ...defaults.trafficGuardrails, maxBodyBytes: 1024 }
+      })
+    ).toThrow(/trafficGuardrails.maxBodyBytes/)
+    expect(() =>
+      normalizeAccountNurtureConfig({
+        ...defaults,
+        trafficGuardrails: { ...defaults.trafficGuardrails, maxTools: 1000 }
+      })
+    ).toThrow(/trafficGuardrails.maxTools/)
+  })
 })

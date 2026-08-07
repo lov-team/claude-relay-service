@@ -38,6 +38,14 @@ describe('accountNurtureConfigService', () => {
     expect(config.steadyCaps.pro.sevenDayVelocity).toBe(10)
     expect(config.steadyCaps.max.sevenDayVelocity).toBe(15)
     expect(config.proDayPlans).toHaveLength(7)
+    expect(config.trafficGuardrails).toMatchObject({
+      enabled: false,
+      maxBodyBytes: 1048576,
+      maxMessages: 200,
+      maxTools: 64,
+      maxOutputTokens: 32768
+    })
+    expect(config.oauthErrorPatterns).toEqual({ blocked: [], revoked: [] })
   })
 
   test('persists normalized config to redis', async () => {
@@ -122,5 +130,29 @@ describe('accountNurtureConfigService', () => {
         maxDailySevenDayDelta: { pro: 0, max: 15 }
       })
     ).rejects.toThrow(/maxDailySevenDayDelta/)
+  })
+
+  test('persists request and OAuth protection settings in nurture config', async () => {
+    mockRedisClient.get.mockResolvedValue(null)
+    const updated = await accountNurtureConfigService.updateConfig({
+      trafficGuardrails: {
+        enabled: true,
+        maxBodyBytes: 2097152,
+        maxMessages: 180,
+        maxTools: 48,
+        maxOutputTokens: 16384,
+        retryAfterSeconds: 30
+      },
+      oauthErrorPatterns: {
+        blocked: ['tenant frozen'],
+        revoked: ['credential withdrawn']
+      }
+    })
+
+    expect(updated.trafficGuardrails.maxMessages).toBe(180)
+    expect(updated.oauthErrorPatterns.blocked).toEqual(['tenant frozen'])
+    const persisted = JSON.parse(mockRedisClient.set.mock.calls[0][1])
+    expect(persisted.trafficGuardrails.maxOutputTokens).toBe(16384)
+    expect(persisted.oauthErrorPatterns.revoked).toEqual(['credential withdrawn'])
   })
 })

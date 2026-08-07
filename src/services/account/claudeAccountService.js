@@ -16,6 +16,7 @@ const {
   logRefreshSkipped
 } = require('../../utils/tokenRefreshLogger')
 const tokenRefreshService = require('../tokenRefreshService')
+const accountNurtureConfigService = require('../accountNurtureConfigService')
 const LRUCache = require('../../utils/lruCache')
 const { formatDateWithTimezone, getISOStringWithTimezone } = require('../../utils/dateHelper')
 const { isOpus45OrNewer, RATE_LIMITED_MODEL_FAMILIES } = require('../../utils/modelHelper')
@@ -24,6 +25,7 @@ const {
   normalizeOptionalNonNegativeInteger,
   normalizeTempUnavailablePolicyInput
 } = require('../../utils/tempUnavailablePolicy')
+const { classifyClaudeOAuthError } = require('../../utils/claudeOAuthErrorClassifier')
 
 /**
  * Check if account is Pro (not Max)
@@ -232,7 +234,6 @@ class ClaudeAccountService {
 
     try {
       const claudeAccountNurtureService = require('./claudeAccountNurtureService')
-      const accountNurtureConfigService = require('../accountNurtureConfigService')
       const nurtureConfig = await accountNurtureConfigService.getConfig()
       const savedAccount = await redis.getClaudeAccount(accountId)
       const tier = claudeAccountNurtureService.getNurtureTier(savedAccount)
@@ -283,45 +284,35 @@ class ClaudeAccountService {
   // 🔄 刷新Claude账户token
   async refreshAccountToken(accountId) {
     let lockAcquired = false
+    let initialAccountData = null
 
     try {
-      const accountData = await redis.getClaudeAccount(accountId)
+      initialAccountData = await redis.getClaudeAccount(accountId)
 
-      if (!accountData || Object.keys(accountData).length === 0) {
+      if (!initialAccountData || Object.keys(initialAccountData).length === 0) {
         throw new Error('Account not found')
-      }
-
-      const refreshToken = this._decryptSensitiveData(accountData.refreshToken)
-
-      if (!refreshToken) {
-        throw new Error('No refresh token available - manual token update required')
       }
 
       // 尝试获取分布式锁
       lockAcquired = await tokenRefreshService.acquireRefreshLock(accountId, 'claude')
 
       if (!lockAcquired) {
-        // 如果无法获取锁，说明另一个进程正在刷新
         logger.info(
-          `🔒 Token refresh already in progress for account: ${accountData.name} (${accountId})`
+          `🔒 Token refresh already in progress for account: ${initialAccountData.name} (${accountId})`
         )
-        logRefreshSkipped(accountId, accountData.name, 'claude', 'already_locked')
+        logRefreshSkipped(accountId, initialAccountData.name, 'claude', 'already_locked')
+        return await this._waitForVerifiedTokenRefresh(accountId, initialAccountData)
+      }
 
-        // 等待一段时间后返回，期望其他进程已完成刷新
-        await new Promise((resolve) => setTimeout(resolve, 2000))
+      // 锁内重新读取账户，避免并发刷新后继续使用锁外读取的旧 refresh token。
+      const accountData = await redis.getClaudeAccount(accountId)
+      if (!accountData || Object.keys(accountData).length === 0) {
+        throw new Error('Account not found after acquiring refresh lock')
+      }
 
-        // 重新获取账户数据（可能已被其他进程刷新）
-        const updatedData = await redis.getClaudeAccount(accountId)
-        if (updatedData && updatedData.accessToken) {
-          const accessToken = this._decryptSensitiveData(updatedData.accessToken)
-          return {
-            success: true,
-            accessToken,
-            expiresAt: updatedData.expiresAt
-          }
-        }
-
-        throw new Error('Token refresh in progress by another process')
+      const refreshToken = this._decryptSensitiveData(accountData.refreshToken)
+      if (!refreshToken) {
+        throw new Error('No refresh token available - manual token update required')
       }
 
       // 记录开始刷新
@@ -371,6 +362,14 @@ class ClaudeAccountService {
         })
 
         const { access_token, refresh_token, expires_in } = response.data
+        if (!access_token) {
+          throw new Error('Token refresh response did not include an access token')
+        }
+        const nextRefreshToken = refresh_token || refreshToken
+        const expiresInSeconds = Number.parseInt(expires_in, 10)
+        if (!Number.isFinite(expiresInSeconds) || expiresInSeconds <= 0) {
+          throw new Error('Token refresh response did not include a valid expiry')
+        }
 
         // 检查是否有套餐信息
         if (
@@ -395,8 +394,8 @@ class ClaudeAccountService {
 
         // 更新账户数据
         accountData.accessToken = this._encryptSensitiveData(access_token)
-        accountData.refreshToken = this._encryptSensitiveData(refresh_token)
-        accountData.expiresAt = (Date.now() + expires_in * 1000).toString()
+        accountData.refreshToken = this._encryptSensitiveData(nextRefreshToken)
+        accountData.expiresAt = (Date.now() + expiresInSeconds * 1000).toString()
         accountData.lastRefreshAt = new Date().toISOString()
         accountData.status = 'active'
         accountData.errorMessage = ''
@@ -422,7 +421,7 @@ class ClaudeAccountService {
         // 记录刷新成功
         logRefreshSuccess(accountId, accountData.name, 'claude', {
           accessToken: access_token,
-          refreshToken: refresh_token,
+          refreshToken: nextRefreshToken,
           expiresAt: accountData.expiresAt,
           scopes: accountData.scopes
         })
@@ -440,43 +439,103 @@ class ClaudeAccountService {
         throw new Error(`Token refresh failed with status: ${response.status}`)
       }
     } catch (error) {
+      const nurtureConfig = await accountNurtureConfigService.getConfig()
+      const classification = classifyClaudeOAuthError(error, null, {
+        blockedPatterns: nurtureConfig.oauthErrorPatterns?.blocked,
+        revokedPatterns: nurtureConfig.oauthErrorPatterns?.revoked
+      })
+      error.claudeOAuthErrorKind = classification.kind
+      error.isPermanentOAuthError = classification.permanent
+
       // 记录刷新失败
       const accountData = await redis.getClaudeAccount(accountId)
       if (accountData) {
         logRefreshError(accountId, accountData.name, 'claude', error)
 
-        // disableAutoProtection 检查：跳过状态修改，仅记录日志和错误历史
-        if (
-          accountData.disableAutoProtection === true ||
-          accountData.disableAutoProtection === 'true'
-        ) {
-          logger.info(
-            `🛡️ Account ${accountData.name} (${accountId}) has auto-protection disabled, skipping error status on token refresh failure`
-          )
-          upstreamErrorHelper
-            .recordErrorHistory(accountId, 'claude-official', 0, 'token_refresh_failed', {
-              errorBody: error.message
+        if (classification.permanent) {
+          const errorType = classification.accountStatus === 'blocked' ? 'blocked' : 'unauthorized'
+          try {
+            await this.markAccountError(accountId, errorType, null, {
+              errorCode: classification.errorCode,
+              errorMessage:
+                classification.message || `OAuth token refresh failed: ${classification.kind}`,
+              statusCode: classification.statusCode || 401,
+              errorKind: classification.kind,
+              force: true
             })
-            .catch(() => {})
+          } catch (markError) {
+            logger.error(
+              `❌ Failed to persist permanent OAuth status for account ${accountId}:`,
+              markError
+            )
+          }
+        } else if (classification.kind === 'transient_upstream_error') {
+          if (
+            accountData.disableAutoProtection === true ||
+            accountData.disableAutoProtection === 'true'
+          ) {
+            upstreamErrorHelper
+              .recordErrorHistory(
+                accountId,
+                'claude-official',
+                classification.statusCode || 503,
+                classification.kind,
+                { errorBody: error.message }
+              )
+              .catch(() => {})
+          } else {
+            await upstreamErrorHelper
+              .markTempUnavailable(
+                accountId,
+                'claude-official',
+                classification.statusCode || 503,
+                null,
+                { oauthErrorKind: classification.kind }
+              )
+              .catch(() => {})
+          }
         } else {
-          accountData.status = 'error'
-          accountData.errorMessage = error.message
-          await redis.setClaudeAccount(accountId, accountData)
+          // 保留既有行为：无法明确归类的本地配置/数据错误停止调度，等待人工修复。
+          if (
+            accountData.disableAutoProtection === true ||
+            accountData.disableAutoProtection === 'true'
+          ) {
+            upstreamErrorHelper
+              .recordErrorHistory(accountId, 'claude-official', 0, 'token_refresh_failed', {
+                errorBody: error.message,
+                oauthErrorKind: classification.kind
+              })
+              .catch(() => {})
+          } else {
+            accountData.status = 'error'
+            accountData.schedulable = 'false'
+            accountData.errorMessage = error.message
+            try {
+              await redis.setClaudeAccount(accountId, accountData)
+            } catch (saveError) {
+              logger.error(
+                `❌ Failed to persist token refresh error for account ${accountId}:`,
+                saveError
+              )
+            }
+          }
         }
 
-        // 发送Webhook通知
-        try {
-          const webhookNotifier = require('../../utils/webhookNotifier')
-          await webhookNotifier.sendAccountAnomalyNotification({
-            accountId,
-            accountName: accountData.name,
-            platform: 'claude-oauth',
-            status: 'error',
-            errorCode: 'CLAUDE_OAUTH_ERROR',
-            reason: `Token refresh failed: ${error.message}`
-          })
-        } catch (webhookError) {
-          logger.error('Failed to send webhook notification:', webhookError)
+        // 永久错误由 markAccountError 发送更准确的通知，避免重复告警。
+        if (!classification.permanent) {
+          try {
+            const webhookNotifier = require('../../utils/webhookNotifier')
+            await webhookNotifier.sendAccountAnomalyNotification({
+              accountId,
+              accountName: accountData.name,
+              platform: 'claude-oauth',
+              status: classification.kind === 'transient_upstream_error' ? 'warning' : 'error',
+              errorCode: classification.errorCode,
+              reason: `Token refresh failed (${classification.kind}): ${error.message}`
+            })
+          } catch (webhookError) {
+            logger.error('Failed to send webhook notification:', webhookError)
+          }
         }
       }
 
@@ -492,6 +551,54 @@ class ClaudeAccountService {
         await tokenRefreshService.releaseRefreshLock(accountId, 'claude')
       }
     }
+  }
+
+  async _waitForVerifiedTokenRefresh(accountId, previousAccountData, maxWaitMs = 35000) {
+    const previousRefreshAt = previousAccountData.lastRefreshAt || ''
+    const deadline = Date.now() + maxWaitMs
+
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      const isLocked = await tokenRefreshService.isRefreshLocked(accountId, 'claude')
+      const updatedData = await redis.getClaudeAccount(accountId)
+
+      if (
+        updatedData?.status === 'active' &&
+        updatedData.accessToken &&
+        updatedData.accessToken !== previousAccountData.accessToken &&
+        updatedData.lastRefreshAt &&
+        updatedData.lastRefreshAt !== previousRefreshAt
+      ) {
+        return {
+          success: true,
+          accessToken: this._decryptSensitiveData(updatedData.accessToken),
+          expiresAt: updatedData.expiresAt
+        }
+      }
+
+      if (updatedData?.status === 'blocked' || updatedData?.status === 'unauthorized') {
+        const permanentError = new Error(
+          updatedData.errorMessage || 'Concurrent OAuth token refresh failed permanently'
+        )
+        permanentError.code =
+          updatedData.status === 'blocked' ? 'account has been disabled' : 'invalid_grant'
+        permanentError.response = {
+          status: updatedData.status === 'blocked' ? 403 : 401,
+          data: { message: permanentError.message }
+        }
+        throw permanentError
+      }
+
+      if (!isLocked) {
+        const refreshError = new Error('Concurrent token refresh completed without a valid update')
+        refreshError.code = 'TOKEN_REFRESH_NOT_VERIFIED'
+        throw refreshError
+      }
+    }
+
+    const timeoutError = new Error('Timed out waiting for concurrent token refresh')
+    timeoutError.code = 'TOKEN_REFRESH_WAIT_TIMEOUT'
+    throw timeoutError
   }
 
   // 🔍 获取账户信息
@@ -538,9 +645,17 @@ class ClaudeAccountService {
           return refreshResult.accessToken
         } catch (refreshError) {
           logger.warn(`⚠️ Token refresh failed for account ${accountId}: ${refreshError.message}`)
-          // 如果刷新失败，仍然尝试使用当前token（可能是手动添加的长期有效token）
+          // refresh token 已被撤销/封禁时，旧 access token 不再回退使用。
+          if (refreshError.isPermanentOAuthError) {
+            throw refreshError
+          }
+
+          // 仅在当前 token 尚未真正过期时允许瞬时刷新错误回退。
           const currentToken = this._decryptSensitiveData(accountData.accessToken)
-          if (currentToken) {
+          const currentExpiresAt = parseInt(accountData.expiresAt, 10)
+          const currentTokenUsable =
+            currentToken && (!Number.isFinite(currentExpiresAt) || Date.now() < currentExpiresAt)
+          if (currentTokenUsable) {
             logger.info(`🔄 Using current token for account ${accountId} (refresh failed)`)
             return currentToken
           }
@@ -2606,7 +2721,7 @@ class ClaudeAccountService {
   }
 
   // 🚫 通用的账户错误标记方法
-  async markAccountError(accountId, errorType, sessionHash = null) {
+  async markAccountError(accountId, errorType, sessionHash = null, details = {}) {
     const ERROR_CONFIG = {
       unauthorized: {
         status: 'unauthorized',
@@ -2637,15 +2752,21 @@ class ClaudeAccountService {
 
       // disableAutoProtection 检查：跳过自动禁用，仅记录错误历史
       if (
-        accountData.disableAutoProtection === true ||
-        accountData.disableAutoProtection === 'true'
+        details.force !== true &&
+        (accountData.disableAutoProtection === true || accountData.disableAutoProtection === 'true')
       ) {
         logger.info(
           `🛡️ Account ${accountData.name} (${accountId}) has auto-protection disabled, skipping ${errorType} marking`
         )
-        const statusCode = errorType === 'unauthorized' ? 401 : 403
+        const statusCode = details.statusCode || (errorType === 'unauthorized' ? 401 : 403)
         upstreamErrorHelper
-          .recordErrorHistory(accountId, 'claude-official', statusCode, errorType)
+          .recordErrorHistory(
+            accountId,
+            'claude-official',
+            statusCode,
+            details.errorKind || errorType,
+            details.errorMessage ? { errorBody: details.errorMessage } : null
+          )
           .catch(() => {})
         return { success: true, skipped: true }
       }
@@ -2654,7 +2775,7 @@ class ClaudeAccountService {
       const updatedAccountData = { ...accountData }
       updatedAccountData.status = errorConfig.status
       updatedAccountData.schedulable = 'false' // 设置为不可调度
-      updatedAccountData.errorMessage = errorConfig.errorMessage
+      updatedAccountData.errorMessage = details.errorMessage || errorConfig.errorMessage
       updatedAccountData[errorConfig.timestampField] = new Date().toISOString()
 
       // 保存更新后的账户数据
@@ -2670,6 +2791,16 @@ class ClaudeAccountService {
         `⚠️ Account ${accountData.name} (${accountId}) marked as ${errorConfig.logMessage} and disabled for scheduling`
       )
 
+      upstreamErrorHelper
+        .recordErrorHistory(
+          accountId,
+          'claude-official',
+          details.statusCode || (errorType === 'unauthorized' ? 401 : 403),
+          details.errorKind || errorType,
+          { errorBody: updatedAccountData.errorMessage }
+        )
+        .catch(() => {})
+
       // 发送Webhook通知
       try {
         const webhookNotifier = require('../../utils/webhookNotifier')
@@ -2678,8 +2809,8 @@ class ClaudeAccountService {
           accountName: accountData.name,
           platform: 'claude-oauth',
           status: errorConfig.status,
-          errorCode: errorConfig.errorCode,
-          reason: errorConfig.errorMessage,
+          errorCode: details.errorCode || errorConfig.errorCode,
+          reason: updatedAccountData.errorMessage,
           timestamp: getISOStringWithTimezone(new Date())
         })
       } catch (webhookError) {
@@ -2694,13 +2825,13 @@ class ClaudeAccountService {
   }
 
   // 🚫 标记账户为未授权状态（401错误）
-  async markAccountUnauthorized(accountId, sessionHash = null) {
-    return this.markAccountError(accountId, 'unauthorized', sessionHash)
+  async markAccountUnauthorized(accountId, sessionHash = null, details = {}) {
+    return this.markAccountError(accountId, 'unauthorized', sessionHash, details)
   }
 
   // 🚫 标记账户为被封锁状态（403错误）
-  async markAccountBlocked(accountId, sessionHash = null) {
-    return this.markAccountError(accountId, 'blocked', sessionHash)
+  async markAccountBlocked(accountId, sessionHash = null, details = {}) {
+    return this.markAccountError(accountId, 'blocked', sessionHash, details)
   }
 
   // 🔄 重置账户所有异常状态

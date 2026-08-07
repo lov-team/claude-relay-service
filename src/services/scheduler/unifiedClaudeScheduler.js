@@ -1530,11 +1530,11 @@ class UnifiedClaudeScheduler {
   }
 
   // 🚫 标记账户为未授权状态（401错误）
-  async markAccountUnauthorized(accountId, accountType, sessionHash = null) {
+  async markAccountUnauthorized(accountId, accountType, sessionHash = null, details = {}) {
     try {
       // 只处理claude-official类型的账户，不处理claude-console和gemini
       if (accountType === 'claude-official') {
-        await claudeAccountService.markAccountUnauthorized(accountId, sessionHash)
+        await claudeAccountService.markAccountUnauthorized(accountId, sessionHash, details)
 
         // 删除会话映射
         if (sessionHash) {
@@ -1559,11 +1559,11 @@ class UnifiedClaudeScheduler {
   }
 
   // 🚫 标记账户为被封锁状态（403错误）
-  async markAccountBlocked(accountId, accountType, sessionHash = null) {
+  async markAccountBlocked(accountId, accountType, sessionHash = null, details = {}) {
     try {
       // 只处理claude-official类型的账户，不处理claude-console和gemini
       if (accountType === 'claude-official') {
-        await claudeAccountService.markAccountBlocked(accountId, sessionHash)
+        await claudeAccountService.markAccountBlocked(accountId, sessionHash, details)
 
         // 删除会话映射
         if (sessionHash) {

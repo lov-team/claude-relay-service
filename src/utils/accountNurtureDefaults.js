@@ -1,4 +1,5 @@
 const crypto = require('crypto')
+const { DEFAULT_CLAUDE_TRAFFIC_GUARDRAILS } = require('./claudeTrafficGuardrail')
 
 const WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_CAP_PERCENT = 90
@@ -59,6 +60,11 @@ const DEFAULT_ACCOUNT_NURTURE_CONFIG = {
       localRequests: 480
     }
   },
+  oauthErrorPatterns: {
+    blocked: [],
+    revoked: []
+  },
+  trafficGuardrails: { ...DEFAULT_CLAUDE_TRAFFIC_GUARDRAILS },
   proDayPlans: DEFAULT_PRO_DAY_PLANS,
   maxDayPlans: DEFAULT_MAX_DAY_PLANS,
   updatedAt: null,
@@ -87,6 +93,30 @@ function normalizeCapPercent(value, label) {
     throw new Error(`${label} must be greater than 0 and below ${MAX_CAP_PERCENT}`)
   }
   return num
+}
+
+function normalizePatternList(value, label) {
+  const source = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? value.split(/\r?\n|\|/)
+      : []
+  const normalized = [...new Set(source.map((item) => String(item).trim()).filter(Boolean))]
+  if (normalized.length > 50) {
+    throw new Error(`${label} cannot contain more than 50 patterns`)
+  }
+  if (normalized.some((pattern) => pattern.length > 200)) {
+    throw new Error(`${label} pattern length cannot exceed 200 characters`)
+  }
+  return normalized
+}
+
+function normalizeIntegerRange(value, fallback, min, max, label) {
+  const parsed = Number.parseInt(value ?? fallback, 10)
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+    throw new Error(`${label} must be an integer between ${min} and ${max}`)
+  }
+  return parsed
 }
 
 function assertSteadyCapsBelowMax(steadyCaps) {
@@ -246,6 +276,59 @@ function normalizeAccountNurtureConfig(input = {}) {
 
   assertSteadyCapsBelowMax(steadyCaps)
 
+  const oauthErrorPatterns = {
+    blocked: normalizePatternList(
+      merged.oauthErrorPatterns?.blocked ?? base.oauthErrorPatterns.blocked,
+      'oauthErrorPatterns.blocked'
+    ),
+    revoked: normalizePatternList(
+      merged.oauthErrorPatterns?.revoked ?? base.oauthErrorPatterns.revoked,
+      'oauthErrorPatterns.revoked'
+    )
+  }
+  const trafficInput = {
+    ...base.trafficGuardrails,
+    ...(merged.trafficGuardrails || {})
+  }
+  const trafficGuardrails = {
+    enabled: trafficInput.enabled === true || trafficInput.enabled === 'true',
+    maxBodyBytes: normalizeIntegerRange(
+      trafficInput.maxBodyBytes,
+      base.trafficGuardrails.maxBodyBytes,
+      65536,
+      32 * 1024 * 1024,
+      'trafficGuardrails.maxBodyBytes'
+    ),
+    maxMessages: normalizeIntegerRange(
+      trafficInput.maxMessages,
+      base.trafficGuardrails.maxMessages,
+      1,
+      1000,
+      'trafficGuardrails.maxMessages'
+    ),
+    maxTools: normalizeIntegerRange(
+      trafficInput.maxTools,
+      base.trafficGuardrails.maxTools,
+      1,
+      256,
+      'trafficGuardrails.maxTools'
+    ),
+    maxOutputTokens: normalizeIntegerRange(
+      trafficInput.maxOutputTokens,
+      base.trafficGuardrails.maxOutputTokens,
+      1,
+      128000,
+      'trafficGuardrails.maxOutputTokens'
+    ),
+    retryAfterSeconds: normalizeIntegerRange(
+      trafficInput.retryAfterSeconds,
+      base.trafficGuardrails.retryAfterSeconds,
+      1,
+      3600,
+      'trafficGuardrails.retryAfterSeconds'
+    )
+  }
+
   return {
     enabled,
     defaultEnabledForNewPro,
@@ -254,6 +337,8 @@ function normalizeAccountNurtureConfig(input = {}) {
     paceBuffer,
     maxDailySevenDayDelta,
     steadyCaps,
+    oauthErrorPatterns,
+    trafficGuardrails,
     proDayPlans,
     maxDayPlans,
     updatedAt: merged.updatedAt || null,

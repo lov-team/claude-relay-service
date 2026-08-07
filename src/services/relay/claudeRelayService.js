@@ -6,6 +6,7 @@ const ProxyHelper = require('../../utils/proxyHelper')
 const { filterForClaude } = require('../../utils/headerFilter')
 const claudeAccountService = require('../account/claudeAccountService')
 const claudeAccountNurtureService = require('../account/claudeAccountNurtureService')
+const accountNurtureConfigService = require('../accountNurtureConfigService')
 const unifiedClaudeScheduler = require('../scheduler/unifiedClaudeScheduler')
 const sessionHelper = require('../../utils/sessionHelper')
 const logger = require('../../utils/logger')
@@ -21,6 +22,11 @@ const userMessageQueueService = require('../userMessageQueueService')
 const { isStreamWritable } = require('../../utils/streamHelper')
 const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
 const metadataUserIdHelper = require('../../utils/metadataUserIdHelper')
+const {
+  classifyClaudeOAuthError,
+  extractClaudeOAuthError
+} = require('../../utils/claudeOAuthErrorClassifier')
+const { evaluateClaudeTrafficGuardrail } = require('../../utils/claudeTrafficGuardrail')
 const {
   getHttpsAgentForStream,
   getHttpsAgentForNonStream,
@@ -178,6 +184,51 @@ class ClaudeRelayService {
     }
   }
 
+  async _buildTrafficGuardrailResponse(requestBody, apiKeyData) {
+    const nurtureConfig = await accountNurtureConfigService.getConfig()
+    const evaluation = evaluateClaudeTrafficGuardrail(requestBody, nurtureConfig.trafficGuardrails)
+    if (evaluation.allowed) {
+      return null
+    }
+
+    logger.performance('claude_request_guardrail_blocked', {
+      apiKeyId: apiKeyData?.id || null,
+      apiKeyName: apiKeyData?.name || null,
+      model: requestBody?.model || null,
+      metrics: evaluation.metrics,
+      violations: evaluation.violations
+    })
+    logger.warn(
+      `🚦 Claude request blocked by traffic guardrail: ${evaluation.violations
+        .map((violation) => `${violation.code}=${violation.actual}/${violation.limit}`)
+        .join(', ')}`
+    )
+
+    const retryAfter = String(evaluation.limits.retryAfterSeconds)
+    return {
+      statusCode: 429,
+      headers: {
+        'Content-Type': 'application/json',
+        'Retry-After': retryAfter,
+        'retry-after': retryAfter
+      },
+      body: JSON.stringify({
+        error: {
+          type: 'rate_limit_error',
+          code: 'claude_request_guardrail',
+          message: 'Request exceeds the configured Claude traffic guardrail.',
+          metadata: {
+            source: 'claude-relay-service',
+            retryable: true,
+            disable_channel: false,
+            limit_kind: 'request_guardrail',
+            violations: evaluation.violations
+          }
+        }
+      })
+    }
+  }
+
   async _enforceNurtureBeforeRelay(accountId, accountType) {
     if (accountType !== 'claude-official') {
       return null
@@ -196,60 +247,23 @@ class ClaudeRelayService {
 
   // 🧾 提取错误消息文本
   _extractErrorMessage(body) {
-    if (!body) {
-      return ''
-    }
+    return extractClaudeOAuthError(body).message
+  }
 
-    if (typeof body === 'string') {
-      const trimmed = body.trim()
-      if (!trimmed) {
-        return ''
-      }
-      try {
-        const parsed = JSON.parse(trimmed)
-        return this._extractErrorMessage(parsed)
-      } catch (error) {
-        return trimmed
-      }
-    }
-
-    if (typeof body === 'object') {
-      if (typeof body.error === 'string') {
-        return body.error
-      }
-      if (body.error && typeof body.error === 'object') {
-        if (typeof body.error.message === 'string') {
-          return body.error.message
-        }
-        if (typeof body.error.error === 'string') {
-          return body.error.error
-        }
-      }
-      if (typeof body.message === 'string') {
-        return body.message
-      }
-    }
-
-    return ''
+  async _classifyClaudeOAuthError(statusCode, body) {
+    const nurtureConfig = await accountNurtureConfigService.getConfig()
+    return classifyClaudeOAuthError(body, statusCode, {
+      blockedPatterns: nurtureConfig.oauthErrorPatterns?.blocked,
+      revokedPatterns: nurtureConfig.oauthErrorPatterns?.revoked
+    })
   }
 
   // 🚫 检查是否为组织被禁用/封禁错误
   // 支持两种场景：
   //   1. HTTP 400 + "this organization has been disabled"（原有）
   //   2. HTTP 403 + "OAuth authentication is currently not allowed for this organization"（封禁后新返回格式）
-  _isOrganizationDisabledError(statusCode, body) {
-    if (statusCode !== 400 && statusCode !== 403) {
-      return false
-    }
-    const message = this._extractErrorMessage(body)
-    if (!message) {
-      return false
-    }
-    const lowerMessage = message.toLowerCase()
-    return (
-      lowerMessage.includes('this organization has been disabled') ||
-      lowerMessage.includes('oauth authentication is currently not allowed')
-    )
+  async _isOrganizationDisabledError(statusCode, body) {
+    return (await this._classifyClaudeOAuthError(statusCode, body)).kind === 'account_blocked'
   }
 
   // 🔍 判断是否是真实的 Claude Code 请求
@@ -702,6 +716,11 @@ class ClaudeRelayService {
     let bodyStoreIdNonStream = null // 🧹 在 try 块外声明，以便 finally 清理
 
     try {
+      const guardrailResponse = await this._buildTrafficGuardrailResponse(requestBody, apiKeyData)
+      if (guardrailResponse) {
+        return guardrailResponse
+      }
+
       // 调试日志：查看API Key数据
       logger.info('🔍 API Key data received:', {
         apiKeyName: apiKeyData.name,
@@ -1011,13 +1030,36 @@ class ClaudeRelayService {
         let isModelFamilyRateLimited = false
         let rateLimitResetTimestamp = null
         let dedicatedRateLimitMessage = null
-        const organizationDisabledError = this._isOrganizationDisabledError(
-          response.statusCode,
-          response.body
-        )
+        const oauthError = await this._classifyClaudeOAuthError(response.statusCode, response.body)
 
+        if (oauthError.kind === 'account_blocked') {
+          logger.error(
+            `🚫 OAuth account blocked error (${response.statusCode}) detected for account ${accountId}, marking as blocked`
+          )
+          await unifiedClaudeScheduler.markAccountBlocked(accountId, accountType, sessionHash, {
+            statusCode: oauthError.statusCode || response.statusCode,
+            errorKind: oauthError.kind,
+            errorCode: oauthError.errorCode,
+            errorMessage: oauthError.message
+          })
+        } else if (oauthError.kind === 'oauth_revoked') {
+          logger.error(
+            `🚫 OAuth credentials revoked (${response.statusCode}) for account ${accountId}, marking as unauthorized`
+          )
+          await unifiedClaudeScheduler.markAccountUnauthorized(
+            accountId,
+            accountType,
+            sessionHash,
+            {
+              statusCode: oauthError.statusCode || response.statusCode,
+              errorKind: oauthError.kind,
+              errorCode: oauthError.errorCode,
+              errorMessage: oauthError.message
+            }
+          )
+        }
         // 检查是否为401状态码（未授权）
-        if (response.statusCode === 401) {
+        else if (response.statusCode === 401) {
           logger.warn(`🔐 Unauthorized error (401) detected for account ${accountId}`)
 
           // 记录401错误
@@ -1034,19 +1076,16 @@ class ClaudeRelayService {
               `❌ Account ${accountId} encountered 401 error (${errorCount} errors), temporarily pausing`
             )
           }
-          await upstreamErrorHelper.markTempUnavailable(accountId, accountType, 401).catch(() => {})
+          await upstreamErrorHelper
+            .markTempUnavailable(accountId, accountType, 401, null, {
+              oauthErrorKind: oauthError.kind,
+              oauthErrorCode: oauthError.errorCode
+            })
+            .catch(() => {})
           // 清除粘性会话，让后续请求路由到其他账户
           if (sessionHash) {
             await unifiedClaudeScheduler.clearSessionMapping(sessionHash).catch(() => {})
           }
-        }
-        // 检查是否为组织被禁用/封禁错误（400 或 403）
-        // 必须在通用 403 处理之前检测，否则会被截断
-        else if (organizationDisabledError) {
-          logger.error(
-            `🚫 Organization disabled/banned error (${response.statusCode}) detected for account ${accountId}, marking as blocked`
-          )
-          await unifiedClaudeScheduler.markAccountBlocked(accountId, accountType, sessionHash)
         }
         // 检查是否为403状态码（禁止访问，非封禁类）
         // 注意：如果进行了重试，retryCount > 0；这里的 403 是重试后最终的结果
@@ -1054,7 +1093,12 @@ class ClaudeRelayService {
           logger.error(
             `🚫 Forbidden error (403) detected for account ${accountId}${retryCount > 0 ? ` after ${retryCount} retries` : ''}, temporarily pausing`
           )
-          await upstreamErrorHelper.markTempUnavailable(accountId, accountType, 403).catch(() => {})
+          await upstreamErrorHelper
+            .markTempUnavailable(accountId, accountType, 403, null, {
+              oauthErrorKind: oauthError.kind,
+              oauthErrorCode: oauthError.errorCode
+            })
+            .catch(() => {})
           // 清除粘性会话，让后续请求路由到其他账户
           if (sessionHash) {
             await unifiedClaudeScheduler.clearSessionMapping(sessionHash).catch(() => {})
@@ -2453,6 +2497,19 @@ class ClaudeRelayService {
     let selectedAccountId = null
 
     try {
+      const guardrailResponse = await this._buildTrafficGuardrailResponse(requestBody, apiKeyData)
+      if (guardrailResponse) {
+        if (!responseStream.headersSent) {
+          responseStream.status(guardrailResponse.statusCode)
+          Object.entries(guardrailResponse.headers).forEach(([key, value]) => {
+            responseStream.setHeader(key, value)
+          })
+        }
+        responseStream.write(guardrailResponse.body)
+        responseStream.end()
+        return
+      }
+
       // 调试日志：查看API Key数据（流式请求）
       logger.info('🔍 [Stream] API Key data received:', {
         apiKeyName: apiKeyData.name,
@@ -3116,7 +3173,43 @@ class ClaudeRelayService {
 
           // 将错误处理逻辑封装在一个异步函数中
           const handleErrorResponse = async () => {
-            if (res.statusCode === 401) {
+            const oauthError = await this._classifyClaudeOAuthError(res.statusCode, errorData)
+
+            if (oauthError.kind === 'account_blocked') {
+              logger.error(
+                `🚫 [Stream] OAuth account blocked error (${res.statusCode}) detected for account ${accountId}, marking as blocked`
+              )
+              await unifiedClaudeScheduler
+                .markAccountBlocked(accountId, accountType, sessionHash, {
+                  statusCode: oauthError.statusCode || res.statusCode,
+                  errorKind: oauthError.kind,
+                  errorCode: oauthError.errorCode,
+                  errorMessage: oauthError.message
+                })
+                .catch((markError) => {
+                  logger.error(
+                    `❌ [Stream] Failed to mark account ${accountId} as blocked:`,
+                    markError
+                  )
+                })
+            } else if (oauthError.kind === 'oauth_revoked') {
+              logger.error(
+                `🚫 [Stream] OAuth credentials revoked (${res.statusCode}) for account ${accountId}, marking as unauthorized`
+              )
+              await unifiedClaudeScheduler
+                .markAccountUnauthorized(accountId, accountType, sessionHash, {
+                  statusCode: oauthError.statusCode || res.statusCode,
+                  errorKind: oauthError.kind,
+                  errorCode: oauthError.errorCode,
+                  errorMessage: oauthError.message
+                })
+                .catch((markError) => {
+                  logger.error(
+                    `❌ [Stream] Failed to mark account ${accountId} as unauthorized:`,
+                    markError
+                  )
+                })
+            } else if (res.statusCode === 401) {
               logger.warn(`🔐 [Stream] Unauthorized error (401) detected for account ${accountId}`)
 
               await this.recordUnauthorizedError(accountId)
@@ -3132,35 +3225,25 @@ class ClaudeRelayService {
                 )
               }
               await upstreamErrorHelper
-                .markTempUnavailable(accountId, accountType, 401)
+                .markTempUnavailable(accountId, accountType, 401, null, {
+                  oauthErrorKind: oauthError.kind,
+                  oauthErrorCode: oauthError.errorCode
+                })
                 .catch(() => {})
               // 清除粘性会话，让后续请求路由到其他账户
               if (sessionHash) {
                 await unifiedClaudeScheduler.clearSessionMapping(sessionHash).catch(() => {})
               }
             } else if (res.statusCode === 403) {
-              // 403 处理：先检查是否为封禁性质的 403（组织被禁用/OAuth 被禁止）
-              // 注意：重试逻辑已在 handleErrorResponse 外部提前处理
-              if (this._isOrganizationDisabledError(res.statusCode, errorData)) {
-                logger.error(
-                  `🚫 [Stream] Organization disabled/banned error (403) detected for account ${accountId}, marking as blocked`
-                )
-                await unifiedClaudeScheduler
-                  .markAccountBlocked(accountId, accountType, sessionHash)
-                  .catch((markError) => {
-                    logger.error(
-                      `❌ [Stream] Failed to mark account ${accountId} as blocked:`,
-                      markError
-                    )
-                  })
-              } else {
-                logger.error(
-                  `🚫 [Stream] Forbidden error (403) detected for account ${accountId}${retryCount > 0 ? ` after ${retryCount} retries` : ''}, temporarily pausing`
-                )
-                await upstreamErrorHelper
-                  .markTempUnavailable(accountId, accountType, 403)
-                  .catch(() => {})
-              }
+              logger.error(
+                `🚫 [Stream] Forbidden error (403) detected for account ${accountId}${retryCount > 0 ? ` after ${retryCount} retries` : ''}, temporarily pausing`
+              )
+              await upstreamErrorHelper
+                .markTempUnavailable(accountId, accountType, 403, null, {
+                  oauthErrorKind: oauthError.kind,
+                  oauthErrorCode: oauthError.errorCode
+                })
+                .catch(() => {})
               // 清除粘性会话，让后续请求路由到其他账户
               if (sessionHash) {
                 await unifiedClaudeScheduler.clearSessionMapping(sessionHash).catch(() => {})
