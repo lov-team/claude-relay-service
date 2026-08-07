@@ -149,6 +149,7 @@ curl -s -o /dev/null -w "%{http_code}\n" https://niubi.cc-flyer.com/cc/health
 ## Agent 约束
 
 - 默认生产上线分支：**`master-cc-on`**
+- **代码必须先 push 到 GitHub 再部署**：禁止把仅存在于本地的改动直接 rsync 到服务器；未推送的改动会被其他人从仓库代码的部署覆盖丢失
 - 上线必须 Agent 自己 SSH 执行，不要只给用户命令
 - 禁止在日志、回复、提交中输出生产 `JWT_SECRET` / `ENCRYPTION_KEY` / 管理员密码
 - 修改上线流程时同步更新本文件
