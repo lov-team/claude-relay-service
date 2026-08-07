@@ -82,7 +82,8 @@ class WebhookConfigService {
         'telegram',
         'custom',
         'bark',
-        'smtp'
+        'smtp',
+        'feishu_app'
       ]
 
       for (const platform of config.platforms) {
@@ -90,8 +91,8 @@ class WebhookConfigService {
           throw new Error(`不支持的平台类型: ${platform.type}`)
         }
 
-        // Bark和SMTP平台不使用标准URL
-        if (!['bark', 'smtp', 'telegram'].includes(platform.type)) {
+        // Bark、SMTP、Telegram和飞书自建应用平台不使用标准URL
+        if (!['bark', 'smtp', 'telegram', 'feishu_app'].includes(platform.type)) {
           if (!platform.url || !this.isValidUrl(platform.url)) {
             throw new Error(`无效的webhook URL: ${platform.url}`)
           }
@@ -170,6 +171,19 @@ class WebhookConfigService {
           if (!supportedProtocols.includes(proxyProtocol)) {
             throw new Error('Telegram 代理仅支持 http/https/socks 协议')
           }
+        }
+        break
+      case 'feishu_app':
+        // 飞书自建应用需要应用凭证
+        if (!platform.appId) {
+          throw new Error('飞书自建应用平台必须提供 App ID')
+        }
+        if (!platform.appSecret) {
+          throw new Error('飞书自建应用平台必须提供 App Secret')
+        }
+        // chatId 和 chatName 至少提供一个
+        if (!platform.chatId && !platform.chatName) {
+          throw new Error('飞书自建应用平台必须提供群聊 ID 或群聊名称')
         }
         break
       case 'custom':

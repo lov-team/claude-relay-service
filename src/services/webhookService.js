@@ -4,6 +4,7 @@ const nodemailer = require('nodemailer')
 const { HttpsProxyAgent } = require('https-proxy-agent')
 const { SocksProxyAgent } = require('socks-proxy-agent')
 const logger = require('../utils/logger')
+const redis = require('../models/redis')
 const webhookConfigService = require('./webhookConfigService')
 const { getISOStringWithTimezone } = require('../utils/dateHelper')
 const appConfig = require('../../config/config')
@@ -14,6 +15,7 @@ class WebhookService {
       wechat_work: this.sendToWechatWork.bind(this),
       dingtalk: this.sendToDingTalk.bind(this),
       feishu: this.sendToFeishu.bind(this),
+      feishu_app: this.sendToFeishuApp.bind(this),
       slack: this.sendToSlack.bind(this),
       discord: this.sendToDiscord.bind(this),
       telegram: this.sendToTelegram.bind(this),
@@ -175,6 +177,199 @@ class WebhookService {
     }
 
     await this.sendHttpRequest(platform.url, payload, platform.timeout || 10000)
+  }
+
+  /**
+   * 飞书自建应用通知（tenant_access_token + 群聊卡片消息）
+   */
+  async sendToFeishuApp(platform, type, data) {
+    if (!platform.appId || !platform.appSecret) {
+      throw new Error('缺少飞书自建应用的 appId 或 appSecret')
+    }
+
+    const apiBaseUrl = (platform.apiBaseUrl || 'https://open.feishu.cn').replace(/\/+$/, '')
+    const token = await this._getFeishuAppTenantToken(platform, apiBaseUrl)
+    const chatId = await this._resolveFeishuAppChatId(platform, apiBaseUrl, token)
+
+    const content = this.formatMessageForFeishu(type, data)
+
+    // 复用飞书webhook机器人的卡片结构
+    const card = {
+      elements: [
+        {
+          tag: 'markdown',
+          content
+        }
+      ],
+      header: {
+        title: {
+          tag: 'plain_text',
+          content: this.getNotificationTitle(type)
+        },
+        template: this.getFeishuCardColor(type)
+      }
+    }
+
+    const payload = {
+      receive_id: chatId,
+      msg_type: 'interactive',
+      content: JSON.stringify(card)
+    }
+
+    const response = await this.sendHttpRequest(
+      `${apiBaseUrl}/open-apis/im/v1/messages?receive_id_type=chat_id`,
+      payload,
+      platform.timeout || 10000,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      }
+    )
+
+    // 飞书业务错误：HTTP 200 但 code 不为 0
+    if (response && response.code !== 0) {
+      throw new Error(`飞书API错误: code=${response.code}, msg=${response.msg || '未知错误'}`)
+    }
+  }
+
+  /**
+   * 获取飞书自建应用的 tenant_access_token（带Redis缓存）
+   */
+  async _getFeishuAppTenantToken(platform, apiBaseUrl) {
+    const cacheKey = `webhook_feishu_app_token:${platform.appId}`
+
+    // 命中缓存且未过期则直接使用
+    try {
+      const cached = await redis.client.get(cacheKey)
+      if (cached) {
+        const { token, expiresAt } = JSON.parse(cached)
+        if (token && expiresAt && Date.now() < expiresAt) {
+          return token
+        }
+      }
+    } catch (error) {
+      logger.warn(`⚠️ 读取飞书自建应用token缓存失败: ${error.message}`)
+    }
+
+    const response = await this.sendHttpRequest(
+      `${apiBaseUrl}/open-apis/auth/v3/tenant_access_token/internal`,
+      {
+        app_id: platform.appId,
+        app_secret: platform.appSecret
+      },
+      platform.timeout || 10000
+    )
+
+    if (!response || response.code !== 0) {
+      throw new Error(
+        `获取飞书tenant_access_token失败: code=${response?.code}, msg=${response?.msg || '未知错误'}`
+      )
+    }
+
+    const token = response.tenant_access_token
+    // 提前120秒过期，避免边界时刻token失效
+    const ttl = Math.max((response.expire || 7200) - 120, 60)
+    const expiresAt = Date.now() + ttl * 1000
+
+    try {
+      await redis.client.set(cacheKey, JSON.stringify({ token, expiresAt }), 'EX', ttl)
+    } catch (error) {
+      logger.warn(`⚠️ 写入飞书自建应用token缓存失败: ${error.message}`)
+    }
+
+    return token
+  }
+
+  /**
+   * 解析飞书自建应用的目标群聊 chat_id（chatId优先，否则按chatName精确匹配，带Redis缓存）
+   */
+  async _resolveFeishuAppChatId(platform, apiBaseUrl, token) {
+    if (platform.chatId) {
+      return platform.chatId
+    }
+
+    if (!platform.chatName) {
+      throw new Error('飞书自建应用平台必须提供 chatId 或 chatName')
+    }
+
+    const cacheKey = `webhook_feishu_app_chat:${platform.appId}:${platform.chatName}`
+    try {
+      const cached = await redis.client.get(cacheKey)
+      if (cached) {
+        return cached
+      }
+    } catch (error) {
+      logger.warn(`⚠️ 读取飞书群聊缓存失败: ${error.message}`)
+    }
+
+    const axiosOptions = {
+      headers: {
+        Authorization: `Bearer ${token}`
+      }
+    }
+
+    // 先通过搜索接口精确匹配群名
+    const searchResponse = await axios.get(`${apiBaseUrl}/open-apis/im/v1/chats/search`, {
+      timeout: platform.timeout || 10000,
+      headers: axiosOptions.headers,
+      params: {
+        query: platform.chatName,
+        page_size: 20,
+        user_id_type: 'open_id'
+      }
+    })
+    const searchData = searchResponse.data
+    if (searchData && searchData.code === 0) {
+      const matched = (searchData.data?.items || []).find((chat) => chat.name === platform.chatName)
+      if (matched) {
+        await this._cacheFeishuAppChatId(cacheKey, matched.chat_id)
+        return matched.chat_id
+      }
+    } else if (searchData) {
+      logger.warn(`⚠️ 飞书群聊搜索失败: code=${searchData.code}, msg=${searchData.msg}`)
+    }
+
+    // 搜索未命中则翻页遍历群列表，按群名精确匹配
+    let pageToken
+    do {
+      const params = { page_size: 100, user_id_type: 'open_id' }
+      if (pageToken) {
+        params.page_token = pageToken
+      }
+      const listResponse = await axios.get(`${apiBaseUrl}/open-apis/im/v1/chats`, {
+        timeout: platform.timeout || 10000,
+        headers: axiosOptions.headers,
+        params
+      })
+      const listData = listResponse.data
+      if (!listData || listData.code !== 0) {
+        throw new Error(
+          `获取飞书群聊列表失败: code=${listData?.code}, msg=${listData?.msg || '未知错误'}`
+        )
+      }
+
+      const matched = (listData.data?.items || []).find((chat) => chat.name === platform.chatName)
+      if (matched) {
+        await this._cacheFeishuAppChatId(cacheKey, matched.chat_id)
+        return matched.chat_id
+      }
+
+      pageToken = listData.data?.has_more ? listData.data?.page_token : undefined
+    } while (pageToken)
+
+    throw new Error(`未找到名为 ${platform.chatName} 的飞书群聊，请确认机器人已加入该群`)
+  }
+
+  /**
+   * 缓存飞书群聊 chat_id（1小时过期）
+   */
+  async _cacheFeishuAppChatId(cacheKey, chatId) {
+    try {
+      await redis.client.set(cacheKey, chatId, 'EX', 3600)
+    } catch (error) {
+      logger.warn(`⚠️ 写入飞书群聊缓存失败: ${error.message}`)
+    }
   }
 
   /**

@@ -1404,7 +1404,8 @@
   <div
     v-if="showAddPlatformModal"
     class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm transition-all duration-300 ease-out"
-    @click="closePlatformModal"
+    @click="handlePlatformOverlayClick"
+    @mousedown.self="platformOverlayPressed = true"
   >
     <div
       class="relative mx-4 w-full max-w-2xl overflow-hidden rounded-2xl bg-white shadow-2xl transition-all duration-300 ease-out dark:bg-gray-800"
@@ -1459,6 +1460,7 @@
                 <option value="wechat_work">🟢 企业微信</option>
                 <option value="dingtalk">🔵 钉钉</option>
                 <option value="feishu">🟦 飞书</option>
+                <option value="feishu_app">🟣 飞书应用（自建）</option>
                 <option value="slack">🟣 Slack</option>
                 <option value="discord">🟪 Discord</option>
                 <option value="telegram">✈️ Telegram</option>
@@ -1498,7 +1500,8 @@
             v-if="
               platformForm.type !== 'bark' &&
               platformForm.type !== 'smtp' &&
-              platformForm.type !== 'telegram'
+              platformForm.type !== 'telegram' &&
+              platformForm.type !== 'feishu_app'
             "
           >
             <label
@@ -1624,6 +1627,104 @@
             >
               <i class="fas fa-info-circle mr-2 mt-0.5"></i>
               <div>机器人需先加入对应群组或频道并授予发送消息权限，通知会以纯文本方式发送。</div>
+            </div>
+          </div>
+
+          <!-- 飞书自建应用平台特有字段 -->
+          <div v-if="platformForm.type === 'feishu_app'" class="space-y-5">
+            <div>
+              <label
+                class="mb-2 flex items-center text-sm font-medium text-gray-700 dark:text-gray-300"
+              >
+                <i class="fas fa-id-badge mr-2 text-gray-400"></i>
+                App ID
+                <span class="ml-1 text-xs text-red-500">*</span>
+              </label>
+              <input
+                v-model="platformForm.appId"
+                class="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 font-mono text-sm text-gray-900 shadow-sm transition-all placeholder:text-gray-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 dark:border-gray-600 dark:bg-gray-700 dark:text-white dark:placeholder:text-gray-500"
+                placeholder="例如：cli_a1b2c3d4e5f6g7h8"
+                required
+                type="text"
+              />
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                在飞书开放平台创建自建应用后获得的 App ID
+              </p>
+            </div>
+
+            <div>
+              <label
+                class="mb-2 flex items-center text-sm font-medium text-gray-700 dark:text-gray-300"
+              >
+                <i class="fas fa-lock mr-2 text-gray-400"></i>
+                App Secret
+                <span class="ml-1 text-xs text-red-500">*</span>
+              </label>
+              <input
+                v-model="platformForm.appSecret"
+                class="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 font-mono text-sm text-gray-900 shadow-sm transition-all placeholder:text-gray-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 dark:border-gray-600 dark:bg-gray-700 dark:text-white dark:placeholder:text-gray-500"
+                placeholder="自建应用的 App Secret"
+                required
+                type="password"
+              />
+            </div>
+
+            <div>
+              <label
+                class="mb-2 flex items-center text-sm font-medium text-gray-700 dark:text-gray-300"
+              >
+                <i class="fas fa-comments mr-2 text-gray-400"></i>
+                群 ID
+                <span class="ml-2 text-xs text-gray-500">(可选)</span>
+              </label>
+              <input
+                v-model="platformForm.chatId"
+                class="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 font-mono text-sm text-gray-900 shadow-sm transition-all placeholder:text-gray-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 dark:border-gray-600 dark:bg-gray-700 dark:text-white dark:placeholder:text-gray-500"
+                placeholder="例如：oc_a1b2c3d4e5f6g7h8"
+                type="text"
+              />
+            </div>
+
+            <div>
+              <label
+                class="mb-2 flex items-center text-sm font-medium text-gray-700 dark:text-gray-300"
+              >
+                <i class="fas fa-users mr-2 text-gray-400"></i>
+                群名称
+                <span class="ml-2 text-xs text-gray-500">(可选)</span>
+              </label>
+              <input
+                v-model="platformForm.chatName"
+                class="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 text-gray-900 shadow-sm transition-all placeholder:text-gray-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 dark:border-gray-600 dark:bg-gray-700 dark:text-white dark:placeholder:text-gray-500"
+                placeholder="与群 ID 二选一，优先使用群 ID"
+                type="text"
+              />
+            </div>
+
+            <div>
+              <label
+                class="mb-2 flex items-center text-sm font-medium text-gray-700 dark:text-gray-300"
+              >
+                <i class="fas fa-globe mr-2 text-gray-400"></i>
+                API 地址
+                <span class="ml-2 text-xs text-gray-500">(可选)</span>
+              </label>
+              <input
+                v-model="platformForm.apiBaseUrl"
+                class="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 font-mono text-sm text-gray-900 shadow-sm transition-all placeholder:text-gray-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 dark:border-gray-600 dark:bg-gray-700 dark:text-white dark:placeholder:text-gray-500"
+                placeholder="默认: https://open.feishu.cn"
+                type="url"
+              />
+            </div>
+
+            <div
+              class="flex items-start rounded-lg bg-blue-50 p-3 text-sm text-blue-700 dark:bg-blue-900/20 dark:text-blue-300"
+            >
+              <i class="fas fa-info-circle mr-2 mt-0.5"></i>
+              <div>
+                需要在飞书开放平台创建自建应用并开启机器人能力，将机器人拉入接收通知的群聊，群 ID
+                与群名称至少填写一个。
+              </div>
             </div>
           </div>
 
@@ -2247,6 +2348,10 @@ const platformForm = ref({
   chatId: '',
   apiBaseUrl: '',
   proxyUrl: '',
+  // 飞书自建应用特有字段（chatId、apiBaseUrl 与 Telegram 共用）
+  appId: '',
+  appSecret: '',
+  chatName: '',
   // Bark特有字段
   deviceKey: '',
   serverUrl: '',
@@ -2297,6 +2402,10 @@ const platformTypeWatcher = watch(
         platformForm.value.chatId = ''
         platformForm.value.apiBaseUrl = ''
         platformForm.value.proxyUrl = ''
+        // 清空飞书自建应用字段
+        platformForm.value.appId = ''
+        platformForm.value.appSecret = ''
+        platformForm.value.chatName = ''
         // 清空SMTP字段
         platformForm.value.host = ''
         platformForm.value.port = null
@@ -2323,6 +2432,10 @@ const platformTypeWatcher = watch(
         platformForm.value.chatId = ''
         platformForm.value.apiBaseUrl = ''
         platformForm.value.proxyUrl = ''
+        // 清空飞书自建应用字段
+        platformForm.value.appId = ''
+        platformForm.value.appSecret = ''
+        platformForm.value.chatName = ''
       } else if (newType === 'telegram') {
         platformForm.value.url = ''
         platformForm.value.enableSign = false
@@ -2345,6 +2458,36 @@ const platformTypeWatcher = watch(
         platformForm.value.chatId = ''
         platformForm.value.apiBaseUrl = ''
         platformForm.value.proxyUrl = ''
+        // 清空飞书自建应用字段
+        platformForm.value.appId = ''
+        platformForm.value.appSecret = ''
+        platformForm.value.chatName = ''
+      } else if (newType === 'feishu_app') {
+        // 切换到飞书自建应用时，清空URL和其他平台相关字段
+        platformForm.value.url = ''
+        platformForm.value.enableSign = false
+        platformForm.value.secret = ''
+        // 清空Telegram字段
+        platformForm.value.botToken = ''
+        platformForm.value.chatId = ''
+        platformForm.value.apiBaseUrl = ''
+        platformForm.value.proxyUrl = ''
+        // 清空Bark字段
+        platformForm.value.deviceKey = ''
+        platformForm.value.serverUrl = ''
+        platformForm.value.level = ''
+        platformForm.value.sound = ''
+        platformForm.value.group = ''
+        // 清空SMTP字段
+        platformForm.value.host = ''
+        platformForm.value.port = null
+        platformForm.value.secure = false
+        platformForm.value.user = ''
+        platformForm.value.pass = ''
+        platformForm.value.from = ''
+        platformForm.value.to = ''
+        platformForm.value.timeout = null
+        platformForm.value.ignoreTLS = false
       } else {
         // 切换到其他平台时，清空Bark和SMTP相关字段
         platformForm.value.deviceKey = ''
@@ -2367,6 +2510,10 @@ const platformTypeWatcher = watch(
         platformForm.value.chatId = ''
         platformForm.value.apiBaseUrl = ''
         platformForm.value.proxyUrl = ''
+        // 飞书自建应用字段
+        platformForm.value.appId = ''
+        platformForm.value.appSecret = ''
+        platformForm.value.chatName = ''
       }
     }
   }
@@ -2387,6 +2534,13 @@ const isPlatformFormValid = computed(() => {
       platformForm.value.user &&
       platformForm.value.pass &&
       platformForm.value.to
+    )
+  } else if (platformForm.value.type === 'feishu_app') {
+    // 飞书自建应用需要App ID/Secret，且群ID与群名称至少填写一个
+    return !!(
+      platformForm.value.appId &&
+      platformForm.value.appSecret &&
+      (platformForm.value.chatId || platformForm.value.chatName)
     )
   } else {
     // 其他平台需要URL且URL格式正确
@@ -2700,7 +2854,7 @@ const getServiceName = (service) => {
 // 验证 URL
 const validateUrl = () => {
   // Bark和SMTP平台不需要验证URL
-  if (['bark', 'smtp', 'telegram'].includes(platformForm.value.type)) {
+  if (['bark', 'smtp', 'telegram', 'feishu_app'].includes(platformForm.value.type)) {
     urlError.value = false
     urlValid.value = false
     return
@@ -2766,6 +2920,31 @@ const validatePlatformForm = () => {
         }
       } catch (error) {
         showToast('请输入有效的 Telegram 代理地址', 'error')
+        return false
+      }
+    }
+  } else if (platformForm.value.type === 'feishu_app') {
+    if (!platformForm.value.appId) {
+      showToast('请输入飞书自建应用的 App ID', 'error')
+      return false
+    }
+    if (!platformForm.value.appSecret) {
+      showToast('请输入飞书自建应用的 App Secret', 'error')
+      return false
+    }
+    if (!platformForm.value.chatId && !platformForm.value.chatName) {
+      showToast('群 ID 与群名称至少填写一个', 'error')
+      return false
+    }
+    if (platformForm.value.apiBaseUrl) {
+      try {
+        const parsed = new URL(platformForm.value.apiBaseUrl)
+        if (!['http:', 'https:'].includes(parsed.protocol)) {
+          showToast('飞书 API 地址仅支持 http 或 https', 'error')
+          return false
+        }
+      } catch (error) {
+        showToast('请输入有效的飞书 API 地址', 'error')
         return false
       }
     }
@@ -2853,6 +3032,10 @@ const editPlatform = (platform) => {
     chatId: platform.chatId || '',
     apiBaseUrl: platform.apiBaseUrl || '',
     proxyUrl: platform.proxyUrl || '',
+    // 飞书自建应用特有字段
+    appId: platform.appId || '',
+    appSecret: platform.appSecret || '',
+    chatName: platform.chatName || '',
     // Bark特有字段
     deviceKey: platform.deviceKey || '',
     serverUrl: platform.serverUrl || '',
@@ -3015,6 +3198,15 @@ const sendTestNotification = async () => {
   }
 }
 
+// 记录 mousedown 是否发生在遮罩层，避免在输入框内选中文字拖到弹窗外松开时误关闭
+const platformOverlayPressed = ref(false)
+const handlePlatformOverlayClick = (event) => {
+  if (event.target === event.currentTarget && platformOverlayPressed.value) {
+    closePlatformModal()
+  }
+  platformOverlayPressed.value = false
+}
+
 // 关闭模态框
 const closePlatformModal = () => {
   if (!isMounted.value) return
@@ -3036,6 +3228,10 @@ const closePlatformModal = () => {
       chatId: '',
       apiBaseUrl: '',
       proxyUrl: '',
+      // 飞书自建应用特有字段
+      appId: '',
+      appSecret: '',
+      chatName: '',
       // Bark特有字段
       deviceKey: '',
       serverUrl: '',
@@ -3066,6 +3262,7 @@ const getPlatformName = (type) => {
     wechat_work: '企业微信',
     dingtalk: '钉钉',
     feishu: '飞书',
+    feishu_app: '飞书应用',
     slack: 'Slack',
     discord: 'Discord',
     telegram: 'Telegram',
@@ -3081,6 +3278,7 @@ const getPlatformIcon = (type) => {
     wechat_work: 'fab fa-weixin text-green-600',
     dingtalk: 'fas fa-comment-dots text-blue-500',
     feishu: 'fas fa-dove text-blue-600',
+    feishu_app: 'fas fa-dove text-purple-600',
     slack: 'fab fa-slack text-purple-600',
     discord: 'fab fa-discord text-indigo-600',
     telegram: 'fab fa-telegram-plane text-sky-500',
@@ -3096,6 +3294,8 @@ const getWebhookHint = (type) => {
     wechat_work: '请在企业微信群机器人设置中获取Webhook地址',
     dingtalk: '请在钉钉群机器人设置中获取Webhook地址',
     feishu: '请在飞书群机器人设置中获取Webhook地址',
+    feishu_app:
+      '请在飞书开放平台创建自建应用，填写 App ID 和 App Secret，并指定接收通知的群（群 ID 与群名称至少填写一个）',
     slack: '请在Slack应用的Incoming Webhooks中获取地址',
     discord: '请在Discord服务器的集成设置中创建Webhook',
     telegram: '使用 @BotFather 创建机器人并复制 Token，Chat ID 可通过 @userinfobot 或相关工具获取',

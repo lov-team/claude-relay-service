@@ -137,7 +137,11 @@ router.post('/test', authenticateAdmin, async (req, res) => {
       botToken,
       chatId,
       apiBaseUrl,
-      proxyUrl
+      proxyUrl,
+      // 飞书自建应用相关字段
+      appId,
+      appSecret,
+      chatName
     } = req.body
 
     // Bark平台特殊处理
@@ -240,6 +244,45 @@ router.post('/test', authenticateAdmin, async (req, res) => {
       }
 
       logger.info(`🧪 测试webhook: ${type} - Chat ID: ${chatId}`)
+    } else if (type === 'feishu_app') {
+      // 飞书自建应用平台验证
+      if (!appId) {
+        return res.status(400).json({
+          error: 'Missing Feishu app id',
+          message: '请提供飞书自建应用的 App ID'
+        })
+      }
+      if (!appSecret) {
+        return res.status(400).json({
+          error: 'Missing Feishu app secret',
+          message: '请提供飞书自建应用的 App Secret'
+        })
+      }
+      if (!chatId && !chatName) {
+        return res.status(400).json({
+          error: 'Missing Feishu chat id or name',
+          message: '请提供飞书群聊 ID 或群聊名称'
+        })
+      }
+
+      if (apiBaseUrl) {
+        try {
+          const parsed = new URL(apiBaseUrl)
+          if (!['http:', 'https:'].includes(parsed.protocol)) {
+            return res.status(400).json({
+              error: 'Invalid Feishu API base url protocol',
+              message: '飞书 API 基础地址仅支持 http 或 https'
+            })
+          }
+        } catch (urlError) {
+          return res.status(400).json({
+            error: 'Invalid Feishu API base url',
+            message: '请提供有效的飞书 API 基础地址'
+          })
+        }
+      }
+
+      logger.info(`🧪 测试webhook: ${type} - App ID: ${appId}`)
     } else {
       // 其他平台验证URL
       if (!url) {
@@ -294,6 +337,13 @@ router.post('/test', authenticateAdmin, async (req, res) => {
       platform.chatId = chatId
       platform.apiBaseUrl = apiBaseUrl
       platform.proxyUrl = proxyUrl
+    } else if (type === 'feishu_app') {
+      // 添加飞书自建应用特有字段
+      platform.appId = appId
+      platform.appSecret = appSecret
+      platform.chatId = chatId
+      platform.chatName = chatName
+      platform.apiBaseUrl = apiBaseUrl
     }
 
     const result = await webhookService.testWebhook(platform)
@@ -308,6 +358,9 @@ router.post('/test', authenticateAdmin, async (req, res) => {
       }
       if (type === 'telegram') {
         return `Chat ID: ${chatId}`
+      }
+      if (type === 'feishu_app') {
+        return `App ID: ${appId}`
       }
       return url
     })()
