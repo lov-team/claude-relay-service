@@ -43,7 +43,15 @@ jest.mock('../src/services/scheduler/unifiedClaudeScheduler', () => ({
 }))
 jest.mock('../src/services/claudeCodeHeadersService', () => ({}))
 jest.mock('../src/services/requestIdentityService', () => ({
-  transform: jest.fn(({ body, headers }) => ({ body, headers }))
+  transform: jest.fn(({ body, headers }) => ({ body, headers })),
+  extractAccountUuid: jest.fn(() => null),
+  buildRelayGeneratedUserId: jest.fn(() =>
+    JSON.stringify({
+      device_id: 'relay-device',
+      account_uuid: '',
+      session_id: 'relay-session'
+    })
+  )
 }))
 jest.mock('../src/services/userMessageQueueService', () => ({}))
 jest.mock('../src/utils/upstreamErrorHelper', () => ({
@@ -538,5 +546,25 @@ describe('Claude relay CC rate-limit policy', () => {
       }
     })
     expect(response.accountId).toBe('account-3')
+  })
+
+  test('rewrites shared-pool single-account 403 as retryable 429 so new-api does not disable the channel', () => {
+    expect(
+      claudeRelayService._shouldRewriteSharedPoolErrorAsRetryable(403, 'claude-official', false)
+    ).toBe(true)
+    expect(
+      claudeRelayService._shouldRewriteSharedPoolErrorAsRetryable(403, 'claude-official', true)
+    ).toBe(false)
+
+    const response = claudeRelayService._buildRetryableSharedPoolRateLimitResponse(
+      'account-3',
+      'shared_pool_forbidden'
+    )
+    const body = JSON.parse(response.body)
+
+    expect(response.statusCode).toBe(429)
+    expect(body.error.code).toBe('crs_rate_limited')
+    expect(body.error.metadata.disable_channel).toBe(false)
+    expect(body.error.metadata.limit_kind).toBe('shared_pool_forbidden')
   })
 })

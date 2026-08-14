@@ -280,7 +280,7 @@ function normalizeAccountUuid(candidate) {
   return trimmed || null
 }
 
-function extractAccountUuid(account) {
+function extractExtInfo(account) {
   if (!account || typeof account !== 'object') {
     return null
   }
@@ -290,14 +290,64 @@ function extractAccountUuid(account) {
     return null
   }
 
-  const extInfoObject = typeof extInfoRaw === 'string' ? safeParseJson(extInfoRaw) : null
+  if (typeof extInfoRaw === 'string') {
+    return safeParseJson(extInfoRaw)
+  }
 
+  if (typeof extInfoRaw === 'object') {
+    return extInfoRaw
+  }
+
+  return null
+}
+
+function extractAccountUuid(account) {
+  if (!account || typeof account !== 'object') {
+    return null
+  }
+
+  const directUuid =
+    normalizeAccountUuid(account.account_uuid) || normalizeAccountUuid(account.accountUuid)
+  if (directUuid) {
+    return directUuid
+  }
+
+  const extInfoObject = extractExtInfo(account)
   if (!extInfoObject || typeof extInfoObject !== 'object') {
     return null
   }
 
-  const extUuid = normalizeAccountUuid(extInfoObject.account_uuid)
-  return extUuid || null
+  return (
+    normalizeAccountUuid(extInfoObject.account_uuid) ||
+    normalizeAccountUuid(extInfoObject.accountUuid) ||
+    null
+  )
+}
+
+function normalizeSessionSeed(sessionSeed) {
+  if (typeof sessionSeed !== 'string') {
+    return ''
+  }
+
+  const trimmed = sessionSeed.trim()
+  return trimmed
+}
+
+function buildRelayGeneratedUserId(account, sessionSeed = null) {
+  const accountId = resolveAccountId({ account }) || 'unknown-account'
+  const accountUuid = extractAccountUuid(account) || ''
+  const deviceId = crypto
+    .createHash('sha256')
+    .update(`relay-generated-device:${accountId}`)
+    .digest('hex')
+  const conversationSeed = normalizeSessionSeed(sessionSeed) || 'missing-session'
+  const sessionId = formatUuidFromSeed(`${conversationSeed}::relay-session`)
+
+  return JSON.stringify({
+    device_id: deviceId,
+    account_uuid: accountUuid,
+    session_id: sessionId
+  })
 }
 
 function rewriteUserId(body, accountId, accountUuid) {
@@ -385,6 +435,8 @@ function transform(payload = {}) {
 
 module.exports = {
   transform,
+  buildRelayGeneratedUserId,
+  extractAccountUuid,
   // 导出内部函数供测试使用
   _internal: {
     formatUuidFromSeed,
@@ -392,6 +444,7 @@ module.exports = {
     rewriteHeaders,
     rewriteUserId,
     extractAccountUuid,
-    resolveAccountId
+    resolveAccountId,
+    buildRelayGeneratedUserId
   }
 }

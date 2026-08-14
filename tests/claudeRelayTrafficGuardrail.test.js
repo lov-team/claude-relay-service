@@ -49,7 +49,15 @@ jest.mock('../src/services/scheduler/unifiedClaudeScheduler', () => ({
 }))
 jest.mock('../src/services/claudeCodeHeadersService', () => ({}))
 jest.mock('../src/services/requestIdentityService', () => ({
-  transform: jest.fn(({ body, headers }) => ({ body, headers }))
+  transform: jest.fn(({ body, headers }) => ({ body, headers })),
+  extractAccountUuid: jest.fn(() => null),
+  buildRelayGeneratedUserId: jest.fn(() =>
+    JSON.stringify({
+      device_id: 'relay-device',
+      account_uuid: '',
+      session_id: 'relay-session'
+    })
+  )
 }))
 jest.mock('../src/services/userMessageQueueService', () => ({}))
 jest.mock('../src/utils/upstreamErrorHelper', () => ({}))

@@ -155,7 +155,31 @@ class ClaudeRelayService {
     }
   }
 
-  _buildRetryableSharedPoolRateLimitResponse(accountId) {
+  _shouldRewriteSharedPoolErrorAsRetryable(
+    statusCode,
+    accountType,
+    isDedicatedOfficialAccount,
+    extraCondition = true
+  ) {
+    return (
+      extraCondition &&
+      accountType === 'claude-official' &&
+      !isDedicatedOfficialAccount &&
+      (statusCode === 403 || statusCode === 429)
+    )
+  }
+
+  _writeRetryableSharedPoolResponse(responseStream, accountId, limitKind = 'shared_pool') {
+    const retryableResponse = this._buildRetryableSharedPoolRateLimitResponse(accountId, limitKind)
+    responseStream.status(retryableResponse.statusCode)
+    Object.entries(retryableResponse.headers).forEach(([key, value]) => {
+      responseStream.setHeader(key, value)
+    })
+    responseStream.end(retryableResponse.body)
+    return retryableResponse
+  }
+
+  _buildRetryableSharedPoolRateLimitResponse(accountId, limitKind = 'shared_pool') {
     logger.warn(
       `All shared Claude accounts tried for this request are temporarily rate limited; returning retryable 429`
     )
@@ -176,7 +200,7 @@ class ClaudeRelayService {
             source: 'claude-relay-service',
             retryable: true,
             disable_channel: false,
-            limit_kind: 'shared_pool'
+            limit_kind: limitKind || 'shared_pool'
           }
         }
       }),
@@ -938,7 +962,12 @@ class ClaudeRelayService {
       let accessToken = await claudeAccountService.getValidAccessToken(accountId)
 
       const isRealClaudeCodeRequest = this._isActualClaudeCodeRequest(requestBody, clientHeaders)
-      const processedBody = this._processRequestBody(requestBody, account, isRealClaudeCodeRequest)
+      const processedBody = this._processRequestBody(
+        requestBody,
+        account,
+        isRealClaudeCodeRequest,
+        sessionHash
+      )
       // 🧹 内存优化：存储到 bodyStore，避免闭包捕获
       const originalBodyString = JSON.stringify(processedBody)
       bodyStoreIdNonStream = ++this._bodyStoreIdCounter
@@ -1441,12 +1470,17 @@ class ClaudeRelayService {
       }
 
       if (
-        response.statusCode === 429 &&
-        shouldFailoverForRateLimit &&
-        accountType === 'claude-official' &&
-        !isDedicatedOfficialAccount
+        this._shouldRewriteSharedPoolErrorAsRetryable(
+          response.statusCode,
+          accountType,
+          isDedicatedOfficialAccount,
+          response.statusCode === 403 || shouldFailoverForRateLimit
+        )
       ) {
-        return this._buildRetryableSharedPoolRateLimitResponse(accountId)
+        return this._buildRetryableSharedPoolRateLimitResponse(
+          accountId,
+          response.statusCode === 403 ? 'shared_pool_forbidden' : 'shared_pool'
+        )
       }
 
       // 记录成功的API调用并打印详细的usage数据
@@ -1592,7 +1626,12 @@ class ClaudeRelayService {
   }
 
   // 🔄 处理请求体
-  _processRequestBody(body, account = null, isRealClaudeCodeOverride = undefined) {
+  _processRequestBody(
+    body,
+    account = null,
+    isRealClaudeCodeOverride = undefined,
+    sessionHash = null
+  ) {
     if (!body) {
       return body
     }
@@ -1665,13 +1704,10 @@ class ClaudeRelayService {
         processedBody.metadata = {}
       }
       if (!processedBody.metadata.user_id || typeof processedBody.metadata.user_id !== 'string') {
-        const deviceId = crypto.createHash('sha256').update('relay-generated-device').digest('hex')
-        const sessionId = crypto.randomUUID()
-        processedBody.metadata.user_id = JSON.stringify({
-          device_id: deviceId,
-          account_uuid: '',
-          session_id: sessionId
-        })
+        processedBody.metadata.user_id = requestIdentityService.buildRelayGeneratedUserId(
+          account,
+          sessionHash
+        )
       }
     }
 
@@ -1719,14 +1755,18 @@ class ClaudeRelayService {
 
     // 处理统一的客户端标识
     if (account && account.useUnifiedClientId === 'true' && account.unifiedClientId) {
-      this._replaceClientId(processedBody, account.unifiedClientId)
+      this._replaceClientId(
+        processedBody,
+        account.unifiedClientId,
+        requestIdentityService.extractAccountUuid(account)
+      )
     }
 
     return processedBody
   }
 
   // 🔄 替换请求中的客户端标识
-  _replaceClientId(body, unifiedClientId) {
+  _replaceClientId(body, unifiedClientId, accountUuid = null) {
     if (!body?.metadata?.user_id || !unifiedClientId) {
       return
     }
@@ -1738,7 +1778,8 @@ class ClaudeRelayService {
 
     body.metadata.user_id = metadataUserIdHelper.build({
       ...parsed,
-      deviceId: unifiedClientId
+      deviceId: unifiedClientId,
+      accountUuid: accountUuid || parsed.accountUuid || ''
     })
     logger.info(`🔄 Replaced client ID with unified ID: ${body.metadata.user_id}`)
   }
@@ -2791,7 +2832,12 @@ class ClaudeRelayService {
       const accessToken = await claudeAccountService.getValidAccessToken(accountId)
 
       const isRealClaudeCodeRequest = this._isActualClaudeCodeRequest(requestBody, clientHeaders)
-      const processedBody = this._processRequestBody(requestBody, account, isRealClaudeCodeRequest)
+      const processedBody = this._processRequestBody(
+        requestBody,
+        account,
+        isRealClaudeCodeRequest,
+        sessionHash
+      )
       // 🧹 内存优化：存储到 bodyStore，不放入 requestOptions 避免闭包捕获
       const originalBodyString = JSON.stringify(processedBody)
       const bodyStoreId = ++this._bodyStoreIdCounter
@@ -3129,17 +3175,15 @@ class ClaudeRelayService {
 
             if (
               !isAgentViewAuxiliaryRequest &&
-              accountType === 'claude-official' &&
-              !isDedicatedOfficialAccount &&
+              this._shouldRewriteSharedPoolErrorAsRetryable(
+                res.statusCode,
+                accountType,
+                isDedicatedOfficialAccount
+              ) &&
               isStreamWritable(responseStream) &&
               !responseStream.headersSent
             ) {
-              const retryableResponse = this._buildRetryableSharedPoolRateLimitResponse(accountId)
-              responseStream.status(retryableResponse.statusCode)
-              Object.entries(retryableResponse.headers).forEach(([key, value]) => {
-                responseStream.setHeader(key, value)
-              })
-              responseStream.end(retryableResponse.body)
+              this._writeRetryableSharedPoolResponse(responseStream, accountId)
               resolve()
               return
             }
@@ -3493,6 +3537,23 @@ class ClaudeRelayService {
                 resolve()
                 return
               }
+            }
+            if (
+              this._shouldRewriteSharedPoolErrorAsRetryable(
+                res.statusCode,
+                accountType,
+                isDedicatedOfficialAccount
+              ) &&
+              isStreamWritable(responseStream) &&
+              !responseStream.headersSent
+            ) {
+              this._writeRetryableSharedPoolResponse(
+                responseStream,
+                accountId,
+                'shared_pool_forbidden'
+              )
+              resolve()
+              return
             }
             if (isStreamWritable(responseStream)) {
               // 解析 Claude API 返回的错误详情
@@ -4138,7 +4199,7 @@ class ClaudeRelayService {
 
   // 🔧 动态捕获并获取统一的 User-Agent
   async captureAndGetUnifiedUserAgent(clientHeaders, account) {
-    if (account.useUnifiedUserAgent !== 'true') {
+    if (account?.useUnifiedUserAgent !== 'true') {
       return null
     }
 
