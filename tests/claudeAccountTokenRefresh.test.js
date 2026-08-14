@@ -1,6 +1,7 @@
 const mockGetClaudeAccount = jest.fn()
 const mockSetClaudeAccount = jest.fn(async () => true)
 const mockAxiosPost = jest.fn()
+const mockAxiosGet = jest.fn()
 const mockAcquireRefreshLock = jest.fn(async () => true)
 const mockReleaseRefreshLock = jest.fn(async () => undefined)
 const mockIsRefreshLocked = jest.fn(async () => false)
@@ -10,6 +11,7 @@ const mockGetNurtureConfig = jest.fn(async () => ({
 
 jest.mock('../config/config', () => ({
   claude: {},
+  system: { timezoneOffset: 8 },
   security: { encryptionKey: 'test-encryption-key-32-characters' }
 }))
 jest.mock('../src/models/redis', () => ({
@@ -17,7 +19,7 @@ jest.mock('../src/models/redis', () => ({
   setClaudeAccount: mockSetClaudeAccount,
   client: { del: jest.fn(), hdel: jest.fn() }
 }))
-jest.mock('axios', () => ({ post: mockAxiosPost }))
+jest.mock('axios', () => ({ post: mockAxiosPost, get: mockAxiosGet }))
 jest.mock('../src/services/tokenRefreshService', () => ({
   acquireRefreshLock: mockAcquireRefreshLock,
   releaseRefreshLock: mockReleaseRefreshLock,
@@ -61,6 +63,7 @@ global.setInterval = (fn, ms, ...args) => {
 }
 const claudeAccountService = require('../src/services/account/claudeAccountService')
 const upstreamErrorHelper = require('../src/utils/upstreamErrorHelper')
+const webhookNotifier = require('../src/utils/webhookNotifier')
 global.setInterval = _realSetInterval
 
 const baseAccount = {
@@ -83,6 +86,7 @@ describe('claudeAccountService token refresh hardening', () => {
     mockReleaseRefreshLock.mockResolvedValue(undefined)
     mockIsRefreshLocked.mockResolvedValue(false)
     mockSetClaudeAccount.mockResolvedValue(true)
+    mockAxiosGet.mockReset()
     mockGetNurtureConfig.mockResolvedValue({
       oauthErrorPatterns: { blocked: [], revoked: [] }
     })
@@ -157,6 +161,110 @@ describe('claudeAccountService token refresh hardening', () => {
       'oauth_revoked',
       expect.any(Object)
     )
+  })
+
+  test('marks invalid authentication credentials from refresh as unauthorized', async () => {
+    mockGetClaudeAccount.mockResolvedValue({ ...baseAccount })
+    mockAxiosPost.mockRejectedValue(
+      Object.assign(new Error('Request failed with status code 401'), {
+        response: {
+          status: 401,
+          data: {
+            error: {
+              type: 'authentication_error',
+              message: 'Invalid authentication credentials'
+            }
+          }
+        }
+      })
+    )
+
+    await expect(claudeAccountService.refreshAccountToken(baseAccount.id)).rejects.toMatchObject({
+      isPermanentOAuthError: true,
+      claudeOAuthErrorKind: 'oauth_revoked'
+    })
+
+    expect(mockSetClaudeAccount).toHaveBeenCalledWith(
+      baseAccount.id,
+      expect.objectContaining({ status: 'unauthorized', schedulable: 'false' })
+    )
+    expect(webhookNotifier.sendAccountAnomalyNotification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        accountId: baseAccount.id,
+        status: 'unauthorized',
+        errorCode: 'CLAUDE_OAUTH_REVOKED'
+      })
+    )
+  })
+
+  test('refreshes once and retries OAuth usage after a 401', async () => {
+    mockGetClaudeAccount.mockResolvedValue({ ...baseAccount })
+    mockAxiosGet
+      .mockRejectedValueOnce(
+        Object.assign(new Error('Unauthorized'), {
+          response: { status: 401, data: { error: { message: 'Unauthorized' } } }
+        })
+      )
+      .mockResolvedValueOnce({ status: 200, data: { five_hour: { utilization: 12 } } })
+    jest.spyOn(claudeAccountService, 'getValidAccessToken').mockResolvedValue('old-access-token')
+    jest.spyOn(claudeAccountService, 'refreshAccountToken').mockResolvedValue({
+      success: true,
+      accessToken: 'new-access-token'
+    })
+
+    await expect(claudeAccountService.fetchOAuthUsage(baseAccount.id)).resolves.toEqual({
+      five_hour: { utilization: 12 }
+    })
+
+    expect(claudeAccountService.refreshAccountToken).toHaveBeenCalledTimes(1)
+    expect(mockAxiosGet).toHaveBeenCalledTimes(2)
+    expect(mockAxiosGet.mock.calls[1][1].headers.Authorization).toBe('Bearer new-access-token')
+  })
+
+  test('stops and notifies when OAuth usage stays 401 after refresh', async () => {
+    mockGetClaudeAccount.mockResolvedValue({ ...baseAccount })
+    mockAxiosGet.mockRejectedValue(
+      Object.assign(new Error('Unauthorized'), {
+        response: {
+          status: 401,
+          data: { error: { message: 'Invalid authentication credentials' } }
+        }
+      })
+    )
+    jest.spyOn(claudeAccountService, 'getValidAccessToken').mockResolvedValue('old-access-token')
+    jest.spyOn(claudeAccountService, 'refreshAccountToken').mockResolvedValue({
+      success: true,
+      accessToken: 'new-access-token'
+    })
+
+    await expect(claudeAccountService.fetchOAuthUsage(baseAccount.id)).resolves.toBeNull()
+
+    expect(mockSetClaudeAccount).toHaveBeenCalledWith(
+      baseAccount.id,
+      expect.objectContaining({ status: 'unauthorized', schedulable: 'false' })
+    )
+    expect(webhookNotifier.sendAccountAnomalyNotification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        accountId: baseAccount.id,
+        status: 'unauthorized',
+        errorCode: 'CLAUDE_OAUTH_REPEATED_401'
+      })
+    )
+  })
+
+  test('does not send a duplicate notification for an already unauthorized account', async () => {
+    mockGetClaudeAccount.mockResolvedValue({
+      ...baseAccount,
+      status: 'unauthorized',
+      schedulable: 'false'
+    })
+
+    await claudeAccountService.markAccountUnauthorized(baseAccount.id, null, {
+      errorCode: 'CLAUDE_OAUTH_REPEATED_401',
+      force: true
+    })
+
+    expect(webhookNotifier.sendAccountAnomalyNotification).not.toHaveBeenCalled()
   })
 
   test('uses custom blocked phrases from nurture config during refresh classification', async () => {

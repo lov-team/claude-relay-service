@@ -26,6 +26,8 @@ const DEFAULT_ACCESS_TOKEN_PATTERNS = [
   'expired access token'
 ]
 
+const DEFAULT_INVALID_CREDENTIAL_PATTERNS = ['invalid authentication credentials']
+
 const parseJsonBody = (body) => {
   if (typeof body !== 'string') {
     return body
@@ -135,6 +137,16 @@ const classifyClaudeOAuthError = (input, explicitStatusCode = null, options = {}
     accountStatus = 'blocked'
     errorCode = 'CLAUDE_OAUTH_BLOCKED'
   } else if (includesPattern(details.searchableText, revokedPatterns)) {
+    kind = 'oauth_revoked'
+    permanent = true
+    accountStatus = 'unauthorized'
+    errorCode = 'CLAUDE_OAUTH_REVOKED'
+  } else if (
+    options.credentialEndpoint === true &&
+    includesPattern(details.searchableText, DEFAULT_INVALID_CREDENTIAL_PATTERNS)
+  ) {
+    // The token endpoint validates the refresh credential itself. A 401 with this
+    // message cannot be repaired by refreshing again, so treat it as revoked.
     kind = 'oauth_revoked'
     permanent = true
     accountStatus = 'unauthorized'

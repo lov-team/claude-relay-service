@@ -258,6 +258,43 @@ class ClaudeRelayService {
     })
   }
 
+  async _recoverClaudeOAuth401({
+    accountId,
+    accountType,
+    sessionHash = null,
+    alreadyRetried = false,
+    oauthError = {}
+  }) {
+    if (accountType !== 'claude-official') {
+      return { retry: false, handled: false }
+    }
+
+    if (alreadyRetried) {
+      const errorMessage = oauthError.message
+        ? `OAuth remained unauthorized after token refresh: ${oauthError.message}`
+        : 'OAuth remained unauthorized after a successful token refresh'
+      await unifiedClaudeScheduler.markAccountUnauthorized(accountId, accountType, sessionHash, {
+        statusCode: 401,
+        errorKind: 'oauth_revoked',
+        errorCode: 'CLAUDE_OAUTH_REPEATED_401',
+        errorMessage,
+        force: true
+      })
+      return { retry: false, handled: true }
+    }
+
+    logger.warn(`🔄 OAuth 401 for account ${accountId}, forcing one token refresh before stopping`)
+    try {
+      const refreshResult = await claudeAccountService.refreshAccountToken(accountId)
+      return { retry: true, handled: false, accessToken: refreshResult.accessToken }
+    } catch (refreshError) {
+      logger.warn(
+        `⚠️ OAuth 401 recovery refresh failed for account ${accountId}: ${refreshError.message}`
+      )
+      return { retry: false, handled: refreshError.isPermanentOAuthError === true }
+    }
+  }
+
   // 🚫 检查是否为组织被禁用/封禁错误
   // 支持两种场景：
   //   1. HTTP 400 + "this organization has been disabled"（原有）
@@ -898,7 +935,7 @@ class ClaudeRelayService {
       }
 
       // 获取有效的访问token
-      const accessToken = await claudeAccountService.getValidAccessToken(accountId)
+      let accessToken = await claudeAccountService.getValidAccessToken(accountId)
 
       const isRealClaudeCodeRequest = this._isActualClaudeCodeRequest(requestBody, clientHeaders)
       const processedBody = this._processRequestBody(requestBody, account, isRealClaudeCodeRequest)
@@ -980,6 +1017,42 @@ class ClaudeRelayService {
         ;({ response, retryCount } = await makeRequestWithRetries(requestOptions))
       }
 
+      let oauth401Handled = false
+      if (response.statusCode === 401) {
+        const oauthError = await this._classifyClaudeOAuthError(response.statusCode, response.body)
+        if (oauthError.kind === 'access_token_invalid') {
+          const recovery = await this._recoverClaudeOAuth401({
+            accountId,
+            accountType,
+            sessionHash,
+            oauthError
+          })
+          oauth401Handled = recovery.handled
+
+          if (recovery.retry) {
+            accessToken = recovery.accessToken
+            ;({ response, retryCount } = await makeRequestWithRetries(requestOptions))
+
+            if (response.statusCode === 401) {
+              const retryOauthError = await this._classifyClaudeOAuthError(
+                response.statusCode,
+                response.body
+              )
+              const retryRecovery = await this._recoverClaudeOAuth401({
+                accountId,
+                accountType,
+                sessionHash,
+                alreadyRetried: true,
+                oauthError: retryOauthError
+              })
+              oauth401Handled = retryRecovery.handled
+            } else {
+              logger.info(`✅ OAuth 401 retry succeeded for account ${accountId}`)
+            }
+          }
+        }
+      }
+
       // 如果进行了重试，记录最终结果
       if (retryCount > 0) {
         if (response.statusCode === 403) {
@@ -1059,7 +1132,7 @@ class ClaudeRelayService {
           )
         }
         // 检查是否为401状态码（未授权）
-        else if (response.statusCode === 401) {
+        else if (response.statusCode === 401 && !oauth401Handled) {
           logger.warn(`🔐 Unauthorized error (401) detected for account ${accountId}`)
 
           // 记录401错误
@@ -3172,6 +3245,7 @@ class ClaudeRelayService {
           }
 
           // 将错误处理逻辑封装在一个异步函数中
+          let oauth401Handled = false
           const handleErrorResponse = async () => {
             const oauthError = await this._classifyClaudeOAuthError(res.statusCode, errorData)
 
@@ -3209,7 +3283,7 @@ class ClaudeRelayService {
                     markError
                   )
                 })
-            } else if (res.statusCode === 401) {
+            } else if (res.statusCode === 401 && !oauth401Handled) {
               logger.warn(`🔐 [Stream] Unauthorized error (401) detected for account ${accountId}`)
 
               await this.recordUnauthorizedError(accountId)
@@ -3294,6 +3368,62 @@ class ClaudeRelayService {
               `❌ Claude API error response (Account: ${account?.name || accountId}):`,
               errorData
             )
+
+            if (res.statusCode === 401) {
+              const oauthError = await this._classifyClaudeOAuthError(res.statusCode, errorData)
+              if (oauthError.kind === 'access_token_invalid') {
+                const priorAuthRetries = Number(requestOptions.oauth401RetryCount || 0)
+                const recovery = await this._recoverClaudeOAuth401({
+                  accountId,
+                  accountType,
+                  sessionHash,
+                  alreadyRetried: priorAuthRetries > 0,
+                  oauthError
+                })
+                oauth401Handled = recovery.handled
+
+                if (
+                  recovery.retry &&
+                  requestOptions.bodyStoreId &&
+                  this.bodyStore.has(requestOptions.bodyStoreId)
+                ) {
+                  let retryBody
+                  try {
+                    retryBody = JSON.parse(this.bodyStore.get(requestOptions.bodyStoreId))
+                  } catch (parseError) {
+                    logger.error(
+                      `❌ Failed to parse body for OAuth 401 retry: ${parseError.message}`
+                    )
+                    reject(new Error(`OAuth 401 retry body parse failed: ${parseError.message}`))
+                    return
+                  }
+
+                  try {
+                    const retryResult = await this._makeClaudeStreamRequestWithUsageCapture(
+                      retryBody,
+                      recovery.accessToken,
+                      proxyAgent,
+                      clientHeaders,
+                      responseStream,
+                      usageCallback,
+                      accountId,
+                      accountType,
+                      sessionHash,
+                      streamTransformer,
+                      { ...requestOptions, oauth401RetryCount: priorAuthRetries + 1 },
+                      isDedicatedOfficialAccount,
+                      onResponseStart,
+                      retryCount
+                    )
+                    resolve(retryResult)
+                  } catch (retryError) {
+                    reject(retryError)
+                  }
+                  return
+                }
+              }
+            }
+
             try {
               // 必须等到完整错误体读取后再处理，才能正确识别封禁类 403，
               // 也确保重选账号前旧账号已被隔离。

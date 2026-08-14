@@ -26,7 +26,9 @@ jest.mock('../src/utils/performanceOptimizer', () => ({
   getPricingData: jest.fn(() => null)
 }))
 jest.mock('../src/utils/proxyHelper', () => ({}))
-jest.mock('../src/services/account/claudeAccountService', () => ({}))
+jest.mock('../src/services/account/claudeAccountService', () => ({
+  refreshAccountToken: jest.fn()
+}))
 jest.mock('../src/services/account/claudeAccountNurtureService', () => ({}))
 jest.mock('../src/services/accountNurtureConfigService', () => ({
   getConfig: jest.fn(async () => ({
@@ -42,7 +44,8 @@ jest.mock('../src/services/accountNurtureConfigService', () => ({
   }))
 }))
 jest.mock('../src/services/scheduler/unifiedClaudeScheduler', () => ({
-  selectAccountForApiKey: jest.fn()
+  selectAccountForApiKey: jest.fn(),
+  markAccountUnauthorized: jest.fn()
 }))
 jest.mock('../src/services/claudeCodeHeadersService', () => ({}))
 jest.mock('../src/services/requestIdentityService', () => ({
@@ -57,6 +60,7 @@ jest.mock('../src/validators/clients/claudeCodeValidator', () => ({
 const claudeRelayService = require('../src/services/relay/claudeRelayService')
 const unifiedClaudeScheduler = require('../src/services/scheduler/unifiedClaudeScheduler')
 const accountNurtureConfigService = require('../src/services/accountNurtureConfigService')
+const claudeAccountService = require('../src/services/account/claudeAccountService')
 
 const oversizedRequest = {
   model: 'claude-sonnet-4-5',
@@ -112,5 +116,48 @@ describe('Claude relay traffic guardrail integration', () => {
     expect(responseStream.setHeader).toHaveBeenCalledWith('Retry-After', '15')
     expect(responseStream.end).toHaveBeenCalledTimes(1)
     expect(unifiedClaudeScheduler.selectAccountForApiKey).not.toHaveBeenCalled()
+  })
+
+  test('refreshes a generic Claude OAuth 401 once for both relay paths', async () => {
+    claudeAccountService.refreshAccountToken.mockResolvedValue({
+      success: true,
+      accessToken: 'refreshed-access-token'
+    })
+
+    await expect(
+      claudeRelayService._recoverClaudeOAuth401({
+        accountId: 'account-1',
+        accountType: 'claude-official',
+        sessionHash: 'session-1'
+      })
+    ).resolves.toEqual({
+      retry: true,
+      handled: false,
+      accessToken: 'refreshed-access-token'
+    })
+  })
+
+  test('marks a repeated post-refresh 401 unauthorized for one anomaly notification', async () => {
+    unifiedClaudeScheduler.markAccountUnauthorized.mockResolvedValue({ success: true })
+
+    await expect(
+      claudeRelayService._recoverClaudeOAuth401({
+        accountId: 'account-1',
+        accountType: 'claude-official',
+        sessionHash: 'session-1',
+        alreadyRetried: true,
+        oauthError: { message: 'Invalid authentication credentials' }
+      })
+    ).resolves.toEqual({ retry: false, handled: true })
+
+    expect(unifiedClaudeScheduler.markAccountUnauthorized).toHaveBeenCalledWith(
+      'account-1',
+      'claude-official',
+      'session-1',
+      expect.objectContaining({
+        force: true,
+        errorCode: 'CLAUDE_OAUTH_REPEATED_401'
+      })
+    )
   })
 })

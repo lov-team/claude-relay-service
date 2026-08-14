@@ -66,6 +66,30 @@ describe('claudeOAuthErrorClassifier', () => {
     })
   })
 
+  test('treats invalid credentials from the token endpoint as permanently revoked', () => {
+    expect(
+      classifyClaudeOAuthError(
+        {
+          error: {
+            type: 'authentication_error',
+            message: 'Invalid authentication credentials'
+          }
+        },
+        401,
+        { credentialEndpoint: true }
+      )
+    ).toMatchObject({
+      kind: 'oauth_revoked',
+      permanent: true,
+      accountStatus: 'unauthorized',
+      errorCode: 'CLAUDE_OAUTH_REVOKED'
+    })
+
+    expect(
+      classifyClaudeOAuthError({ error: { message: 'Invalid authentication credentials' } }, 401)
+    ).toMatchObject({ kind: 'access_token_invalid', permanent: false })
+  })
+
   test('extracts a useful message from JSON strings', () => {
     expect(
       extractClaudeOAuthError('{"error":{"message":"account has been suspended"}}').message

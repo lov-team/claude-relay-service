@@ -442,7 +442,8 @@ class ClaudeAccountService {
       const nurtureConfig = await accountNurtureConfigService.getConfig()
       const classification = classifyClaudeOAuthError(error, null, {
         blockedPatterns: nurtureConfig.oauthErrorPatterns?.blocked,
-        revokedPatterns: nurtureConfig.oauthErrorPatterns?.revoked
+        revokedPatterns: nurtureConfig.oauthErrorPatterns?.revoked,
+        credentialEndpoint: true
       })
       error.claudeOAuthErrorKind = classification.kind
       error.isPermanentOAuthError = classification.permanent
@@ -2267,7 +2268,7 @@ class ClaudeAccountService {
   }
 
   // 📊 获取 OAuth Usage 数据
-  async fetchOAuthUsage(accountId, accessToken = null, agent = null) {
+  async fetchOAuthUsage(accountId, accessToken = null, agent = null, authRetryCount = 0) {
     try {
       const accountData = await redis.getClaudeAccount(accountId)
       if (!accountData || Object.keys(accountData).length === 0) {
@@ -2321,6 +2322,41 @@ class ClaudeAccountService {
       logger.warn(`⚠️ Failed to fetch OAuth usage for account ${accountId}: ${response.status}`)
       return null
     } catch (error) {
+      if (error.response?.status === 401) {
+        if (authRetryCount === 0) {
+          logger.warn(
+            `🔐 OAuth usage returned 401 for account ${accountId}, forcing one token refresh`
+          )
+          try {
+            const refreshResult = await this.refreshAccountToken(accountId)
+            return await this.fetchOAuthUsage(
+              accountId,
+              refreshResult.accessToken,
+              agent,
+              authRetryCount + 1
+            )
+          } catch (refreshError) {
+            // refreshAccountToken persists permanent status and sends the anomaly notification.
+            logger.warn(
+              `⚠️ OAuth usage authentication recovery failed for account ${accountId}: ${refreshError.message}`
+            )
+            return null
+          }
+        }
+
+        await this.markAccountUnauthorized(accountId, null, {
+          statusCode: 401,
+          errorKind: 'oauth_revoked',
+          errorCode: 'CLAUDE_OAUTH_REPEATED_401',
+          errorMessage:
+            error.response?.data?.error?.message ||
+            error.response?.data?.message ||
+            'OAuth usage remained unauthorized after a successful token refresh',
+          force: true
+        })
+        return null
+      }
+
       // 403 错误通常表示使用的是 Setup Token 而非 OAuth
       if (error.response?.status === 403) {
         logger.debug(
@@ -2750,6 +2786,9 @@ class ClaudeAccountService {
         throw new Error('Account not found')
       }
 
+      const alreadyMarked =
+        accountData.status === errorConfig.status && accountData.schedulable === 'false'
+
       // disableAutoProtection 检查：跳过自动禁用，仅记录错误历史
       if (
         details.force !== true &&
@@ -2801,20 +2840,27 @@ class ClaudeAccountService {
         )
         .catch(() => {})
 
-      // 发送Webhook通知
-      try {
-        const webhookNotifier = require('../../utils/webhookNotifier')
-        await webhookNotifier.sendAccountAnomalyNotification({
-          accountId,
-          accountName: accountData.name,
-          platform: 'claude-oauth',
-          status: errorConfig.status,
-          errorCode: details.errorCode || errorConfig.errorCode,
-          reason: updatedAccountData.errorMessage,
-          timestamp: getISOStringWithTimezone(new Date())
-        })
-      } catch (webhookError) {
-        logger.error('Failed to send webhook notification:', webhookError)
+      // Only notify on the state transition. Repeated/parallel 401 handling must not
+      // produce duplicate Feishu incidents for an account already stopped.
+      if (!alreadyMarked) {
+        try {
+          const webhookNotifier = require('../../utils/webhookNotifier')
+          await webhookNotifier.sendAccountAnomalyNotification({
+            accountId,
+            accountName: accountData.name,
+            platform: 'claude-oauth',
+            status: errorConfig.status,
+            errorCode: details.errorCode || errorConfig.errorCode,
+            reason: updatedAccountData.errorMessage,
+            timestamp: getISOStringWithTimezone(new Date())
+          })
+        } catch (webhookError) {
+          logger.error('Failed to send webhook notification:', webhookError)
+        }
+      } else {
+        logger.info(
+          `🔕 Skipping duplicate ${errorConfig.status} notification for account ${accountId}`
+        )
       }
 
       return { success: true }
