@@ -357,6 +357,31 @@ describe('Claude relay cache_control ttl handling', () => {
       )
     ).toBe('claude-cli/2.1.150 (external, cli)')
   })
+
+  test('uses the account-pinned user agent ahead of the legacy unified value', () => {
+    expect(
+      claudeRelayService._resolveClaudeUserAgent(
+        { 'user-agent': 'claude-cli/2.1.150 (external, cli)' },
+        {},
+        true,
+        'claude-cli/2.1.151 (external, cli)',
+        'claude-cli/2.2.0 (external, cli, linux, x64)',
+        'pinned'
+      )
+    ).toBe('claude-cli/2.2.0 (external, cli, linux, x64)')
+  })
+
+  test('keeps the legacy unified user agent when the account has not been pinned', () => {
+    expect(
+      claudeRelayService._resolveClaudeUserAgent(
+        { 'user-agent': 'claude-cli/2.1.150 (external, cli)' },
+        {},
+        true,
+        'claude-cli/2.1.151 (external, cli)',
+        'claude-cli/2.2.0 (external, cli, linux, x64)'
+      )
+    ).toBe('claude-cli/2.1.151 (external, cli)')
+  })
 })
 
 describe('Claude relay CC rate-limit policy', () => {

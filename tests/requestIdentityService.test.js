@@ -5,9 +5,13 @@ jest.mock('../src/utils/logger', () => ({
   error: jest.fn()
 }))
 
+const mockRedisGet = jest.fn(async () => null)
+const mockRedisSet = jest.fn(async () => 'OK')
+
 jest.mock('../src/models/redis', () => ({
   getClientSafe: jest.fn(() => ({
-    set: jest.fn()
+    get: mockRedisGet,
+    set: mockRedisSet
   }))
 }))
 
@@ -96,7 +100,13 @@ describe('requestIdentityService.buildRelayGeneratedUserId', () => {
 })
 
 describe('requestIdentityService.transform', () => {
-  it('rewrites empty account_uuid from object extInfo', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockRedisGet.mockResolvedValue(null)
+    mockRedisSet.mockResolvedValue('OK')
+  })
+
+  it('rewrites empty account_uuid from object extInfo', async () => {
     const body = {
       metadata: {
         user_id: JSON.stringify({
@@ -107,7 +117,7 @@ describe('requestIdentityService.transform', () => {
       }
     }
 
-    const result = requestIdentityService.transform({
+    const result = await requestIdentityService.transform({
       body,
       headers: {},
       accountId: ACCOUNT_ID,
@@ -122,5 +132,55 @@ describe('requestIdentityService.transform', () => {
     expect(userId.session_id).toMatch(
       /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
     )
+  })
+
+  it('reuses a complete persisted Stainless fingerprint', async () => {
+    const fingerprint = {
+      'x-stainless-retry-count': '0',
+      'x-stainless-timeout': '60',
+      'x-stainless-lang': 'js',
+      'x-stainless-package-version': '0.68.0',
+      'x-stainless-os': 'MacOS',
+      'x-stainless-arch': 'arm64',
+      'x-stainless-runtime': 'node',
+      'x-stainless-runtime-version': 'v22.18.0'
+    }
+    mockRedisGet.mockResolvedValue(JSON.stringify(fingerprint))
+
+    const result = await requestIdentityService.transform({
+      body: {},
+      headers: { 'X-Stainless-OS': 'Windows' },
+      accountId: ACCOUNT_ID,
+      account: { id: ACCOUNT_ID }
+    })
+
+    expect(result.headers).toMatchObject({
+      'X-Stainless-OS': 'MacOS',
+      'X-Stainless-Arch': 'arm64',
+      'X-Stainless-Runtime-Version': 'v22.18.0'
+    })
+  })
+
+  it('prefers the account-pinned Stainless fingerprint over Redis', async () => {
+    const pinnedFingerprint = {
+      'x-stainless-retry-count': '0',
+      'x-stainless-timeout': '60',
+      'x-stainless-lang': 'js',
+      'x-stainless-package-version': '0.68.0',
+      'x-stainless-os': 'Linux',
+      'x-stainless-arch': 'x64',
+      'x-stainless-runtime': 'node',
+      'x-stainless-runtime-version': 'v22.18.0'
+    }
+
+    const result = await requestIdentityService.transform({
+      body: {},
+      headers: {},
+      accountId: ACCOUNT_ID,
+      account: { id: ACCOUNT_ID, stainlessFingerprint: JSON.stringify(pinnedFingerprint) }
+    })
+
+    expect(result.headers['X-Stainless-OS']).toBe('Linux')
+    expect(mockRedisGet).not.toHaveBeenCalled()
   })
 })

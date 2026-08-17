@@ -242,7 +242,9 @@ async function handleChatCompletion(req, res, apiKeyData) {
       accountSelection = await unifiedClaudeScheduler.selectAccountForApiKey(
         apiKeyData,
         sessionHash,
-        claudeRequest.model
+        claudeRequest.model,
+        null,
+        req.headers
       )
     } catch (error) {
       if (error.code === 'CLAUDE_DEDICATED_RATE_LIMITED') {

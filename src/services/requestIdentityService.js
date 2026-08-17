@@ -32,7 +32,6 @@ const STAINLESS_HEADER_CASE_MAP = {
   'x-stainless-runtime': 'X-Stainless-Runtime',
   'x-stainless-runtime-version': 'X-Stainless-Runtime-Version'
 }
-const MIN_FINGERPRINT_FIELDS = 4
 const REDIS_KEY_PREFIX = 'fmt_claude_req:stainless_headers:'
 
 function formatUuidFromSeed(seed) {
@@ -72,6 +71,14 @@ function getRedisClient() {
 
 function hasFingerprintValues(fingerprint) {
   return fingerprint && typeof fingerprint === 'object' && Object.keys(fingerprint).length > 0
+}
+
+function hasCompleteFingerprint(fingerprint) {
+  return (
+    fingerprint &&
+    typeof fingerprint === 'object' &&
+    STAINLESS_HEADER_KEYS.every((key) => String(fingerprint[key] || '').trim())
+  )
 }
 
 function sanitizeFingerprint(source) {
@@ -153,22 +160,38 @@ function applyFingerprintToHeaders(headers, fingerprint) {
   return nextHeaders
 }
 
-function persistFingerprint(accountId, fingerprint) {
+async function persistFingerprint(accountId, fingerprint) {
   if (!accountId || !hasFingerprintValues(fingerprint)) {
-    return
+    return false
   }
 
   const client = getRedisClient()
   const key = `${REDIS_KEY_PREFIX}${accountId}`
   const serialized = JSON.stringify(fingerprint)
 
-  const command = client.set(key, serialized, 'NX')
+  const result = await client.set(key, serialized, 'NX')
+  return result === 'OK' || result === 1
+}
 
-  if (command && typeof command.catch === 'function') {
-    command.catch((error) => {
-      logger.error(`requestIdentityService: Redis 持久化指纹失败 (${accountId}): ${error.message}`)
-    })
+async function readPersistedFingerprint(accountId) {
+  if (!accountId) {
+    return {}
   }
+
+  const client = getRedisClient()
+  const raw = await client.get(`${REDIS_KEY_PREFIX}${accountId}`)
+  const parsed = safeParseJson(raw)
+  return sanitizeFingerprint(parsed)
+}
+
+function extractAccountFingerprint(account) {
+  if (!account || typeof account !== 'object') {
+    return {}
+  }
+
+  const raw = account.stainlessFingerprint || account.stainless_fingerprint
+  const parsed = typeof raw === 'string' ? safeParseJson(raw) : raw
+  return sanitizeFingerprint(parsed)
 }
 
 function getHeaderValueCaseInsensitive(headers, key) {
@@ -232,7 +255,7 @@ function resolveAccountId(payload) {
   return null
 }
 
-function rewriteHeaders(headers, accountId) {
+async function rewriteHeaders(headers, accountId, accountFingerprint = {}) {
   if (!headers || typeof headers !== 'object') {
     return { nextHeaders: headers, changed: false }
   }
@@ -242,18 +265,51 @@ function rewriteHeaders(headers, accountId) {
   }
 
   const workingHeaders = { ...headers }
-  const fingerprint = collectFingerprintFromHeaders(workingHeaders)
-  const fieldCount = Object.keys(fingerprint).length
+  const pinnedFingerprint = sanitizeFingerprint(accountFingerprint)
 
-  if (fieldCount < MIN_FINGERPRINT_FIELDS) {
-    logger.warn(
-      `requestIdentityService: 账号 ${accountId} 提供的 Stainless 指纹字段不足，已保持原样`
-    )
+  if (hasCompleteFingerprint(pinnedFingerprint)) {
+    return {
+      nextHeaders: applyFingerprintToHeaders(workingHeaders, pinnedFingerprint),
+      changed: true,
+      fingerprint: pinnedFingerprint,
+      source: 'account_pinned'
+    }
+  }
+
+  try {
+    const persistedFingerprint = await readPersistedFingerprint(accountId)
+    if (hasCompleteFingerprint(persistedFingerprint)) {
+      return {
+        nextHeaders: applyFingerprintToHeaders(workingHeaders, persistedFingerprint),
+        changed: true,
+        fingerprint: persistedFingerprint,
+        source: 'redis_persisted'
+      }
+    }
+  } catch (error) {
+    logger.error(`requestIdentityService: 读取指纹失败 (${accountId}): ${error.message}`)
+  }
+
+  const fingerprint = collectFingerprintFromHeaders(workingHeaders)
+
+  if (!hasCompleteFingerprint(fingerprint)) {
+    logger.warn(`requestIdentityService: 账号 ${accountId} 未提供完整 Stainless 指纹，已保持原样`)
     return { nextHeaders: workingHeaders, changed: false }
   }
 
   try {
-    persistFingerprint(accountId, fingerprint)
+    const persisted = await persistFingerprint(accountId, fingerprint)
+    if (!persisted) {
+      const winningFingerprint = await readPersistedFingerprint(accountId)
+      if (hasCompleteFingerprint(winningFingerprint)) {
+        return {
+          nextHeaders: applyFingerprintToHeaders(workingHeaders, winningFingerprint),
+          changed: true,
+          fingerprint: winningFingerprint,
+          source: 'redis_persisted_race_winner'
+        }
+      }
+    }
   } catch (error) {
     logger.error(`requestIdentityService: 持久化指纹失败 (${accountId}): ${error.message}`)
     return {
@@ -268,7 +324,7 @@ function rewriteHeaders(headers, accountId) {
   const appliedHeaders = applyFingerprintToHeaders(workingHeaders, fingerprint)
   const changed = headersChanged(workingHeaders, appliedHeaders)
 
-  return { nextHeaders: appliedHeaders, changed }
+  return { nextHeaders: appliedHeaders, changed, fingerprint, source: 'request_headers' }
 }
 
 function normalizeAccountUuid(candidate) {
@@ -405,7 +461,7 @@ function rewriteUserId(body, accountId, accountUuid) {
  * @param {Object} payload.account - 账户对象
  * @returns {Object} 转换后的 { body, headers, abortResponse? }
  */
-function transform(payload = {}) {
+async function transform(payload = {}) {
   const currentBody = payload.body
   const currentHeaders = payload.headers
 
@@ -418,9 +474,10 @@ function transform(payload = {}) {
 
   const accountUuid = extractAccountUuid(payload.account)
   const accountIdForHeaders = resolveAccountId(payload)
+  const accountFingerprint = extractAccountFingerprint(payload.account)
 
   const { nextBody } = rewriteUserId(currentBody, payload.accountId, accountUuid)
-  const headerResult = rewriteHeaders(currentHeaders, accountIdForHeaders)
+  const headerResult = await rewriteHeaders(currentHeaders, accountIdForHeaders, accountFingerprint)
 
   const nextHeaders = headerResult ? headerResult.nextHeaders : currentHeaders
   const abortResponse =
@@ -437,10 +494,16 @@ module.exports = {
   transform,
   buildRelayGeneratedUserId,
   extractAccountUuid,
+  extractStainlessFingerprint: collectFingerprintFromHeaders,
+  hasCompleteStainlessFingerprint: hasCompleteFingerprint,
+  applyStainlessFingerprint: applyFingerprintToHeaders,
   // 导出内部函数供测试使用
   _internal: {
     formatUuidFromSeed,
     collectFingerprintFromHeaders,
+    hasCompleteFingerprint,
+    readPersistedFingerprint,
+    extractAccountFingerprint,
     rewriteHeaders,
     rewriteUserId,
     extractAccountUuid,

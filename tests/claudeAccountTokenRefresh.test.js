@@ -1,5 +1,8 @@
 const mockGetClaudeAccount = jest.fn()
 const mockSetClaudeAccount = jest.fn(async () => true)
+const mockMarkPermanentError = jest.fn(async () => ({ status: 1, previousStatus: 'active' }))
+const mockRefreshSuccessAtomic = jest.fn(async () => ({ status: 1, previousStatus: 'active' }))
+const mockPinIdentity = jest.fn(async () => ({ status: 1, userAgent: '' }))
 const mockAxiosPost = jest.fn()
 const mockAxiosGet = jest.fn()
 const mockAcquireRefreshLock = jest.fn(async () => true)
@@ -17,6 +20,9 @@ jest.mock('../config/config', () => ({
 jest.mock('../src/models/redis', () => ({
   getClaudeAccount: mockGetClaudeAccount,
   setClaudeAccount: mockSetClaudeAccount,
+  markClaudeAccountPermanentErrorAtomic: mockMarkPermanentError,
+  setClaudeAccountRefreshSuccessAtomic: mockRefreshSuccessAtomic,
+  pinClaudeAccountIdentityIfAbsent: mockPinIdentity,
   client: { del: jest.fn(), hdel: jest.fn() }
 }))
 jest.mock('axios', () => ({ post: mockAxiosPost, get: mockAxiosGet }))
@@ -86,6 +92,9 @@ describe('claudeAccountService token refresh hardening', () => {
     mockReleaseRefreshLock.mockResolvedValue(undefined)
     mockIsRefreshLocked.mockResolvedValue(false)
     mockSetClaudeAccount.mockResolvedValue(true)
+    mockMarkPermanentError.mockResolvedValue({ status: 1, previousStatus: 'active' })
+    mockRefreshSuccessAtomic.mockResolvedValue({ status: 1, previousStatus: 'active' })
+    mockPinIdentity.mockResolvedValue({ status: 1, userAgent: '' })
     mockAxiosGet.mockReset()
     mockGetNurtureConfig.mockResolvedValue({
       oauthErrorPatterns: { blocked: [], revoked: [] }
@@ -117,14 +126,29 @@ describe('claudeAccountService token refresh hardening', () => {
     })
 
     expect(mockAxiosPost.mock.calls[0][1].refresh_token).toBe('decrypted:latest-refresh-token')
-    expect(mockSetClaudeAccount).toHaveBeenCalledWith(
+    expect(mockRefreshSuccessAtomic).toHaveBeenCalledWith(
       baseAccount.id,
       expect.objectContaining({
         accessToken: 'encrypted:new-access-token',
-        refreshToken: 'encrypted:decrypted:latest-refresh-token',
-        status: 'active'
+        refreshToken: 'encrypted:decrypted:latest-refresh-token'
       })
     )
+  })
+
+  test('does not reactivate an account atomically stopped during token refresh', async () => {
+    mockGetClaudeAccount
+      .mockResolvedValueOnce({ ...baseAccount })
+      .mockResolvedValueOnce({ ...baseAccount })
+    mockAxiosPost.mockResolvedValue({
+      status: 200,
+      data: { access_token: 'new-access-token', expires_in: 3600 }
+    })
+    mockRefreshSuccessAtomic.mockResolvedValue({ status: 0, previousStatus: 'unauthorized' })
+
+    await expect(claudeAccountService.refreshAccountToken(baseAccount.id)).rejects.toMatchObject({
+      code: 'ACCOUNT_PERMANENTLY_DISABLED_DURING_REFRESH'
+    })
+    expect(mockSetClaudeAccount).not.toHaveBeenCalled()
   })
 
   test('marks invalid_grant as unauthorized and never treats it as retryable', async () => {
@@ -146,12 +170,13 @@ describe('claudeAccountService token refresh hardening', () => {
       claudeOAuthErrorKind: 'oauth_revoked'
     })
 
-    expect(mockSetClaudeAccount).toHaveBeenCalledWith(
+    expect(mockMarkPermanentError).toHaveBeenCalledWith(
       baseAccount.id,
       expect.objectContaining({
         status: 'unauthorized',
-        schedulable: 'false',
-        errorMessage: 'Refresh token not found or invalid'
+        errorMessage: 'Refresh token not found or invalid',
+        detectionSource: 'oauth_refresh',
+        force: true
       })
     )
     expect(upstreamErrorHelper.recordErrorHistory).toHaveBeenCalledWith(
@@ -184,9 +209,9 @@ describe('claudeAccountService token refresh hardening', () => {
       claudeOAuthErrorKind: 'oauth_revoked'
     })
 
-    expect(mockSetClaudeAccount).toHaveBeenCalledWith(
+    expect(mockMarkPermanentError).toHaveBeenCalledWith(
       baseAccount.id,
-      expect.objectContaining({ status: 'unauthorized', schedulable: 'false' })
+      expect.objectContaining({ status: 'unauthorized', detectionSource: 'oauth_refresh' })
     )
     expect(webhookNotifier.sendAccountAnomalyNotification).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -239,9 +264,12 @@ describe('claudeAccountService token refresh hardening', () => {
 
     await expect(claudeAccountService.fetchOAuthUsage(baseAccount.id)).resolves.toBeNull()
 
-    expect(mockSetClaudeAccount).toHaveBeenCalledWith(
+    expect(mockMarkPermanentError).toHaveBeenCalledWith(
       baseAccount.id,
-      expect.objectContaining({ status: 'unauthorized', schedulable: 'false' })
+      expect.objectContaining({
+        status: 'unauthorized',
+        detectionSource: 'oauth_usage_repeated_401'
+      })
     )
     expect(webhookNotifier.sendAccountAnomalyNotification).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -253,6 +281,7 @@ describe('claudeAccountService token refresh hardening', () => {
   })
 
   test('does not send a duplicate notification for an already unauthorized account', async () => {
+    mockMarkPermanentError.mockResolvedValue({ status: 0, previousStatus: 'unauthorized' })
     mockGetClaudeAccount.mockResolvedValue({
       ...baseAccount,
       status: 'unauthorized',
@@ -265,6 +294,42 @@ describe('claudeAccountService token refresh hardening', () => {
     })
 
     expect(webhookNotifier.sendAccountAnomalyNotification).not.toHaveBeenCalled()
+  })
+
+  test('pins the complete successful outbound identity atomically', async () => {
+    const headers = {
+      'User-Agent': 'claude-cli/2.1.228 (external, cli)',
+      'X-Stainless-Retry-Count': '0',
+      'X-Stainless-Timeout': '60',
+      'X-Stainless-Lang': 'js',
+      'X-Stainless-Package-Version': '0.68.0',
+      'X-Stainless-OS': 'MacOS',
+      'X-Stainless-Arch': 'arm64',
+      'X-Stainless-Runtime': 'node',
+      'X-Stainless-Runtime-Version': 'v22.18.0'
+    }
+    mockPinIdentity.mockResolvedValue({
+      status: 1,
+      userAgent: 'claude-cli/2.1.228 (external, cli)'
+    })
+
+    await expect(
+      claudeAccountService.pinSuccessfulRequestIdentity(
+        baseAccount.id,
+        headers,
+        'relay_stream_success'
+      )
+    ).resolves.toMatchObject({ pinned: true, userAgentPlatform: 'mac' })
+
+    expect(mockPinIdentity).toHaveBeenCalledWith(
+      baseAccount.id,
+      expect.objectContaining({
+        userAgent: 'claude-cli/2.1.228 (external, cli)',
+        userAgentPlatform: 'mac',
+        detectionSource: 'relay_stream_success',
+        stainlessFingerprint: expect.stringContaining('x-stainless-runtime-version')
+      })
+    )
   })
 
   test('uses custom blocked phrases from nurture config during refresh classification', async () => {
@@ -286,9 +351,9 @@ describe('claudeAccountService token refresh hardening', () => {
       claudeOAuthErrorKind: 'account_blocked'
     })
 
-    expect(mockSetClaudeAccount).toHaveBeenCalledWith(
+    expect(mockMarkPermanentError).toHaveBeenCalledWith(
       baseAccount.id,
-      expect.objectContaining({ status: 'blocked', schedulable: 'false' })
+      expect.objectContaining({ status: 'blocked', detectionSource: 'oauth_refresh' })
     )
   })
 

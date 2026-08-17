@@ -39,6 +39,8 @@ const CONTEXT_MANAGEMENT_BETA = 'context-management-2025-06-27'
 const VALID_CACHE_CONTROL_TTLS = new Set(['5m', '1h'])
 const CACHE_DEBUG_ENV = 'ANTHROPIC_CACHE_DEBUG'
 const SHARED_ACCOUNT_FAILOVER_MAX_ATTEMPTS = 2
+// 只服务于未建立 pinned 身份的存量账号；新账号默认版本见 userAgentPoolService。
+const LEGACY_CLAUDE_USER_AGENT_FALLBACK = 'claude-cli/1.0.119 (external, cli)'
 
 // structuredClone polyfill for Node < 17
 const safeClone =
@@ -287,7 +289,8 @@ class ClaudeRelayService {
     accountType,
     sessionHash = null,
     alreadyRetried = false,
-    oauthError = {}
+    oauthError = {},
+    detectionSource = 'relay_oauth_401_recovery'
   }) {
     if (accountType !== 'claude-official') {
       return { retry: false, handled: false }
@@ -302,6 +305,7 @@ class ClaudeRelayService {
         errorKind: 'oauth_revoked',
         errorCode: 'CLAUDE_OAUTH_REPEATED_401',
         errorMessage,
+        detectionSource,
         force: true
       })
       return { retry: false, handled: true }
@@ -362,7 +366,19 @@ class ClaudeRelayService {
     return `claude-cli/${versionMatch[1]} (external, ${entrypoint})`
   }
 
-  _resolveClaudeUserAgent(headers, requestPayload, isRealClaudeCode, unifiedUA) {
+  _resolveClaudeUserAgent(
+    headers,
+    requestPayload,
+    isRealClaudeCode,
+    unifiedUA,
+    accountUA = '',
+    accountUserAgentMode = ''
+  ) {
+    if (accountUserAgentMode === 'pinned' && typeof accountUA === 'string' && accountUA.trim()) {
+      return accountUA
+    }
+
+    // 没有 pinned 身份的存量账号继续沿用原 unified UA 行为。
     if (unifiedUA) {
       return unifiedUA
     }
@@ -375,11 +391,11 @@ class ClaudeRelayService {
     if (isRealClaudeCode) {
       return (
         this._extractClaudeCodeUserAgentFromBillingHeader(requestPayload) ||
-        'claude-cli/1.0.119 (external, cli)'
+        LEGACY_CLAUDE_USER_AGENT_FALLBACK
       )
     }
 
-    return userAgent || 'claude-cli/1.0.119 (external, cli)'
+    return userAgent || LEGACY_CLAUDE_USER_AGENT_FALLBACK
   }
 
   _hasClaudeCodeIdentityHeaders(clientHeaders) {
@@ -1054,7 +1070,8 @@ class ClaudeRelayService {
             accountId,
             accountType,
             sessionHash,
-            oauthError
+            oauthError,
+            detectionSource: 'relay_non_stream_401_recovery'
           })
           oauth401Handled = recovery.handled
 
@@ -1072,7 +1089,8 @@ class ClaudeRelayService {
                 accountType,
                 sessionHash,
                 alreadyRetried: true,
-                oauthError: retryOauthError
+                oauthError: retryOauthError,
+                detectionSource: 'relay_non_stream_401_recovery'
               })
               oauth401Handled = retryRecovery.handled
             } else {
@@ -1142,7 +1160,9 @@ class ClaudeRelayService {
             statusCode: oauthError.statusCode || response.statusCode,
             errorKind: oauthError.kind,
             errorCode: oauthError.errorCode,
-            errorMessage: oauthError.message
+            errorMessage: oauthError.message,
+            detectionSource: 'relay_non_stream_response',
+            force: true
           })
         } else if (oauthError.kind === 'oauth_revoked') {
           logger.error(
@@ -1156,7 +1176,9 @@ class ClaudeRelayService {
               statusCode: oauthError.statusCode || response.statusCode,
               errorKind: oauthError.kind,
               errorCode: oauthError.errorCode,
-              errorMessage: oauthError.message
+              errorMessage: oauthError.message,
+              detectionSource: 'relay_non_stream_response',
+              force: true
             }
           )
         }
@@ -1401,6 +1423,21 @@ class ClaudeRelayService {
         }
 
         await claudeAccountNurtureService.recordRequestSuccess(accountId)
+
+        if (accountType === 'claude-official') {
+          try {
+            await claudeAccountService.pinSuccessfulRequestIdentity(
+              accountId,
+              headers,
+              'relay_non_stream_success'
+            )
+          } catch (identityError) {
+            logger.error(
+              `❌ Failed to pin successful outbound identity for account ${accountId}:`,
+              identityError
+            )
+          }
+        }
 
         // 请求成功，清除401和500错误计数
         await this.clearUnauthorizedErrors(accountId)
@@ -2325,15 +2362,19 @@ class ClaudeRelayService {
     }
 
     // 应用请求身份转换
-    const extensionResult = this._applyRequestIdentityTransform(requestPayload, finalHeaders, {
-      account,
-      accountId,
-      accountType,
-      sessionHash,
-      clientHeaders,
-      requestOptions,
-      isStream
-    })
+    const extensionResult = await this._applyRequestIdentityTransform(
+      requestPayload,
+      finalHeaders,
+      {
+        account,
+        accountId,
+        accountType,
+        sessionHash,
+        clientHeaders,
+        requestOptions,
+        isStream
+      }
+    )
 
     if (extensionResult.abortResponse) {
       return { abortResponse: extensionResult.abortResponse }
@@ -2380,7 +2421,9 @@ class ClaudeRelayService {
       headers,
       requestPayload,
       isRealClaudeCode,
-      unifiedUA
+      unifiedUA,
+      account?.userAgent,
+      account?.userAgentMode
     )
     const acceptHeader = headers['accept'] || 'application/json'
     delete headers['user-agent']
@@ -2410,7 +2453,7 @@ class ClaudeRelayService {
     }
   }
 
-  _applyRequestIdentityTransform(body, headers, context = {}) {
+  async _applyRequestIdentityTransform(body, headers, context = {}) {
     const normalizedHeaders = headers && typeof headers === 'object' ? { ...headers } : {}
 
     try {
@@ -2420,7 +2463,7 @@ class ClaudeRelayService {
         ...context
       }
 
-      const result = requestIdentityService.transform(payload)
+      const result = await requestIdentityService.transform(payload)
       if (!result || typeof result !== 'object') {
         return { body, headers: normalizedHeaders }
       }
@@ -3302,7 +3345,9 @@ class ClaudeRelayService {
                   statusCode: oauthError.statusCode || res.statusCode,
                   errorKind: oauthError.kind,
                   errorCode: oauthError.errorCode,
-                  errorMessage: oauthError.message
+                  errorMessage: oauthError.message,
+                  detectionSource: 'relay_stream_response',
+                  force: true
                 })
                 .catch((markError) => {
                   logger.error(
@@ -3319,7 +3364,9 @@ class ClaudeRelayService {
                   statusCode: oauthError.statusCode || res.statusCode,
                   errorKind: oauthError.kind,
                   errorCode: oauthError.errorCode,
-                  errorMessage: oauthError.message
+                  errorMessage: oauthError.message,
+                  detectionSource: 'relay_stream_response',
+                  force: true
                 })
                 .catch((markError) => {
                   logger.error(
@@ -3422,7 +3469,8 @@ class ClaudeRelayService {
                   accountType,
                   sessionHash,
                   alreadyRetried: priorAuthRetries > 0,
-                  oauthError
+                  oauthError,
+                  detectionSource: 'relay_stream_401_recovery'
                 })
                 oauth401Handled = recovery.handled
 
@@ -3942,6 +3990,21 @@ class ClaudeRelayService {
             }
           } else if (res.statusCode === 200) {
             await claudeAccountNurtureService.recordRequestSuccess(accountId)
+
+            if (accountType === 'claude-official') {
+              try {
+                await claudeAccountService.pinSuccessfulRequestIdentity(
+                  accountId,
+                  headers,
+                  'relay_stream_success'
+                )
+              } catch (identityError) {
+                logger.error(
+                  `❌ [Stream] Failed to pin successful outbound identity for account ${accountId}:`,
+                  identityError
+                )
+              }
+            }
 
             // 请求成功，清除401和500错误计数
             await this.clearUnauthorizedErrors(accountId)

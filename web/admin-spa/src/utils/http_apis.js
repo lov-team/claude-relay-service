@@ -122,6 +122,8 @@ export const createClaudeAccountApi = (data) =>
   request({ url: '/admin/claude-accounts', method: 'POST', data })
 export const updateClaudeAccountApi = (id, data) =>
   request({ url: `/admin/claude-accounts/${id}`, method: 'PUT', data })
+export const getClaudeUserAgentPoolApi = () =>
+  request({ url: '/admin/claude-user-agent-pool', method: 'GET' })
 export const refreshClaudeAccountApi = (id) =>
   request({ url: `/admin/claude-accounts/${id}/refresh`, method: 'POST' })
 export const generateClaudeAuthUrlApi = (data) =>

@@ -26,6 +26,9 @@ const {
   normalizeTempUnavailablePolicyInput
 } = require('../../utils/tempUnavailablePolicy')
 const { classifyClaudeOAuthError } = require('../../utils/claudeOAuthErrorClassifier')
+const userAgentPoolService = require('../userAgentPoolService')
+const { DEFAULT_CLAUDE_USER_AGENT } = require('../userAgentPoolService')
+const requestIdentityService = require('../requestIdentityService')
 
 /**
  * Check if account is Pro (not Max)
@@ -98,6 +101,7 @@ class ClaudeAccountService {
       subscriptionInfo = null, // 手动设置的订阅信息
       autoStopOnWarning = false, // 5小时使用量接近限制时自动停止调度
       useUnifiedUserAgent = false, // 是否使用统一Claude Code版本的User-Agent
+      userAgent = '', // 固定 User-Agent；留空时从池中选择最新值
       useUnifiedClientId = false, // 是否使用统一的客户端标识
       unifiedClientId = '', // 统一的客户端标识
       expiresAt = null, // 账户订阅到期时间
@@ -110,6 +114,18 @@ class ClaudeAccountService {
     } = options
 
     const accountId = uuidv4()
+    const normalizedUserAgent = userAgentPoolService.normalizeUserAgent(userAgent)
+    const assignedUserAgent = normalizedUserAgent
+      ? {
+          userAgent: normalizedUserAgent,
+          platform: userAgentPoolService.detectPlatform(normalizedUserAgent),
+          stainlessFingerprint: {},
+          detectionSource: 'admin_manual',
+          lastSeenAt: Date.now()
+        }
+      : await userAgentPoolService.assignLatestUserAgent(DEFAULT_CLAUDE_USER_AGENT)
+    const identityFirstSeenAt = new Date(assignedUserAgent.lastSeenAt || Date.now()).toISOString()
+    const serializedFingerprint = JSON.stringify(assignedUserAgent.stainlessFingerprint || {})
     const normalizedTempUnavailablePolicy = normalizeTempUnavailablePolicyInput({
       disableTempUnavailable,
       tempUnavailable503TtlSeconds,
@@ -147,6 +163,12 @@ class ClaudeAccountService {
         schedulable: schedulable.toString(), // 是否可被调度
         autoStopOnWarning: autoStopOnWarning.toString(), // 5小时使用量接近限制时自动停止调度
         useUnifiedUserAgent: useUnifiedUserAgent.toString(), // 是否使用统一Claude Code版本的User-Agent
+        userAgent: assignedUserAgent.userAgent,
+        userAgentPlatform: assignedUserAgent.platform,
+        userAgentMode: 'pinned',
+        stainlessFingerprint: serializedFingerprint,
+        identityDetectionSource: assignedUserAgent.detectionSource,
+        identityFirstSeenAt,
         useUnifiedClientId: useUnifiedClientId.toString(), // 是否使用统一的客户端标识
         unifiedClientId: unifiedClientId || '', // 统一的客户端标识
         // 优先使用手动设置的订阅信息，否则使用OAuth数据中的，否则默认为空
@@ -193,6 +215,12 @@ class ClaudeAccountService {
         schedulable: schedulable.toString(), // 是否可被调度
         autoStopOnWarning: autoStopOnWarning.toString(), // 5小时使用量接近限制时自动停止调度
         useUnifiedUserAgent: useUnifiedUserAgent.toString(), // 是否使用统一Claude Code版本的User-Agent
+        userAgent: assignedUserAgent.userAgent,
+        userAgentPlatform: assignedUserAgent.platform,
+        userAgentMode: 'pinned',
+        stainlessFingerprint: serializedFingerprint,
+        identityDetectionSource: assignedUserAgent.detectionSource,
+        identityFirstSeenAt,
         // 手动设置的订阅信息
         subscriptionInfo: subscriptionInfo ? JSON.stringify(subscriptionInfo) : '',
         // 账户订阅到期时间
@@ -271,6 +299,12 @@ class ClaudeAccountService {
       scopes: claudeAiOauth ? claudeAiOauth.scopes : [],
       autoStopOnWarning,
       useUnifiedUserAgent,
+      userAgent: assignedUserAgent.userAgent,
+      userAgentPlatform: assignedUserAgent.platform,
+      userAgentMode: 'pinned',
+      stainlessFingerprint: assignedUserAgent.stainlessFingerprint || {},
+      identityDetectionSource: assignedUserAgent.detectionSource,
+      identityFirstSeenAt,
       useUnifiedClientId,
       unifiedClientId,
       extInfo: normalizedExtInfo,
@@ -326,7 +360,7 @@ class ClaudeAccountService {
         headers: {
           'Content-Type': 'application/json',
           Accept: 'application/json, text/plain, */*',
-          'User-Agent': 'claude-cli/1.0.56 (external, cli)',
+          'User-Agent': accountData.userAgent || 'claude-cli/1.0.56 (external, cli)',
           'Accept-Language': 'en-US,en;q=0.9',
           Referer: 'https://claude.ai/',
           Origin: 'https://claude.ai'
@@ -400,7 +434,23 @@ class ClaudeAccountService {
         accountData.status = 'active'
         accountData.errorMessage = ''
 
-        await redis.setClaudeAccount(accountId, accountData)
+        const refreshTransition = await redis.setClaudeAccountRefreshSuccessAtomic(accountId, {
+          accessToken: accountData.accessToken,
+          refreshToken: accountData.refreshToken,
+          expiresAt: accountData.expiresAt,
+          lastRefreshAt: accountData.lastRefreshAt,
+          subscriptionInfo: accountData.subscriptionInfo || ''
+        })
+        if (refreshTransition.status === -1) {
+          throw new Error('Account not found')
+        }
+        if (refreshTransition.status === 0) {
+          const stoppedError = new Error(
+            `Token refresh completed after account entered permanent ${refreshTransition.previousStatus} state`
+          )
+          stoppedError.code = 'ACCOUNT_PERMANENTLY_DISABLED_DURING_REFRESH'
+          throw stoppedError
+        }
 
         // 刷新成功后，如果有 user:profile 权限，尝试获取账号 profile 信息
         // 检查账户的 scopes 是否包含 user:profile（标准 OAuth 有，Setup Token 没有）
@@ -439,6 +489,11 @@ class ClaudeAccountService {
         throw new Error(`Token refresh failed with status: ${response.status}`)
       }
     } catch (error) {
+      if (error.code === 'ACCOUNT_PERMANENTLY_DISABLED_DURING_REFRESH') {
+        logger.warn(`⚠️ Ignoring stale token refresh success for account ${accountId}`)
+        throw error
+      }
+
       const nurtureConfig = await accountNurtureConfigService.getConfig()
       const classification = classifyClaudeOAuthError(error, null, {
         blockedPatterns: nurtureConfig.oauthErrorPatterns?.blocked,
@@ -462,6 +517,7 @@ class ClaudeAccountService {
                 classification.message || `OAuth token refresh failed: ${classification.kind}`,
               statusCode: classification.statusCode || 401,
               errorKind: classification.kind,
+              detectionSource: 'oauth_refresh',
               force: true
             })
           } catch (markError) {
@@ -618,6 +674,52 @@ class ClaudeAccountService {
     }
   }
 
+  async pinSuccessfulRequestIdentity(
+    accountId,
+    outboundHeaders,
+    detectionSource = 'successful_upstream_request'
+  ) {
+    const userAgent = userAgentPoolService.normalizeUserAgent(
+      outboundHeaders?.['User-Agent'] || outboundHeaders?.['user-agent'] || ''
+    )
+    const stainlessFingerprint = requestIdentityService.extractStainlessFingerprint(outboundHeaders)
+
+    if (
+      !userAgentPoolService.isClaudeCodeUserAgent(userAgent) ||
+      !requestIdentityService.hasCompleteStainlessFingerprint(stainlessFingerprint)
+    ) {
+      return { success: true, pinned: false, reason: 'incomplete_identity' }
+    }
+
+    await userAgentPoolService.recordUserAgent(userAgent, outboundHeaders)
+
+    const firstSeenAt = new Date().toISOString()
+    const result = await redis.pinClaudeAccountIdentityIfAbsent(accountId, {
+      userAgent,
+      userAgentPlatform: userAgentPoolService.detectPlatform(userAgent, stainlessFingerprint),
+      stainlessFingerprint: JSON.stringify(stainlessFingerprint),
+      detectionSource,
+      firstSeenAt
+    })
+
+    if (result.status === -1) {
+      throw new Error('Account not found')
+    }
+
+    if (result.status === 1) {
+      logger.success(`📌 Pinned successful outbound identity for Claude account ${accountId}`)
+    }
+
+    return {
+      success: true,
+      pinned: result.status === 1,
+      reason: result.status === 3 ? 'legacy_user_agent_conflict' : null,
+      userAgent: result.userAgent,
+      userAgentPlatform: userAgentPoolService.detectPlatform(userAgent, stainlessFingerprint),
+      detectionSource
+    }
+  }
+
   // 🎯 获取有效的访问token
   async getValidAccessToken(accountId) {
     try {
@@ -673,7 +775,12 @@ class ClaudeAccountService {
       // 更新最后使用时间和会话窗口
       accountData.lastUsedAt = new Date().toISOString()
       await this.updateSessionWindow(accountId, accountData)
-      await redis.setClaudeAccount(accountId, accountData)
+      await redis.client.hset(`claude:account:${accountId}`, {
+        lastUsedAt: accountData.lastUsedAt,
+        lastRequestTime: accountData.lastRequestTime || '',
+        sessionWindowStart: accountData.sessionWindowStart || '',
+        sessionWindowEnd: accountData.sessionWindowEnd || ''
+      })
 
       return accessToken
     } catch (error) {
@@ -737,6 +844,13 @@ class ClaudeAccountService {
             proxy: parsedProxy,
             status: account.status,
             errorMessage: account.errorMessage,
+            firstErrorAt: account.firstErrorAt || null,
+            lastErrorAt: account.lastErrorAt || null,
+            firstErrorDetectionSource: account.firstErrorDetectionSource || '',
+            errorDetectionSource: account.errorDetectionSource || '',
+            errorKind: account.errorKind || '',
+            errorCode: account.errorCode || '',
+            errorStatusCode: account.errorStatusCode || '',
             accountType: account.accountType || 'shared', // 兼容旧数据，默认为共享
             priority: parseInt(account.priority) || 50, // 兼容旧数据，默认优先级50
             platform: account.platform || 'claude', // 添加平台标识，用于前端区分
@@ -795,6 +909,16 @@ class ClaudeAccountService {
             fiveHourStoppedAt: account.fiveHourStoppedAt || null,
             // 添加统一User-Agent设置
             useUnifiedUserAgent: account.useUnifiedUserAgent === 'true', // 默认为false
+            userAgent: account.userAgent || '',
+            userAgentPlatform:
+              account.userAgentPlatform || userAgentPoolService.detectPlatform(account.userAgent),
+            userAgentMode: account.userAgentMode || '',
+            stainlessFingerprint:
+              typeof account.stainlessFingerprint === 'string'
+                ? this._safeParseJson(account.stainlessFingerprint) || {}
+                : account.stainlessFingerprint || {},
+            identityDetectionSource: account.identityDetectionSource || '',
+            identityFirstSeenAt: account.identityFirstSeenAt || '',
             // 添加统一客户端标识设置
             useUnifiedClientId: account.useUnifiedClientId === 'true', // 默认为false
             unifiedClientId: account.unifiedClientId || '', // 统一的客户端标识
@@ -907,6 +1031,7 @@ class ClaudeAccountService {
         'subscriptionInfo',
         'autoStopOnWarning',
         'useUnifiedUserAgent',
+        'userAgent',
         'useUnifiedClientId',
         'unifiedClientId',
         'subscriptionExpiresAt',
@@ -930,6 +1055,16 @@ class ClaudeAccountService {
             updatedData[field] = this._encryptSensitiveData(value)
           } else if (field === 'proxy') {
             updatedData[field] = value ? JSON.stringify(value) : ''
+          } else if (field === 'userAgent') {
+            const normalizedUserAgent = userAgentPoolService.normalizeUserAgent(value)
+            updatedData.userAgent = normalizedUserAgent || DEFAULT_CLAUDE_USER_AGENT
+            updatedData.userAgentPlatform = userAgentPoolService.detectPlatform(
+              updatedData.userAgent
+            )
+            updatedData.userAgentMode = 'pinned'
+            updatedData.stainlessFingerprint = ''
+            updatedData.identityDetectionSource = 'admin_manual'
+            updatedData.identityFirstSeenAt = new Date().toISOString()
           } else if (field === 'priority' || field === 'maxConcurrency') {
             updatedData[field] = value.toString()
           } else if (field === 'disableTempUnavailable') {
@@ -1044,7 +1179,10 @@ class ClaudeAccountService {
         }
       }
 
-      await redis.setClaudeAccount(accountId, updatedData)
+      await redis.setClaudeAccount(accountId, updatedData, {
+        allowPermanentOverride: Object.prototype.hasOwnProperty.call(updates, 'claudeAiOauth'),
+        allowIdentityOverride: Object.prototype.hasOwnProperty.call(updates, 'userAgent')
+      })
 
       if (shouldClearAutoStopFields) {
         const fieldsToRemove = [
@@ -1909,44 +2047,23 @@ class ClaudeAccountService {
         }
       }
 
-      const accountKey = `claude:account:${accountId}`
+      const transition = await redis.clearClaudeAccountRateLimitAtomic(accountId)
+      if (transition.status === -1) {
+        throw new Error('Account not found')
+      }
 
-      // 清除限流状态
-      const redisKey = `claude:account:${accountId}`
-      await redis.client.hdel(redisKey, 'rateLimitedAt', 'rateLimitStatus', 'rateLimitEndAt')
-      delete accountData.rateLimitedAt
-      delete accountData.rateLimitStatus
-      delete accountData.rateLimitEndAt // 清除限流结束时间
-
-      const hadAutoStop = accountData.rateLimitAutoStopped === 'true'
-
-      // 只恢复因限流而自动停止的账户
-      if (hadAutoStop && accountData.schedulable === 'false') {
-        accountData.schedulable = 'true'
+      if (transition.status === 1) {
         logger.info(`✅ Auto-resuming scheduling for account ${accountId} after rate limit cleared`)
+        logger.info(`📊 Account ${accountId} state after recovery: schedulable=true`)
+      } else if (transition.status === 2) {
         logger.info(
-          `📊 Account ${accountId} state after recovery: schedulable=${accountData.schedulable}`
+          `🔒 Cleared rate limit metadata for account ${accountId} without overriding permanent ${transition.currentStatus} state`
         )
       } else {
         logger.info(
           `ℹ️ Account ${accountId} did not need auto-resume: autoStopped=${accountData.rateLimitAutoStopped}, schedulable=${accountData.schedulable}`
         )
       }
-
-      if (hadAutoStop) {
-        await redis.client.hdel(redisKey, 'rateLimitAutoStopped')
-        delete accountData.rateLimitAutoStopped
-      }
-      await redis.setClaudeAccount(accountId, accountData)
-
-      // 显式删除Redis中的限流字段，避免旧标记阻止账号恢复调度
-      await redis.client.hdel(
-        accountKey,
-        'rateLimitedAt',
-        'rateLimitStatus',
-        'rateLimitEndAt',
-        'rateLimitAutoStopped'
-      )
 
       // 429 同时会写入临时冷却键。账号连接测试或自动恢复成功后必须一起清理，
       // 否则后台会显示已恢复，但调度器仍会在冷却期内跳过该账号。
@@ -2294,7 +2411,7 @@ class ClaudeAccountService {
           'Content-Type': 'application/json',
           Accept: 'application/json',
           'anthropic-beta': 'oauth-2025-04-20',
-          'User-Agent': 'claude-cli/2.0.53 (external, cli)',
+          'User-Agent': accountData.userAgent || 'claude-cli/2.0.53 (external, cli)',
           'Accept-Language': 'en-US,en;q=0.9'
         },
         timeout: 15000
@@ -2352,6 +2469,7 @@ class ClaudeAccountService {
             error.response?.data?.error?.message ||
             error.response?.data?.message ||
             'OAuth usage remained unauthorized after a successful token refresh',
+          detectionSource: 'oauth_usage_repeated_401',
           force: true
         })
         return null
@@ -2514,7 +2632,7 @@ class ClaudeAccountService {
           Authorization: `Bearer ${accessToken}`,
           'Content-Type': 'application/json',
           Accept: 'application/json',
-          'User-Agent': 'claude-cli/1.0.56 (external, cli)',
+          'User-Agent': accountData.userAgent || 'claude-cli/1.0.56 (external, cli)',
           'Accept-Language': 'en-US,en;q=0.9'
         },
         timeout: 15000
@@ -2578,7 +2696,14 @@ class ClaudeAccountService {
           accountData.email = this._encryptSensitiveData(profileData.account.email)
         }
 
-        await redis.setClaudeAccount(accountId, accountData)
+        const profileUpdates = {
+          subscriptionInfo: accountData.subscriptionInfo,
+          profileUpdatedAt: accountData.profileUpdatedAt
+        }
+        if (accountData.email) {
+          profileUpdates.email = accountData.email
+        }
+        await redis.client.hset(`claude:account:${accountId}`, profileUpdates)
 
         logger.success(
           `✅ Updated account profile for ${accountData.name} (${accountId}) - Type: ${subscriptionInfo.accountType}`
@@ -2786,18 +2911,30 @@ class ClaudeAccountService {
         throw new Error('Account not found')
       }
 
-      const alreadyMarked =
-        accountData.status === errorConfig.status && accountData.schedulable === 'false'
+      const statusCode = details.statusCode || (errorType === 'unauthorized' ? 401 : 403)
+      const errorMessage = details.errorMessage || errorConfig.errorMessage
+      const detectionSource = details.detectionSource || 'unknown'
+      const occurredAt = new Date().toISOString()
+      const transition = await redis.markClaudeAccountPermanentErrorAtomic(accountId, {
+        status: errorConfig.status,
+        errorMessage,
+        timestampField: errorConfig.timestampField,
+        occurredAt,
+        detectionSource,
+        force: details.force === true,
+        errorKind: details.errorKind || errorType,
+        errorCode: details.errorCode || errorConfig.errorCode,
+        statusCode
+      })
 
-      // disableAutoProtection 检查：跳过自动禁用，仅记录错误历史
-      if (
-        details.force !== true &&
-        (accountData.disableAutoProtection === true || accountData.disableAutoProtection === 'true')
-      ) {
+      if (transition.status === -1) {
+        throw new Error('Account not found')
+      }
+
+      if (transition.status === 2) {
         logger.info(
           `🛡️ Account ${accountData.name} (${accountId}) has auto-protection disabled, skipping ${errorType} marking`
         )
-        const statusCode = details.statusCode || (errorType === 'unauthorized' ? 401 : 403)
         upstreamErrorHelper
           .recordErrorHistory(
             accountId,
@@ -2809,16 +2946,7 @@ class ClaudeAccountService {
           .catch(() => {})
         return { success: true, skipped: true }
       }
-
-      // 更新账户状态
-      const updatedAccountData = { ...accountData }
-      updatedAccountData.status = errorConfig.status
-      updatedAccountData.schedulable = 'false' // 设置为不可调度
-      updatedAccountData.errorMessage = details.errorMessage || errorConfig.errorMessage
-      updatedAccountData[errorConfig.timestampField] = new Date().toISOString()
-
-      // 保存更新后的账户数据
-      await redis.setClaudeAccount(accountId, updatedAccountData)
+      const alreadyMarked = transition.status === 0
 
       // 如果有sessionHash，删除粘性会话映射
       if (sessionHash) {
@@ -2834,9 +2962,9 @@ class ClaudeAccountService {
         .recordErrorHistory(
           accountId,
           'claude-official',
-          details.statusCode || (errorType === 'unauthorized' ? 401 : 403),
+          statusCode,
           details.errorKind || errorType,
-          { errorBody: updatedAccountData.errorMessage }
+          { errorBody: errorMessage, detectionSource }
         )
         .catch(() => {})
 
@@ -2851,7 +2979,7 @@ class ClaudeAccountService {
             platform: 'claude-oauth',
             status: errorConfig.status,
             errorCode: details.errorCode || errorConfig.errorCode,
-            reason: updatedAccountData.errorMessage,
+            reason: errorMessage,
             timestamp: getISOStringWithTimezone(new Date())
           })
         } catch (webhookError) {
@@ -2863,7 +2991,7 @@ class ClaudeAccountService {
         )
       }
 
-      return { success: true }
+      return { success: true, transitioned: !alreadyMarked, detectionSource, occurredAt }
     } catch (error) {
       logger.error(`❌ Failed to mark account ${accountId} as ${errorType}:`, error)
       throw error
@@ -2917,6 +3045,13 @@ class ClaudeAccountService {
       delete updatedAccountData.unauthorizedAt
       delete updatedAccountData.blockedAt
       delete updatedAccountData.rateLimitedAt
+      delete updatedAccountData.firstErrorAt
+      delete updatedAccountData.lastErrorAt
+      delete updatedAccountData.firstErrorDetectionSource
+      delete updatedAccountData.errorDetectionSource
+      delete updatedAccountData.errorKind
+      delete updatedAccountData.errorCode
+      delete updatedAccountData.errorStatusCode
       delete updatedAccountData.rateLimitStatus
       delete updatedAccountData.rateLimitEndAt
       delete updatedAccountData.tempErrorAt
@@ -2929,8 +3064,10 @@ class ClaudeAccountService {
       }
       delete updatedAccountData.lastOverloadAt
 
-      // 保存更新后的账户数据
-      await redis.setClaudeAccount(accountId, updatedAccountData)
+      // 管理员显式重置是唯一允许解除永久下线状态的自动化入口。
+      await redis.setClaudeAccount(accountId, updatedAccountData, {
+        allowPermanentOverride: true
+      })
 
       // 显式从 Redis 中删除这些字段（因为 HSET 不会删除现有字段）
       const fieldsToDelete = [
@@ -2941,6 +3078,13 @@ class ClaudeAccountService {
         'rateLimitStatus',
         'rateLimitEndAt',
         'tempErrorAt',
+        'firstErrorAt',
+        'lastErrorAt',
+        'firstErrorDetectionSource',
+        'errorDetectionSource',
+        'errorKind',
+        'errorCode',
+        'errorStatusCode',
         'sessionWindowStart',
         'sessionWindowEnd',
         ...RATE_LIMITED_MODEL_FAMILIES.flatMap((family) => [
@@ -3018,23 +3162,10 @@ class ClaudeAccountService {
 
           // 如果临时错误状态超过指定时间，尝试重新激活
           if (minutesSinceTempError > TEMP_ERROR_RECOVERY_MINUTES) {
-            account.status = 'active' // 恢复为 active 状态
-            // 只恢复因临时错误而自动停止的账户
-            if (account.tempErrorAutoStopped === 'true') {
-              account.schedulable = 'true' // 恢复为可调度
-              delete account.tempErrorAutoStopped
+            const transition = await redis.recoverClaudeAccountTempErrorAtomic(account.id)
+            if (transition.status !== 1) {
+              continue
             }
-            delete account.errorMessage
-            delete account.tempErrorAt
-            await redis.setClaudeAccount(account.id, account)
-
-            // 显式从 Redis 中删除这些字段（因为 HSET 不会删除现有字段）
-            await redis.client.hdel(
-              `claude:account:${account.id}`,
-              'errorMessage',
-              'tempErrorAt',
-              'tempErrorAutoStopped'
-            )
 
             // 同时清除500错误计数
             await this.clearInternalErrors(account.id)
@@ -3151,25 +3282,10 @@ class ClaudeAccountService {
               const minutesSince = (now - tempErrorAt) / (1000 * 60)
 
               if (minutesSince >= 5) {
-                // 恢复账户
-                account.status = 'active'
-                // 只恢复因临时错误而自动停止的账户
-                if (account.tempErrorAutoStopped === 'true') {
-                  account.schedulable = 'true'
-                  delete account.tempErrorAutoStopped
+                const transition = await redis.recoverClaudeAccountTempErrorAtomic(accountId)
+                if (transition.status !== 1) {
+                  return
                 }
-                delete account.errorMessage
-                delete account.tempErrorAt
-
-                await redis.setClaudeAccount(accountId, account)
-
-                // 显式删除 Redis 字段
-                await redis.client.hdel(
-                  `claude:account:${accountId}`,
-                  'errorMessage',
-                  'tempErrorAt',
-                  'tempErrorAutoStopped'
-                )
 
                 // 清除 500 错误计数
                 await this.clearInternalErrors(accountId)
@@ -3249,76 +3365,55 @@ class ClaudeAccountService {
       const now = new Date()
       const nowIso = now.toISOString()
 
-      // 更新会话窗口状态
-      accountData.sessionWindowStatus = status
-      accountData.sessionWindowStatusUpdatedAt = nowIso
+      const windowIdentifier =
+        accountData.sessionWindowEnd || accountData.sessionWindowStart || 'unknown'
+      const transition = await redis.updateClaudeAccountSessionWindowAtomic(accountId, {
+        status,
+        updatedAt: nowIso,
+        windowIdentifier,
+        maxWarningsPerWindow: this.maxFiveHourWarningsPerWindow,
+        stoppedReason: '5小时使用量接近限制，已自动停止调度'
+      })
 
-      // 如果状态是 allowed_warning 且账户设置了自动停止调度
-      if (status === 'allowed_warning' && accountData.autoStopOnWarning === 'true') {
-        const alreadyAutoStopped =
-          accountData.schedulable === 'false' && accountData.fiveHourAutoStopped === 'true'
+      if (transition.status === -1) {
+        logger.warn(`Account not found during session status update: ${accountId}`)
+        return
+      }
 
-        if (!alreadyAutoStopped) {
-          const windowIdentifier =
-            accountData.sessionWindowEnd || accountData.sessionWindowStart || 'unknown'
-
-          let warningCount = 0
-          if (accountData.fiveHourWarningWindow === windowIdentifier) {
-            const parsedCount = parseInt(accountData.fiveHourWarningCount || '0', 10)
-            warningCount = Number.isNaN(parsedCount) ? 0 : parsedCount
-          }
-
-          const maxWarningsPerWindow = this.maxFiveHourWarningsPerWindow
-
-          logger.warn(
-            `⚠️ Account ${accountData.name} (${accountId}) approaching 5h limit, auto-stopping scheduling`
-          )
-          accountData.schedulable = 'false'
-          // 使用独立的5小时限制自动停止标记
-          accountData.fiveHourAutoStopped = 'true'
-          accountData.fiveHourStoppedAt = nowIso
-          // 设置停止原因，供前端显示
-          accountData.stoppedReason = '5小时使用量接近限制，已自动停止调度'
-
-          const canSendWarning = warningCount < maxWarningsPerWindow
-          let updatedWarningCount = warningCount
-
-          accountData.fiveHourWarningWindow = windowIdentifier
-          if (canSendWarning) {
-            updatedWarningCount += 1
-            accountData.fiveHourWarningLastSentAt = nowIso
-          }
-          accountData.fiveHourWarningCount = updatedWarningCount.toString()
-
-          if (canSendWarning) {
-            // 发送Webhook通知
-            try {
-              const webhookNotifier = require('../../utils/webhookNotifier')
-              await webhookNotifier.sendAccountAnomalyNotification({
-                accountId,
-                accountName: accountData.name || 'Claude Account',
-                platform: 'claude',
-                status: 'warning',
-                errorCode: 'CLAUDE_5H_LIMIT_WARNING',
-                reason: '5小时使用量接近限制，已自动停止调度',
-                timestamp: getISOStringWithTimezone(now)
-              })
-            } catch (webhookError) {
-              logger.error('Failed to send webhook notification:', webhookError)
-            }
-          } else {
-            logger.debug(
-              `⚠️ Account ${accountData.name} (${accountId}) reached max ${maxWarningsPerWindow} warning notifications for current 5h window, skipping webhook`
-            )
+      if (transition.status === 4) {
+        logger.warn(
+          `⚠️ Account ${accountData.name} (${accountId}) approaching 5h limit, auto-stopping scheduling`
+        )
+        if (transition.shouldNotify) {
+          // 发送Webhook通知
+          try {
+            const webhookNotifier = require('../../utils/webhookNotifier')
+            await webhookNotifier.sendAccountAnomalyNotification({
+              accountId,
+              accountName: accountData.name || 'Claude Account',
+              platform: 'claude',
+              status: 'warning',
+              errorCode: 'CLAUDE_5H_LIMIT_WARNING',
+              reason: '5小时使用量接近限制，已自动停止调度',
+              timestamp: getISOStringWithTimezone(now)
+            })
+          } catch (webhookError) {
+            logger.error('Failed to send webhook notification:', webhookError)
           }
         } else {
           logger.debug(
-            `⚠️ Account ${accountData.name} (${accountId}) already auto-stopped for 5h limit, skipping duplicate warning`
+            `⚠️ Account ${accountData.name} (${accountId}) reached max ${this.maxFiveHourWarningsPerWindow} warning notifications for current 5h window, skipping webhook`
           )
         }
+      } else if (transition.status === 2) {
+        logger.debug(
+          `🔒 Session warning recorded without overriding permanent account state: ${accountId}`
+        )
+      } else if (transition.status === 3) {
+        logger.debug(
+          `⚠️ Account ${accountData.name} (${accountId}) already auto-stopped for 5h limit, skipping duplicate warning`
+        )
       }
-
-      await redis.setClaudeAccount(accountId, accountData)
 
       logger.info(
         `📊 Updated session window status for account ${accountData.name} (${accountId}): ${status}`

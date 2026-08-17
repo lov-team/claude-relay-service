@@ -356,7 +356,8 @@ async function handleMessagesRequest(req, res) {
           req.apiKey,
           sessionHash,
           requestedModel,
-          forcedAccount
+          forcedAccount,
+          req.headers
         )
         ;({ accountId, accountType } = selection)
       } catch (error) {
@@ -1070,7 +1071,8 @@ async function handleMessagesRequest(req, res) {
           req.apiKey,
           sessionHash,
           requestedModel,
-          forcedAccountNonStream
+          forcedAccountNonStream,
+          req.headers
         )
         ;({ accountId, accountType } = selection)
       } catch (error) {
@@ -1753,7 +1755,9 @@ router.post('/v1/messages/count_tokens', authenticateApiKey, async (req, res) =>
     const { accountId, accountType } = await unifiedClaudeScheduler.selectAccountForApiKey(
       req.apiKey,
       sessionHash,
-      requestedModel
+      requestedModel,
+      null,
+      req.headers
     )
 
     if (accountType === 'ccr') {

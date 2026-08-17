@@ -1878,49 +1878,53 @@
               </label>
             </div>
 
-            <!-- Claude User-Agent 版本配置 -->
-            <div v-if="form.platform === 'claude'" class="mt-4">
-              <label class="flex items-start">
-                <input
-                  v-model="form.useUnifiedUserAgent"
-                  class="mt-1 text-blue-600 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-700"
-                  type="checkbox"
-                />
-                <div class="ml-3">
-                  <span class="text-sm font-medium text-gray-700 dark:text-gray-300">
-                    使用统一 Claude Code 版本
-                  </span>
-                  <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                    开启后将使用从真实 Claude Code 客户端捕获的统一 User-Agent，提高兼容性
-                  </p>
-                  <div v-if="unifiedUserAgent" class="mt-1">
-                    <div class="flex items-center justify-between">
-                      <p class="text-xs text-green-600 dark:text-green-400">
-                        💡 当前统一版本：{{ unifiedUserAgent }}
-                      </p>
-                      <button
-                        class="ml-2 text-xs text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300"
-                        :disabled="clearingCache"
-                        type="button"
-                        @click="clearUnifiedCache"
-                      >
-                        <i v-if="!clearingCache" class="fas fa-trash-alt mr-1"></i>
-                        <div v-else class="loading-spinner mr-1"></div>
-                        {{ clearingCache ? '清除中...' : '清除缓存' }}
-                      </button>
-                    </div>
-                  </div>
-                  <div v-else class="mt-1">
-                    <p class="text-xs text-gray-500 dark:text-gray-400">
-                      ⏳ 等待从 Claude Code 客户端捕获 User-Agent
-                    </p>
-                    <p class="mt-1 text-xs text-gray-400 dark:text-gray-500">
-                      💡 提示：如果长时间未能捕获，请确认有 Claude Code 客户端正在使用此账户，
-                      或联系开发者检查 User-Agent 格式是否发生变化
-                    </p>
-                  </div>
+            <!-- Claude 固定 User-Agent 配置 -->
+            <div
+              v-if="form.platform === 'claude'"
+              class="mt-4 rounded-lg border border-gray-200 bg-gray-50 p-4 dark:border-gray-700 dark:bg-gray-800/50"
+            >
+              <div class="mb-2 flex items-center justify-between gap-3">
+                <label class="text-sm font-semibold text-gray-700 dark:text-gray-300">
+                  账号固定 User-Agent
+                </label>
+                <div class="flex gap-2">
+                  <button
+                    class="text-xs text-blue-600 hover:text-blue-800 disabled:opacity-50 dark:text-blue-400"
+                    :disabled="userAgentPoolLoading || userAgentPool.length === 0"
+                    type="button"
+                    @click="useLatestPoolUserAgent"
+                  >
+                    使用池中最新
+                  </button>
+                  <button
+                    class="text-xs text-gray-600 hover:text-gray-800 dark:text-gray-400"
+                    type="button"
+                    @click="useDefaultClaudeUserAgent"
+                  >
+                    恢复默认
+                  </button>
                 </div>
-              </label>
+              </div>
+              <input
+                v-model="form.userAgent"
+                class="form-input w-full border-gray-300 font-mono text-xs dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200"
+                list="claude-user-agent-pool-create"
+                placeholder="留空则在创建时自动绑定 UA 池中最新值"
+                type="text"
+                @input="form.useUnifiedUserAgent = false"
+              />
+              <datalist id="claude-user-agent-pool-create">
+                <option
+                  v-for="item in userAgentPool"
+                  :key="`${item.userAgent}-${item.lastSeenAt}`"
+                  :label="`${platformLabel(item.platform)} · ${formatUserAgentSeenAt(item.lastSeenAt)}`"
+                  :value="item.userAgent"
+                />
+              </datalist>
+              <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                当前平台：{{ platformLabel(currentUserAgentPlatform) }}。保存后该账号持续使用此 UA；
+                也可直接输入任意 UA。
+              </p>
             </div>
 
             <!-- Claude 统一客户端标识配置 -->
@@ -2958,49 +2962,54 @@
             </label>
           </div>
 
-          <!-- Claude User-Agent 版本配置（编辑模式） -->
-          <div v-if="form.platform === 'claude'" class="mt-4">
-            <label class="flex items-start">
-              <input
-                v-model="form.useUnifiedUserAgent"
-                class="mt-1 text-blue-600 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-700"
-                type="checkbox"
-              />
-              <div class="ml-3">
-                <span class="text-sm font-medium text-gray-700 dark:text-gray-300">
-                  使用统一 Claude Code 版本
-                </span>
-                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                  开启后将使用从真实 Claude Code 客户端捕获的统一 User-Agent，提高兼容性
-                </p>
-                <div v-if="unifiedUserAgent" class="mt-1">
-                  <div class="flex items-center justify-between">
-                    <p class="text-xs text-green-600 dark:text-green-400">
-                      💡 当前统一版本：{{ unifiedUserAgent }}
-                    </p>
-                    <button
-                      class="ml-2 text-xs text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300"
-                      :disabled="clearingCache"
-                      type="button"
-                      @click="clearUnifiedCache"
-                    >
-                      <i v-if="!clearingCache" class="fas fa-trash-alt mr-1"></i>
-                      <div v-else class="loading-spinner mr-1"></div>
-                      {{ clearingCache ? '清除中...' : '清除缓存' }}
-                    </button>
-                  </div>
-                </div>
-                <div v-else class="mt-1">
-                  <p class="text-xs text-gray-500 dark:text-gray-400">
-                    ⏳ 等待从 Claude Code 客户端捕获 User-Agent
-                  </p>
-                  <p class="mt-1 text-xs text-gray-400 dark:text-gray-500">
-                    💡 提示：如果长时间未能捕获，请确认有 Claude Code 客户端正在使用此账户，
-                    或联系开发者检查 User-Agent 格式是否发生变化
-                  </p>
-                </div>
+          <!-- Claude 固定 User-Agent 配置（编辑模式） -->
+          <div
+            v-if="form.platform === 'claude'"
+            class="mt-4 rounded-lg border border-gray-200 bg-gray-50 p-4 dark:border-gray-700 dark:bg-gray-800/50"
+          >
+            <div class="mb-2 flex items-center justify-between gap-3">
+              <label class="text-sm font-semibold text-gray-700 dark:text-gray-300">
+                账号固定 User-Agent
+              </label>
+              <div class="flex gap-2">
+                <button
+                  class="text-xs text-blue-600 hover:text-blue-800 disabled:opacity-50 dark:text-blue-400"
+                  :disabled="userAgentPoolLoading || userAgentPool.length === 0"
+                  type="button"
+                  @click="useLatestPoolUserAgent"
+                >
+                  使用池中最新
+                </button>
+                <button
+                  class="text-xs text-gray-600 hover:text-gray-800 dark:text-gray-400"
+                  type="button"
+                  @click="useDefaultClaudeUserAgent"
+                >
+                  恢复默认
+                </button>
               </div>
-            </label>
+            </div>
+            <input
+              v-model="form.userAgent"
+              class="form-input w-full border-gray-300 font-mono text-xs dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200"
+              list="claude-user-agent-pool-edit"
+              placeholder="选择池中 UA 或直接输入"
+              type="text"
+              @input="form.useUnifiedUserAgent = false"
+            />
+            <datalist id="claude-user-agent-pool-edit">
+              <option
+                v-for="item in userAgentPool"
+                :key="`${item.userAgent}-${item.lastSeenAt}`"
+                :label="`${platformLabel(item.platform)} · ${formatUserAgentSeenAt(item.lastSeenAt)}`"
+                :value="item.userAgent"
+              />
+            </datalist>
+            <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+              当前平台：{{
+                platformLabel(currentUserAgentPlatform)
+              }}。保存后立即切换，已有会话亲和关系不变。
+            </p>
           </div>
 
           <!-- Claude 统一客户端标识配置（编辑模式） -->
@@ -4194,9 +4203,10 @@ const parsedSessionKeyCount = computed(() => {
     .filter((s) => s.length > 0).length
 })
 
-// Claude Code 统一 User-Agent 信息
-const unifiedUserAgent = ref('')
-const clearingCache = ref(false)
+// Claude 账号固定 User-Agent 池
+const userAgentPool = ref([])
+const userAgentPoolLoading = ref(false)
+const defaultClaudeUserAgent = ref('claude-cli/2.1.228 (external, cli)')
 // 客户端标识编辑状态（已废弃，不再需要编辑功能）
 // const editingClientId = ref(false)
 
@@ -4464,6 +4474,25 @@ const form = ref({
   })(),
   expiresAt: props.account?.expiresAt || null
 })
+
+const detectUserAgentPlatform = (userAgent) => {
+  const normalized = String(userAgent || '').toLowerCase()
+  if (/windows|win32|win64|windows nt/.test(normalized)) return 'windows'
+  if (/macintosh|mac os x|macos|darwin/.test(normalized)) return 'mac'
+  if (/linux|x11|ubuntu|debian|fedora|centos/.test(normalized)) return 'linux'
+  return 'unknown'
+}
+
+const currentUserAgentPlatform = computed(() => detectUserAgentPlatform(form.value.userAgent))
+
+const platformLabel = (platform) =>
+  ({ windows: 'Windows', mac: 'macOS', linux: 'Linux', unknown: '未知平台' })[platform] ||
+  '未知平台'
+
+const formatUserAgentSeenAt = (timestamp) => {
+  if (!timestamp) return '时间未知'
+  return new Date(timestamp).toLocaleString('zh-CN')
+}
 
 const isClaudeProOrMaxSubscription = computed(
   () => form.value.subscriptionType === 'claude_pro' || form.value.subscriptionType === 'claude_max'
@@ -5053,6 +5082,7 @@ const buildClaudeAccountData = (tokenInfo, accountName, clientId) => {
     autoStopOnWarning: form.value.autoStopOnWarning || false,
     interceptWarmup: form.value.interceptWarmup || false,
     useUnifiedUserAgent: form.value.useUnifiedUserAgent || false,
+    userAgent: form.value.userAgent || '',
     useUnifiedClientId: form.value.useUnifiedClientId || false,
     unifiedClientId: clientId,
     maxConcurrency: form.value.serialQueueEnabled ? 1 : 0,
@@ -5191,6 +5221,7 @@ const handleOAuthSuccess = async (tokenInfoOrList) => {
       data.priority = form.value.priority || 50
       data.autoStopOnWarning = form.value.autoStopOnWarning || false
       data.useUnifiedUserAgent = form.value.useUnifiedUserAgent || false
+      data.userAgent = form.value.userAgent || ''
       data.useUnifiedClientId = form.value.useUnifiedClientId || false
       data.unifiedClientId = form.value.unifiedClientId || ''
       data.maxConcurrency = form.value.serialQueueEnabled ? 1 : 0
@@ -5530,6 +5561,7 @@ const createAccount = async () => {
       data.priority = form.value.priority || 50
       data.autoStopOnWarning = form.value.autoStopOnWarning || false
       data.useUnifiedUserAgent = form.value.useUnifiedUserAgent || false
+      data.userAgent = form.value.userAgent || ''
       data.useUnifiedClientId = form.value.useUnifiedClientId || false
       data.unifiedClientId = form.value.unifiedClientId || ''
       data.maxConcurrency = form.value.serialQueueEnabled ? 1 : 0
@@ -5936,6 +5968,10 @@ const updateAccount = async () => {
       data.autoStopOnWarning = form.value.autoStopOnWarning || false
       data.interceptWarmup = form.value.interceptWarmup || false
       data.useUnifiedUserAgent = form.value.useUnifiedUserAgent || false
+      // 存量空 UA 账号保持旧的动态透传/重建逻辑；仅在已有或明确选择固定 UA 时提交。
+      if (form.value.userAgent || props.account?.userAgent) {
+        data.userAgent = form.value.userAgent || ''
+      }
       data.useUnifiedClientId = form.value.useUnifiedClientId || false
       data.unifiedClientId = form.value.unifiedClientId || ''
       data.maxConcurrency = form.value.serialQueueEnabled ? 1 : 0
@@ -6700,38 +6736,31 @@ watch(
   { immediate: true }
 )
 
-// 获取统一 User-Agent 信息
-const fetchUnifiedUserAgent = async () => {
+const fetchUserAgentPool = async () => {
+  if (form.value.platform !== 'claude') return
+  userAgentPoolLoading.value = true
   try {
-    const response = await httpApis.getClaudeCodeVersionApi()
-    if (response.success && response.userAgent) {
-      unifiedUserAgent.value = response.userAgent
-    } else {
-      unifiedUserAgent.value = ''
-    }
+    const response = await httpApis.getClaudeUserAgentPoolApi()
+    userAgentPool.value = response.data?.items || []
+    defaultClaudeUserAgent.value =
+      response.data?.defaults?.claude || 'claude-cli/2.1.228 (external, cli)'
   } catch (error) {
-    // Failed to fetch unified User-Agent
-    unifiedUserAgent.value = ''
+    userAgentPool.value = []
+  } finally {
+    userAgentPoolLoading.value = false
   }
 }
 
-// 清除统一 User-Agent 缓存
-const clearUnifiedCache = async () => {
-  clearingCache.value = true
-  try {
-    const response = await httpApis.clearClaudeCodeVersionApi()
-    if (response.success) {
-      unifiedUserAgent.value = ''
-      showToast('统一User-Agent缓存已清除', 'success')
-    } else {
-      showToast('清除缓存失败', 'error')
-    }
-  } catch (error) {
-    // Failed to clear unified User-Agent cache
-    showToast('清除缓存失败：' + (error.message || '未知错误'), 'error')
-  } finally {
-    clearingCache.value = false
+const useLatestPoolUserAgent = () => {
+  if (userAgentPool.value.length > 0) {
+    form.value.userAgent = userAgentPool.value[0].userAgent
+    form.value.useUnifiedUserAgent = false
   }
+}
+
+const useDefaultClaudeUserAgent = () => {
+  form.value.userAgent = defaultClaudeUserAgent.value
+  form.value.useUnifiedUserAgent = false
 }
 
 // 生成客户端标识
@@ -6815,7 +6844,7 @@ const formatExpireDate = (dateString) => {
   })
 }
 
-// 组件挂载时获取统一 User-Agent 信息
+// 组件挂载时获取 User-Agent 池
 onMounted(() => {
   // 初始化平台分组
   platformGroup.value = determinePlatformGroup(form.value.platform)
@@ -6828,8 +6857,7 @@ onMounted(() => {
   // 加载模型列表
   loadCommonModels()
 
-  // 获取Claude Code统一User-Agent信息
-  fetchUnifiedUserAgent()
+  fetchUserAgentPool()
   // 如果是编辑模式且是Claude Console账户，加载使用情况
   if (isEdit.value && props.account?.platform === 'claude-console') {
     loadAccountUsage()
@@ -6839,12 +6867,12 @@ onMounted(() => {
   }
 })
 
-// 监听平台变化，当切换到Claude平台时获取统一User-Agent信息
+// 监听平台变化，当切换到Claude平台时获取 User-Agent 池
 watch(
   () => form.value.platform,
   (newPlatform) => {
     if (newPlatform === 'claude') {
-      fetchUnifiedUserAgent()
+      fetchUserAgentPool()
     }
   }
 )

@@ -14,6 +14,7 @@ const {
 const { isSchedulable, sortAccountsByPriority } = require('../../utils/commonHelper')
 const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
 const config = require('../../../config/config')
+const userAgentPoolService = require('../userAgentPoolService')
 
 /**
  * Check if account is Pro (not Max)
@@ -44,6 +45,20 @@ function isProAccount(info) {
 class UnifiedClaudeScheduler {
   constructor() {
     this.SESSION_MAPPING_PREFIX = 'unified_claude_session_mapping:'
+  }
+
+  _preferSamePlatform(accounts, requestPlatform) {
+    if (!Array.isArray(accounts) || requestPlatform === 'unknown') {
+      return accounts
+    }
+
+    const matchedAccounts = accounts.filter((account) => {
+      const accountPlatform =
+        account.userAgentPlatform || userAgentPoolService.detectPlatform(account.userAgent)
+      return accountPlatform === requestPlatform
+    })
+
+    return matchedAccounts.length > 0 ? matchedAccounts : accounts
   }
 
   async isNurtureBlocked(accountId) {
@@ -208,9 +223,21 @@ class UnifiedClaudeScheduler {
     apiKeyData,
     sessionHash = null,
     requestedModel = null,
-    forcedAccount = null
+    forcedAccount = null,
+    clientIdentity = ''
   ) {
     try {
+      const clientHeaders =
+        clientIdentity && typeof clientIdentity === 'object'
+          ? clientIdentity
+          : { 'user-agent': clientIdentity }
+      const clientUserAgent =
+        clientHeaders['user-agent'] ||
+        clientHeaders['User-Agent'] ||
+        clientHeaders['USER-AGENT'] ||
+        ''
+      // 调度阶段只读取请求平台；UA 池仅在上游成功后写入，避免失败请求污染可分配身份。
+      const requestPlatform = userAgentPoolService.detectPlatform(clientUserAgent, clientHeaders)
       // 🔒 如果有强制绑定的账户（全局会话绑定），仅 claude-official 类型受影响
       if (forcedAccount && forcedAccount.accountId && forcedAccount.accountType) {
         // ⚠️ 只有 claude-official 类型账户受全局会话绑定限制
@@ -281,7 +308,8 @@ class UnifiedClaudeScheduler {
             groupId,
             sessionHash,
             effectiveModel,
-            vendor === 'ccr'
+            vendor === 'ccr',
+            requestPlatform
           )
         }
 
@@ -513,7 +541,8 @@ class UnifiedClaudeScheduler {
       }
 
       // 按优先级和最后使用时间排序
-      const sortedAccounts = sortAccountsByPriority(availableAccounts)
+      const platformAccounts = this._preferSamePlatform(availableAccounts, requestPlatform)
+      const sortedAccounts = sortAccountsByPriority(platformAccounts)
 
       // 选择第一个账户
       const selectedAccount = sortedAccounts[0]
@@ -1600,7 +1629,8 @@ class UnifiedClaudeScheduler {
     groupId,
     sessionHash = null,
     requestedModel = null,
-    allowCcr = false
+    allowCcr = false,
+    requestPlatform = 'unknown'
   ) {
     try {
       // 获取分组信息
@@ -1790,7 +1820,8 @@ class UnifiedClaudeScheduler {
       }
 
       // 使用现有的优先级排序逻辑
-      const sortedAccounts = sortAccountsByPriority(availableAccounts)
+      const platformAccounts = this._preferSamePlatform(availableAccounts, requestPlatform)
+      const sortedAccounts = sortAccountsByPriority(platformAccounts)
 
       // 选择第一个账户
       const selectedAccount = sortedAccounts[0]

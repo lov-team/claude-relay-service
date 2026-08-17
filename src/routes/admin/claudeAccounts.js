@@ -24,6 +24,8 @@ const {
   normalizeOptionalNonNegativeInteger
 } = require('../../utils/tempUnavailablePolicy')
 const { formatAccountExpiry, mapExpiryField } = require('./utils')
+const userAgentPoolService = require('../../services/userAgentPoolService')
+const { DEFAULT_CLAUDE_USER_AGENT } = userAgentPoolService
 
 const TEMP_UNAVAILABLE_TTL_FIELDS = ['tempUnavailable503TtlSeconds', 'tempUnavailable5xxTtlSeconds']
 
@@ -50,6 +52,20 @@ const normalizeTempUnavailablePolicyPayload = (payload, options = {}) => {
 
   return { normalized }
 }
+
+router.get('/claude-user-agent-pool', authenticateAdmin, async (req, res) => {
+  const items = await userAgentPoolService.listRecentUserAgents(req.query.limit)
+  return res.json({
+    success: true,
+    data: {
+      items,
+      defaults: {
+        claude: DEFAULT_CLAUDE_USER_AGENT,
+        console: DEFAULT_CONSOLE_USER_AGENT
+      }
+    }
+  })
+})
 
 // 生成OAuth授权URL
 router.post('/claude-accounts/generate-auth-url', authenticateAdmin, async (req, res) => {
@@ -638,6 +654,7 @@ router.post('/claude-accounts', authenticateAdmin, async (req, res) => {
       groupIds,
       autoStopOnWarning,
       useUnifiedUserAgent,
+      userAgent,
       useUnifiedClientId,
       unifiedClientId,
       expiresAt,
@@ -698,6 +715,7 @@ router.post('/claude-accounts', authenticateAdmin, async (req, res) => {
       priority: priority || 50, // 默认优先级为50
       autoStopOnWarning: autoStopOnWarning === true, // 默认为false
       useUnifiedUserAgent: useUnifiedUserAgent === true, // 默认为false
+      userAgent: typeof userAgent === 'string' ? userAgent : '',
       useUnifiedClientId: useUnifiedClientId === true, // 默认为false
       unifiedClientId: unifiedClientId || '', // 统一的客户端标识
       expiresAt: expiresAt || null, // 账户订阅到期时间

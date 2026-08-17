@@ -6,6 +6,8 @@ const logger = require('../../utils/logger')
 const config = require('../../../config/config')
 const LRUCache = require('../../utils/lruCache')
 const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
+const userAgentPoolService = require('../userAgentPoolService')
+const { DEFAULT_CONSOLE_USER_AGENT } = require('../userAgentPoolService')
 
 class ClaudeConsoleAccountService {
   constructor() {
@@ -60,7 +62,7 @@ class ClaudeConsoleAccountService {
       apiKey = '',
       priority = 50, // 默认优先级50（1-100）
       supportedModels = [], // 支持的模型列表或映射表，空数组/对象表示支持所有
-      userAgent = 'claude-cli/1.0.69 (external, cli)',
+      userAgent = '',
       rateLimitDuration = 60, // 限流时间（分钟）
       proxy = null,
       isActive = true,
@@ -79,6 +81,17 @@ class ClaudeConsoleAccountService {
     }
 
     const accountId = uuidv4()
+    const normalizedUserAgent = userAgentPoolService.normalizeUserAgent(userAgent)
+    const assignedUserAgent = normalizedUserAgent
+      ? {
+          userAgent: normalizedUserAgent,
+          platform: userAgentPoolService.detectPlatform(normalizedUserAgent),
+          stainlessFingerprint: {},
+          detectionSource: 'admin_manual',
+          lastSeenAt: Date.now()
+        }
+      : await userAgentPoolService.assignLatestUserAgent(DEFAULT_CONSOLE_USER_AGENT)
+    const identityFirstSeenAt = new Date(assignedUserAgent.lastSeenAt || Date.now()).toISOString()
 
     // 处理 supportedModels，确保向后兼容
     const processedModels = this._processModelMapping(supportedModels)
@@ -92,7 +105,12 @@ class ClaudeConsoleAccountService {
       apiKey: this._encryptSensitiveData(apiKey),
       priority: priority.toString(),
       supportedModels: JSON.stringify(processedModels),
-      userAgent,
+      userAgent: assignedUserAgent.userAgent,
+      userAgentPlatform: assignedUserAgent.platform,
+      userAgentMode: 'pinned',
+      stainlessFingerprint: JSON.stringify(assignedUserAgent.stainlessFingerprint || {}),
+      identityDetectionSource: assignedUserAgent.detectionSource,
+      identityFirstSeenAt,
       rateLimitDuration: rateLimitDuration.toString(),
       proxy: proxy ? JSON.stringify(proxy) : '',
       isActive: isActive.toString(),
@@ -146,7 +164,12 @@ class ClaudeConsoleAccountService {
       apiUrl,
       priority,
       supportedModels,
-      userAgent,
+      userAgent: assignedUserAgent.userAgent,
+      userAgentPlatform: assignedUserAgent.platform,
+      userAgentMode: 'pinned',
+      stainlessFingerprint: assignedUserAgent.stainlessFingerprint || {},
+      identityDetectionSource: assignedUserAgent.detectionSource,
+      identityFirstSeenAt,
       rateLimitDuration,
       isActive,
       proxy,
@@ -203,6 +226,19 @@ class ClaudeConsoleAccountService {
             priority: parseInt(accountData.priority) || 50,
             supportedModels: JSON.parse(accountData.supportedModels || '[]'),
             userAgent: accountData.userAgent,
+            userAgentPlatform:
+              accountData.userAgentPlatform ||
+              userAgentPoolService.detectPlatform(accountData.userAgent),
+            userAgentMode: accountData.userAgentMode || '',
+            stainlessFingerprint: (() => {
+              try {
+                return JSON.parse(accountData.stainlessFingerprint || '{}')
+              } catch (error) {
+                return {}
+              }
+            })(),
+            identityDetectionSource: accountData.identityDetectionSource || '',
+            identityFirstSeenAt: accountData.identityFirstSeenAt || '',
             rateLimitDuration: Number.isNaN(parseInt(accountData.rateLimitDuration))
               ? 60
               : parseInt(accountData.rateLimitDuration),
@@ -336,7 +372,23 @@ class ClaudeConsoleAccountService {
         updatedData.supportedModels = JSON.stringify(processedModels)
       }
       if (updates.userAgent !== undefined) {
-        updatedData.userAgent = updates.userAgent
+        const normalizedUserAgent = userAgentPoolService.normalizeUserAgent(updates.userAgent)
+        const assignedUserAgent = normalizedUserAgent
+          ? {
+              userAgent: normalizedUserAgent,
+              platform: userAgentPoolService.detectPlatform(normalizedUserAgent)
+            }
+          : await userAgentPoolService.assignLatestUserAgent(DEFAULT_CONSOLE_USER_AGENT)
+        updatedData.userAgent = assignedUserAgent.userAgent
+        updatedData.userAgentPlatform = assignedUserAgent.platform
+        updatedData.userAgentMode = 'pinned'
+        updatedData.stainlessFingerprint = JSON.stringify(
+          assignedUserAgent.stainlessFingerprint || {}
+        )
+        updatedData.identityDetectionSource = assignedUserAgent.detectionSource || 'admin_manual'
+        updatedData.identityFirstSeenAt = new Date(
+          assignedUserAgent.lastSeenAt || Date.now()
+        ).toISOString()
       }
       if (updates.rateLimitDuration !== undefined) {
         updatedData.rateLimitDuration = updates.rateLimitDuration.toString()

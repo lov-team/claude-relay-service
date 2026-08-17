@@ -2378,16 +2378,384 @@ class RedisClient {
   }
 
   // 🏢 Claude 账户管理
-  async setClaudeAccount(accountId, accountData) {
+  async setClaudeAccount(accountId, accountData, options = {}) {
     const key = `claude:account:${accountId}`
-    await this.client.hset(key, accountData)
+    const client = this.getClientSafe()
+    const entries = Object.entries(accountData || {}).flatMap(([field, value]) => [
+      field,
+      value === null || value === undefined ? '' : String(value)
+    ])
+    const script = `
+      local protectPermanent = ARGV[1] ~= 'true'
+      local protectIdentity = ARGV[2] ~= 'true'
+      local currentStatus = redis.call('HGET', KEYS[1], 'status') or ''
+      local currentSchedulable = redis.call('HGET', KEYS[1], 'schedulable') or ''
+      local currentIdentityMode = redis.call('HGET', KEYS[1], 'userAgentMode') or ''
+      local permanent = protectPermanent and
+        (currentStatus == 'blocked' or currentStatus == 'unauthorized') and
+        currentSchedulable == 'false'
+      local pinnedIdentity = protectIdentity and currentIdentityMode == 'pinned'
+
+      local permanentFields = {
+        status = true,
+        schedulable = true,
+        errorMessage = true,
+        unauthorizedAt = true,
+        blockedAt = true,
+        firstErrorAt = true,
+        lastErrorAt = true,
+        firstErrorDetectionSource = true,
+        errorDetectionSource = true,
+        errorKind = true,
+        errorCode = true,
+        errorStatusCode = true
+      }
+      local identityFields = {
+        userAgent = true,
+        userAgentMode = true,
+        userAgentPlatform = true,
+        stainlessFingerprint = true,
+        identityDetectionSource = true,
+        identityFirstSeenAt = true
+      }
+
+      for i = 3, #ARGV, 2 do
+        local field = ARGV[i]
+        local value = ARGV[i + 1]
+        if not (permanent and permanentFields[field]) and
+          not (pinnedIdentity and identityFields[field]) then
+          redis.call('HSET', KEYS[1], field, value)
+        end
+      end
+
+      return {permanent and 1 or 0, pinnedIdentity and 1 or 0}
+    `
+    const result = await client.eval(
+      script,
+      1,
+      key,
+      options.allowPermanentOverride === true ? 'true' : 'false',
+      options.allowIdentityOverride === true ? 'true' : 'false',
+      ...entries
+    )
     await this.client.sadd('claude:account:index', accountId)
     await this.client.del('claude:account:index:empty')
+    return {
+      permanentStatePreserved: Number(result?.[0]) === 1,
+      pinnedIdentityPreserved: Number(result?.[1]) === 1
+    }
   }
 
   async getClaudeAccount(accountId) {
     const key = `claude:account:${accountId}`
     return await this.client.hgetall(key)
+  }
+
+  async pinClaudeAccountIdentityIfAbsent(accountId, identity = {}) {
+    const key = `claude:account:${accountId}`
+    const client = this.getClientSafe()
+    const script = `
+      if redis.call('EXISTS', KEYS[1]) == 0 then
+        return {-1, ''}
+      end
+
+      local currentUserAgent = redis.call('HGET', KEYS[1], 'userAgent') or ''
+      local currentMode = redis.call('HGET', KEYS[1], 'userAgentMode') or ''
+      local effectiveUserAgent = currentUserAgent ~= '' and currentUserAgent or ARGV[1]
+
+      if currentUserAgent == '' then
+        redis.call('HSET', KEYS[1],
+          'userAgent', ARGV[1],
+          'userAgentPlatform', ARGV[2],
+          'userAgentMode', 'pinned',
+          'stainlessFingerprint', ARGV[3],
+          'identityDetectionSource', ARGV[4],
+          'identityFirstSeenAt', ARGV[5])
+        return {1, effectiveUserAgent}
+      end
+
+      if currentMode ~= 'pinned' and currentUserAgent ~= ARGV[1] then
+        return {3, currentUserAgent}
+      end
+
+      if currentMode ~= 'pinned' then
+        redis.call('HSET', KEYS[1], 'userAgentMode', 'pinned')
+      end
+      if (redis.call('HGET', KEYS[1], 'userAgentPlatform') or '') == '' then
+        redis.call('HSET', KEYS[1], 'userAgentPlatform', ARGV[2])
+      end
+      if (redis.call('HGET', KEYS[1], 'stainlessFingerprint') or '') == '' then
+        redis.call('HSET', KEYS[1], 'stainlessFingerprint', ARGV[3])
+      end
+      if (redis.call('HGET', KEYS[1], 'identityDetectionSource') or '') == '' then
+        redis.call('HSET', KEYS[1], 'identityDetectionSource', ARGV[4])
+      end
+      if (redis.call('HGET', KEYS[1], 'identityFirstSeenAt') or '') == '' then
+        redis.call('HSET', KEYS[1], 'identityFirstSeenAt', ARGV[5])
+      end
+
+      return {0, effectiveUserAgent}
+    `
+
+    const result = await client.eval(
+      script,
+      1,
+      key,
+      identity.userAgent || '',
+      identity.userAgentPlatform || 'unknown',
+      identity.stainlessFingerprint || '',
+      identity.detectionSource || 'successful_upstream_request',
+      identity.firstSeenAt || new Date().toISOString()
+    )
+
+    return {
+      status: Number(result?.[0]),
+      userAgent: result?.[1] || ''
+    }
+  }
+
+  async markClaudeAccountPermanentErrorAtomic(accountId, errorState = {}) {
+    const key = `claude:account:${accountId}`
+    const client = this.getClientSafe()
+    const script = `
+      if redis.call('EXISTS', KEYS[1]) == 0 then
+        return {-1, ''}
+      end
+
+      local currentStatus = redis.call('HGET', KEYS[1], 'status') or ''
+      local currentSchedulable = redis.call('HGET', KEYS[1], 'schedulable') or ''
+      local disableAutoProtection = redis.call('HGET', KEYS[1], 'disableAutoProtection') or ''
+
+      if ARGV[6] ~= 'true' and (disableAutoProtection == 'true' or disableAutoProtection == '1') then
+        return {2, currentStatus}
+      end
+
+      local alreadyMarked = currentStatus == ARGV[1] and currentSchedulable == 'false'
+      redis.call('HSET', KEYS[1],
+        'status', ARGV[1],
+        'schedulable', 'false',
+        'errorMessage', ARGV[2],
+        ARGV[3], ARGV[4],
+        'lastErrorAt', ARGV[4],
+        'errorDetectionSource', ARGV[5],
+        'errorKind', ARGV[7],
+        'errorCode', ARGV[8],
+        'errorStatusCode', ARGV[9])
+
+      if (redis.call('HGET', KEYS[1], 'firstErrorAt') or '') == '' then
+        redis.call('HSET', KEYS[1],
+          'firstErrorAt', ARGV[4],
+          'firstErrorDetectionSource', ARGV[5])
+      end
+
+      if alreadyMarked then
+        return {0, currentStatus}
+      end
+      return {1, currentStatus}
+    `
+
+    const result = await client.eval(
+      script,
+      1,
+      key,
+      errorState.status || 'unauthorized',
+      errorState.errorMessage || '',
+      errorState.timestampField || 'unauthorizedAt',
+      errorState.occurredAt || new Date().toISOString(),
+      errorState.detectionSource || 'unknown',
+      errorState.force === true ? 'true' : 'false',
+      errorState.errorKind || '',
+      errorState.errorCode || '',
+      String(errorState.statusCode || '')
+    )
+
+    return {
+      status: Number(result?.[0]),
+      previousStatus: result?.[1] || ''
+    }
+  }
+
+  async setClaudeAccountRefreshSuccessAtomic(accountId, refreshState = {}) {
+    const key = `claude:account:${accountId}`
+    const client = this.getClientSafe()
+    const script = `
+      if redis.call('EXISTS', KEYS[1]) == 0 then
+        return {-1, ''}
+      end
+
+      local currentStatus = redis.call('HGET', KEYS[1], 'status') or ''
+      local currentSchedulable = redis.call('HGET', KEYS[1], 'schedulable') or ''
+      if (currentStatus == 'blocked' or currentStatus == 'unauthorized') and currentSchedulable == 'false' then
+        return {0, currentStatus}
+      end
+
+      redis.call('HSET', KEYS[1],
+        'accessToken', ARGV[1],
+        'refreshToken', ARGV[2],
+        'expiresAt', ARGV[3],
+        'lastRefreshAt', ARGV[4],
+        'status', 'active',
+        'errorMessage', '')
+      if ARGV[5] ~= '' then
+        redis.call('HSET', KEYS[1], 'subscriptionInfo', ARGV[5])
+      end
+      return {1, currentStatus}
+    `
+
+    const result = await client.eval(
+      script,
+      1,
+      key,
+      refreshState.accessToken || '',
+      refreshState.refreshToken || '',
+      String(refreshState.expiresAt || ''),
+      refreshState.lastRefreshAt || new Date().toISOString(),
+      refreshState.subscriptionInfo || ''
+    )
+
+    return {
+      status: Number(result?.[0]),
+      previousStatus: result?.[1] || ''
+    }
+  }
+
+  async clearClaudeAccountRateLimitAtomic(accountId) {
+    const key = `claude:account:${accountId}`
+    const client = this.getClientSafe()
+    const script = `
+      if redis.call('EXISTS', KEYS[1]) == 0 then
+        return {-1, ''}
+      end
+
+      local currentStatus = redis.call('HGET', KEYS[1], 'status') or ''
+      local currentSchedulable = redis.call('HGET', KEYS[1], 'schedulable') or ''
+      local autoStopped = (redis.call('HGET', KEYS[1], 'rateLimitAutoStopped') or '') == 'true'
+      local permanent =
+        (currentStatus == 'blocked' or currentStatus == 'unauthorized') and
+        currentSchedulable == 'false'
+
+      redis.call('HDEL', KEYS[1],
+        'rateLimitedAt',
+        'rateLimitStatus',
+        'rateLimitEndAt',
+        'rateLimitAutoStopped')
+
+      if autoStopped and currentSchedulable == 'false' and not permanent then
+        redis.call('HSET', KEYS[1], 'schedulable', 'true')
+        return {1, currentStatus}
+      end
+      if permanent then
+        return {2, currentStatus}
+      end
+      return {0, currentStatus}
+    `
+
+    const result = await client.eval(script, 1, key)
+    return {
+      status: Number(result?.[0]),
+      currentStatus: result?.[1] || ''
+    }
+  }
+
+  async updateClaudeAccountSessionWindowAtomic(accountId, sessionState = {}) {
+    const key = `claude:account:${accountId}`
+    const client = this.getClientSafe()
+    const script = `
+      if redis.call('EXISTS', KEYS[1]) == 0 then
+        return {-1, 0, 0}
+      end
+
+      redis.call('HSET', KEYS[1],
+        'sessionWindowStatus', ARGV[1],
+        'sessionWindowStatusUpdatedAt', ARGV[2])
+
+      if ARGV[1] ~= 'allowed_warning' or
+        (redis.call('HGET', KEYS[1], 'autoStopOnWarning') or '') ~= 'true' then
+        return {1, 0, 0}
+      end
+
+      local currentStatus = redis.call('HGET', KEYS[1], 'status') or ''
+      local currentSchedulable = redis.call('HGET', KEYS[1], 'schedulable') or ''
+      local permanent =
+        (currentStatus == 'blocked' or currentStatus == 'unauthorized') and
+        currentSchedulable == 'false'
+      if permanent then
+        return {2, 0, tonumber(redis.call('HGET', KEYS[1], 'fiveHourWarningCount') or '0')}
+      end
+
+      if currentSchedulable == 'false' and
+        (redis.call('HGET', KEYS[1], 'fiveHourAutoStopped') or '') == 'true' then
+        return {3, 0, tonumber(redis.call('HGET', KEYS[1], 'fiveHourWarningCount') or '0')}
+      end
+
+      local warningCount = 0
+      if (redis.call('HGET', KEYS[1], 'fiveHourWarningWindow') or '') == ARGV[3] then
+        warningCount = tonumber(redis.call('HGET', KEYS[1], 'fiveHourWarningCount') or '0') or 0
+      end
+      local shouldNotify = warningCount < tonumber(ARGV[4])
+      if shouldNotify then
+        warningCount = warningCount + 1
+      end
+
+      redis.call('HSET', KEYS[1],
+        'schedulable', 'false',
+        'fiveHourAutoStopped', 'true',
+        'fiveHourStoppedAt', ARGV[2],
+        'stoppedReason', ARGV[5],
+        'fiveHourWarningWindow', ARGV[3],
+        'fiveHourWarningCount', tostring(warningCount))
+      if shouldNotify then
+        redis.call('HSET', KEYS[1], 'fiveHourWarningLastSentAt', ARGV[2])
+      end
+
+      return {4, shouldNotify and 1 or 0, warningCount}
+    `
+
+    const result = await client.eval(
+      script,
+      1,
+      key,
+      sessionState.status || '',
+      sessionState.updatedAt || new Date().toISOString(),
+      sessionState.windowIdentifier || 'unknown',
+      String(sessionState.maxWarningsPerWindow || 1),
+      sessionState.stoppedReason || ''
+    )
+    return {
+      status: Number(result?.[0]),
+      shouldNotify: Number(result?.[1]) === 1,
+      warningCount: Number(result?.[2]) || 0
+    }
+  }
+
+  async recoverClaudeAccountTempErrorAtomic(accountId) {
+    const key = `claude:account:${accountId}`
+    const client = this.getClientSafe()
+    const script = `
+      if redis.call('EXISTS', KEYS[1]) == 0 then
+        return {-1, ''}
+      end
+
+      local currentStatus = redis.call('HGET', KEYS[1], 'status') or ''
+      if currentStatus ~= 'temp_error' then
+        return {0, currentStatus}
+      end
+
+      local autoStopped =
+        (redis.call('HGET', KEYS[1], 'tempErrorAutoStopped') or '') == 'true'
+      redis.call('HSET', KEYS[1], 'status', 'active')
+      if autoStopped then
+        redis.call('HSET', KEYS[1], 'schedulable', 'true')
+      end
+      redis.call('HDEL', KEYS[1], 'errorMessage', 'tempErrorAt', 'tempErrorAutoStopped')
+      return {1, currentStatus}
+    `
+
+    const result = await client.eval(script, 1, key)
+    return {
+      status: Number(result?.[0]),
+      previousStatus: result?.[1] || ''
+    }
   }
 
   async getAllClaudeAccounts() {
