@@ -525,6 +525,26 @@ class ClaudeRelayService {
     return message.toLowerCase().includes('extra usage')
   }
 
+  _getUnifiedRateLimitStatus(headers, window) {
+    return String(
+      this._getHeaderValueCaseInsensitive(
+        headers,
+        `anthropic-ratelimit-unified-${window}-status`
+      ) || ''
+    )
+      .trim()
+      .toLowerCase()
+  }
+
+  // 5h 和 7d 用量窗口都还 allowed 时，这次 429 不是窗口耗尽
+  // （常见于 extra usage / overage / 组织策略），不能按周限额去封模型或整号。
+  _areUsageWindowsStillAllowed(headers) {
+    return (
+      this._getUnifiedRateLimitStatus(headers, '5h') === 'allowed' &&
+      this._getUnifiedRateLimitStatus(headers, '7d') === 'allowed'
+    )
+  }
+
   // Anthropic 的 unified-reset 既可能指向 5 小时整号窗口，也可能指向模型家族周限额。
   // 只有明确排除 5 小时窗口后，才允许把账号继续用于其它模型。
   _isModelFamilyRateLimit(headers, resetTimestamp, body = null) {
@@ -532,13 +552,14 @@ class ClaudeRelayService {
       return false
     }
 
-    const fiveHourStatus = String(
-      this._getHeaderValueCaseInsensitive(headers, 'anthropic-ratelimit-unified-5h-status') || ''
-    )
-      .trim()
-      .toLowerCase()
+    if (this._areUsageWindowsStillAllowed(headers)) {
+      return false
+    }
+
+    const fiveHourStatus = this._getUnifiedRateLimitStatus(headers, '5h')
 
     // 上游已有实测：5h-status=allowed 且返回 429 时，命中的是独立周限额。
+    // 仅在 7d 不是 allowed（已拒绝或未返回）时维持这个判断。
     if (fiveHourStatus === 'allowed') {
       return true
     }
@@ -1258,6 +1279,16 @@ class ClaudeRelayService {
           if (this._isExtraUsageRequired429(response.statusCode, response.body)) {
             logger.info(
               `💰 [Non-Stream] "Extra usage required" 429 for account ${accountId}, skipping rate limit marking`
+            )
+          } else if (this._areUsageWindowsStillAllowed(response.headers)) {
+            logger.warn(
+              `⚠️ [Non-Stream] 429 with 5h+7d windows still allowed for account ${accountId}; applying short cooldown instead of multi-day cap`
+            )
+            await this._applyNoResetRateLimitCooldown(
+              accountId,
+              accountType,
+              sessionHash,
+              'Non-quota 429'
             )
           } else {
             const resetHeader = response.headers
@@ -3093,7 +3124,17 @@ class ClaudeRelayService {
               clientHeaders
             )
 
-            if (
+            if (this._areUsageWindowsStillAllowed(res.headers)) {
+              logger.warn(
+                `⚠️ [Stream] 429 with 5h+7d windows still allowed for account ${accountId}; applying short cooldown instead of multi-day cap`
+              )
+              await this._applyNoResetRateLimitCooldown(
+                accountId,
+                accountType,
+                sessionHash,
+                'Non-quota stream 429'
+              )
+            } else if (
               requestModelFamily &&
               !Number.isNaN(parsedResetTimestamp) &&
               this._isModelFamilyRateLimit(res.headers, parsedResetTimestamp, errorBody429)
@@ -3942,10 +3983,20 @@ class ClaudeRelayService {
               : null
             const parsedResetTimestamp = resetHeader ? parseInt(resetHeader, 10) : NaN
 
-            if (
+            if (this._areUsageWindowsStillAllowed(res.headers)) {
+              logger.warn(
+                `⚠️ [Stream-end] 429 with 5h+7d windows still allowed for account ${accountId}; applying short cooldown instead of multi-day cap`
+              )
+              await this._applyNoResetRateLimitCooldown(
+                accountId,
+                accountType,
+                sessionHash,
+                'Non-quota stream-end 429'
+              )
+            } else if (
               requestModelFamily &&
               !Number.isNaN(parsedResetTimestamp) &&
-              this._isModelFamilyRateLimit(res.headers, parsedResetTimestamp)
+              this._isModelFamilyRateLimit(res.headers, parsedResetTimestamp, body)
             ) {
               // 模型级限额：只停用该模型家族，不改写为账号级限流
               await claudeAccountService.markAccountModelRateLimited(

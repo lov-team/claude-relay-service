@@ -403,6 +403,25 @@ describe('Claude relay CC rate-limit policy', () => {
     ).toBe(true)
   })
 
+  test('does not treat a 429 as a weekly model cap when 5h and 7d windows are still allowed', () => {
+    const resetTimestamp = Math.floor(Date.now() / 1000) + 10 * 24 * 60 * 60
+    expect(
+      claudeRelayService._isModelFamilyRateLimit(
+        {
+          'anthropic-ratelimit-unified-5h-status': 'allowed',
+          'anthropic-ratelimit-unified-7d-status': 'allowed'
+        },
+        resetTimestamp
+      )
+    ).toBe(false)
+    expect(
+      claudeRelayService._areUsageWindowsStillAllowed({
+        'anthropic-ratelimit-unified-5h-status': 'allowed',
+        'anthropic-ratelimit-unified-7d-status': 'allowed'
+      })
+    ).toBe(true)
+  })
+
   test('treats an explicit non-allowed 5h status as an account-wide limit', () => {
     const resetTimestamp = Math.floor(Date.now() / 1000) + 6 * 24 * 60 * 60
     expect(

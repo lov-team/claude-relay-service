@@ -2742,7 +2742,10 @@ const showResetButton = (account) => {
     'azure-openai',
     'azure_openai'
   ]
-  return supportedPlatforms.includes(account.platform) && isAccountRoutingBlocked(account)
+  return (
+    supportedPlatforms.includes(account.platform) &&
+    (isAccountRoutingBlocked(account) || hasActiveModelFamilyRateLimit(account))
+  )
 }
 
 // 获取账户操作菜单项（用于小屏下拉菜单）
@@ -4632,6 +4635,18 @@ const isAccountExpiredForRouting = (account) => {
   return isExpired(account.expiresAt)
 }
 
+const hasActiveModelFamilyRateLimit = (account) => {
+  if (!account) return false
+  if (account.opusRateLimitStatus?.isRateLimited || account.fableRateLimitStatus?.isRateLimited) {
+    return true
+  }
+  const modelStatus = account.modelRateLimitStatus
+  if (!modelStatus || typeof modelStatus !== 'object') {
+    return false
+  }
+  return Object.values(modelStatus).some((status) => status?.isRateLimited)
+}
+
 const isAccountRoutingBlocked = (account) => {
   if (!account) return false
 
@@ -4657,10 +4672,6 @@ const isAccountRoutingBlocked = (account) => {
   }
 
   if (account.overloadStatus?.isOverloaded) {
-    return true
-  }
-
-  if (account.opusRateLimitStatus?.isRateLimited) {
     return true
   }
 
@@ -4736,17 +4747,6 @@ const getRoutingBlockReasons = (account) => {
       ? `临时暂停（${account.tempUnavailable.errorType}${account.tempUnavailable.statusCode ? ` / HTTP ${account.tempUnavailable.statusCode}` : ''}${detailText}）`
       : `临时暂停${detailParts.length > 0 ? `（${detailParts.join('，')}）` : ''}`
     reasons.push(tempReason)
-  }
-
-  if (account.opusRateLimitStatus?.isRateLimited) {
-    const opusMinutes = Number.isFinite(account.opusRateLimitStatus.minutesRemaining)
-      ? Math.max(0, Math.ceil(account.opusRateLimitStatus.minutesRemaining))
-      : 0
-    reasons.push(
-      opusMinutes > 0
-        ? `Opus 模型限流中（约 ${formatRateLimitTime(opusMinutes)} 后恢复）`
-        : 'Opus 模型限流中'
-    )
   }
 
   if (account.overloadStatus?.isOverloaded) {
