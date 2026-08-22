@@ -545,6 +545,21 @@ class ClaudeRelayService {
     )
   }
 
+  // Anthropic 周限额剩余最多约 7 天。超过这个窗口的 unified-reset
+  // （生产里反复出现 2026-09-01T00:00:00Z）是账单/日历边界，不能当周额度。
+  _isImplausibleWeeklyReset(resetTimestamp) {
+    if (!Number.isFinite(resetTimestamp) || resetTimestamp <= 0) {
+      return false
+    }
+    return resetTimestamp * 1000 - Date.now() > (7 * 24 * 60 + 6 * 60) * 60 * 1000
+  }
+
+  _shouldSkipLongCapRateLimit(headers, resetTimestamp) {
+    return (
+      this._areUsageWindowsStillAllowed(headers) || this._isImplausibleWeeklyReset(resetTimestamp)
+    )
+  }
+
   // Anthropic 的 unified-reset 既可能指向 5 小时整号窗口，也可能指向模型家族周限额。
   // 只有明确排除 5 小时窗口后，才允许把账号继续用于其它模型。
   _isModelFamilyRateLimit(headers, resetTimestamp, body = null) {
@@ -552,7 +567,7 @@ class ClaudeRelayService {
       return false
     }
 
-    if (this._areUsageWindowsStillAllowed(headers)) {
+    if (this._shouldSkipLongCapRateLimit(headers, resetTimestamp)) {
       return false
     }
 
@@ -1280,23 +1295,22 @@ class ClaudeRelayService {
             logger.info(
               `💰 [Non-Stream] "Extra usage required" 429 for account ${accountId}, skipping rate limit marking`
             )
-          } else if (this._areUsageWindowsStillAllowed(response.headers)) {
-            logger.warn(
-              `⚠️ [Non-Stream] 429 with 5h+7d windows still allowed for account ${accountId}; applying short cooldown instead of multi-day cap`
-            )
-            await this._applyNoResetRateLimitCooldown(
-              accountId,
-              accountType,
-              sessionHash,
-              'Non-quota 429'
-            )
           } else {
             const resetHeader = response.headers
               ? response.headers['anthropic-ratelimit-unified-reset']
               : null
             const parsedResetTimestamp = resetHeader ? parseInt(resetHeader, 10) : NaN
-
-            if (
+            if (this._shouldSkipLongCapRateLimit(response.headers, parsedResetTimestamp)) {
+              logger.warn(
+                `⚠️ [Non-Stream] 429 for account ${accountId} is not a usage-window cap (5h=${this._getUnifiedRateLimitStatus(response.headers, '5h') || 'missing'}, 7d=${this._getUnifiedRateLimitStatus(response.headers, '7d') || 'missing'}, reset=${Number.isNaN(parsedResetTimestamp) ? 'missing' : new Date(parsedResetTimestamp * 1000).toISOString()}); applying short cooldown`
+              )
+              await this._applyNoResetRateLimitCooldown(
+                accountId,
+                accountType,
+                sessionHash,
+                'Non-quota 429'
+              )
+            } else if (
               requestModelFamily &&
               !Number.isNaN(parsedResetTimestamp) &&
               this._isModelFamilyRateLimit(response.headers, parsedResetTimestamp, response.body)
@@ -3124,9 +3138,9 @@ class ClaudeRelayService {
               clientHeaders
             )
 
-            if (this._areUsageWindowsStillAllowed(res.headers)) {
+            if (this._shouldSkipLongCapRateLimit(res.headers, parsedResetTimestamp)) {
               logger.warn(
-                `⚠️ [Stream] 429 with 5h+7d windows still allowed for account ${accountId}; applying short cooldown instead of multi-day cap`
+                `⚠️ [Stream] 429 for account ${accountId} is not a usage-window cap (5h=${this._getUnifiedRateLimitStatus(res.headers, '5h') || 'missing'}, 7d=${this._getUnifiedRateLimitStatus(res.headers, '7d') || 'missing'}, reset=${Number.isNaN(parsedResetTimestamp) ? 'missing' : new Date(parsedResetTimestamp * 1000).toISOString()}); applying short cooldown`
               )
               await this._applyNoResetRateLimitCooldown(
                 accountId,
@@ -3983,9 +3997,9 @@ class ClaudeRelayService {
               : null
             const parsedResetTimestamp = resetHeader ? parseInt(resetHeader, 10) : NaN
 
-            if (this._areUsageWindowsStillAllowed(res.headers)) {
+            if (this._shouldSkipLongCapRateLimit(res.headers, parsedResetTimestamp)) {
               logger.warn(
-                `⚠️ [Stream-end] 429 with 5h+7d windows still allowed for account ${accountId}; applying short cooldown instead of multi-day cap`
+                `⚠️ [Stream-end] 429 for account ${accountId} is not a usage-window cap (5h=${this._getUnifiedRateLimitStatus(res.headers, '5h') || 'missing'}, 7d=${this._getUnifiedRateLimitStatus(res.headers, '7d') || 'missing'}, reset=${Number.isNaN(parsedResetTimestamp) ? 'missing' : new Date(parsedResetTimestamp * 1000).toISOString()}); applying short cooldown`
               )
               await this._applyNoResetRateLimitCooldown(
                 accountId,

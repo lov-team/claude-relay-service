@@ -394,10 +394,27 @@ describe('Claude relay CC rate-limit policy', () => {
   })
 
   test('treats 5h-status=allowed as an independent model-family limit', () => {
-    const resetTimestamp = Math.floor(Date.now() / 1000) + 60 * 60
+    const resetTimestamp = Math.floor(Date.now() / 1000) + 6 * 24 * 60 * 60
     expect(
       claudeRelayService._isModelFamilyRateLimit(
         { 'Anthropic-Ratelimit-Unified-5h-Status': 'allowed' },
+        resetTimestamp
+      )
+    ).toBe(true)
+  })
+
+  test('does not treat a calendar-boundary reset beyond 7 days as a weekly model cap', () => {
+    const resetTimestamp = Math.floor(Date.now() / 1000) + 10 * 24 * 60 * 60
+    expect(
+      claudeRelayService._isModelFamilyRateLimit(
+        { 'anthropic-ratelimit-unified-5h-status': 'allowed' },
+        resetTimestamp
+      )
+    ).toBe(false)
+    expect(claudeRelayService._isImplausibleWeeklyReset(resetTimestamp)).toBe(true)
+    expect(
+      claudeRelayService._shouldSkipLongCapRateLimit(
+        { 'anthropic-ratelimit-unified-5h-status': 'allowed' },
         resetTimestamp
       )
     ).toBe(true)
