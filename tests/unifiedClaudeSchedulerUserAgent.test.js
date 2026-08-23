@@ -1,6 +1,7 @@
 jest.mock('../src/services/account/claudeAccountService', () => ({}))
 jest.mock('../src/services/account/claudeAccountNurtureService', () => ({
-  evaluate: jest.fn().mockResolvedValue({ blocked: false })
+  evaluate: jest.fn().mockResolvedValue({ blocked: false }),
+  isNurtureSchedulerError: jest.fn(() => false)
 }))
 jest.mock('../src/services/account/claudeConsoleAccountService', () => ({}))
 jest.mock('../src/services/account/bedrockAccountService', () => ({}))

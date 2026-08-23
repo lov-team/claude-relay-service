@@ -63,13 +63,18 @@ jest.mock('../src/services/accountGroupService', () => ({
 jest.mock('../src/services/account/claudeAccountNurtureService', () => ({
   evaluate: jest.fn(),
   recordBlocked: jest.fn().mockResolvedValue(undefined),
-  createAllNurtureLimitedError: jest.fn((evaluation) => {
+  createAllNurtureLimitedError: jest.fn((evaluation, accountId) => {
     const error = new Error('All available Claude accounts are nurture limited')
     error.code = 'CLAUDE_ALL_NURTURE_LIMITED'
     error.statusCode = 403
     error.nurtureReason = evaluation?.reason || null
+    error.accountId = accountId || null
     return error
   }),
+  isNurtureSchedulerError: jest.fn(
+    (error) =>
+      error?.code === 'CLAUDE_ALL_NURTURE_LIMITED' || error?.code === 'CLAUDE_NURTURE_LIMITED'
+  ),
   createDedicatedNurtureLimitedError: jest.fn((accountId, evaluation) => {
     const error = new Error('Dedicated Claude account is nurture limited')
     error.code = 'CLAUDE_NURTURE_LIMITED'
@@ -164,6 +169,23 @@ describe('UnifiedClaudeScheduler nurture handling for auto-stopped accounts', ()
       unifiedClaudeScheduler.selectAccountForApiKey({}, null, 'claude-sonnet-4-6')
     ).rejects.toThrow('No available Claude accounts support the requested model')
     expect(claudeAccountNurtureService.evaluate).not.toHaveBeenCalled()
+  })
+
+  test('skips a seven_day_velocity account and uses an available fallback', async () => {
+    const velocityBlocked = buildOfficialAccount('velocity-blocked')
+    const fallback = buildOfficialAccount('fallback')
+    redis.getAllClaudeAccounts.mockResolvedValue([velocityBlocked, fallback])
+    claudeAccountNurtureService.evaluate.mockImplementation(async (accountId) =>
+      accountId === 'velocity-blocked'
+        ? { blocked: true, reason: 'seven_day_velocity' }
+        : allowedEvaluation
+    )
+
+    await expect(
+      unifiedClaudeScheduler.selectAccountForApiKey({}, null, 'claude-sonnet-4-6')
+    ).resolves.toEqual({ accountId: 'fallback', accountType: 'claude-official' })
+    expect(claudeAccountNurtureService.evaluate).toHaveBeenCalledWith('velocity-blocked')
+    expect(claudeAccountNurtureService.evaluate).toHaveBeenCalledWith('fallback')
   })
 
   test('uses an available fallback instead of returning 403', async () => {

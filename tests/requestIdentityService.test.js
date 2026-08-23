@@ -97,6 +97,22 @@ describe('requestIdentityService.buildRelayGeneratedUserId', () => {
     expect(left.device_id).toBe(right.device_id)
     expect(left.session_id).not.toBe(right.session_id)
   })
+
+  it('uses unifiedClientId as the account-level device_id', () => {
+    const account = {
+      id: ACCOUNT_ID,
+      extInfo: { account_uuid: ACCOUNT_UUID },
+      useUnifiedClientId: true,
+      unifiedClientId: 'e'.repeat(64)
+    }
+
+    const userId = JSON.parse(
+      requestIdentityService.buildRelayGeneratedUserId(account, 'conv-hash-aaa')
+    )
+
+    expect(userId.device_id).toBe(account.unifiedClientId)
+    expect(userId.account_uuid).toBe(ACCOUNT_UUID)
+  })
 })
 
 describe('requestIdentityService.transform', () => {
@@ -182,5 +198,122 @@ describe('requestIdentityService.transform', () => {
 
     expect(result.headers['X-Stainless-OS']).toBe('Linux')
     expect(mockRedisGet).not.toHaveBeenCalled()
+  })
+
+  it('forges a complete account-level fingerprint and ignores incomplete inbound Stainless fields', async () => {
+    const result = await requestIdentityService.transform({
+      body: {},
+      headers: {
+        'X-Stainless-OS': 'Windows',
+        'X-Stainless-Runtime': 'deno'
+      },
+      accountId: ACCOUNT_ID,
+      account: {
+        id: ACCOUNT_ID,
+        userAgentPlatform: 'macos',
+        stainlessFingerprint: JSON.stringify({
+          'x-stainless-os': 'MacOS',
+          'x-stainless-arch': 'arm64'
+        })
+      }
+    })
+
+    expect(result.headers['X-Stainless-OS']).toBe('MacOS')
+    expect(result.headers['X-Stainless-Arch']).toBe('arm64')
+    expect(result.headers['X-Stainless-Lang']).toBe('js')
+    expect(result.headers['X-Stainless-Package-Version']).toBe('0.68.0')
+    expect(result.headers['X-Stainless-Runtime']).toBe('node')
+    expect(result.headers['X-Stainless-Runtime-Version']).toBe('v22.18.0')
+    expect(result.headers['X-Stainless-Retry-Count']).toBe('0')
+    expect(result.headers['X-Stainless-Timeout']).toBe('60')
+    expect(mockRedisSet).toHaveBeenCalled()
+  })
+
+  it('locks session_id to the conversation hash and keeps account-level device and uuid', async () => {
+    const account = {
+      id: ACCOUNT_ID,
+      extInfo: { account_uuid: ACCOUNT_UUID },
+      useUnifiedClientId: true,
+      unifiedClientId: 'e'.repeat(64)
+    }
+    const body = {
+      metadata: {
+        user_id: JSON.stringify({
+          device_id: 'd'.repeat(64),
+          account_uuid: '',
+          session_id: 'c72554f2-d198-4fd4-99c8-81e46410a1c5'
+        })
+      }
+    }
+
+    const first = await requestIdentityService.transform({
+      body,
+      headers: {},
+      accountId: ACCOUNT_ID,
+      account,
+      sessionHash: 'conv-hash-aaa'
+    })
+    const second = await requestIdentityService.transform({
+      body,
+      headers: {},
+      accountId: ACCOUNT_ID,
+      account,
+      sessionHash: 'conv-hash-aaa'
+    })
+    const other = await requestIdentityService.transform({
+      body,
+      headers: {},
+      accountId: ACCOUNT_ID,
+      account,
+      sessionHash: 'conv-hash-bbb'
+    })
+
+    const firstId = JSON.parse(first.body.metadata.user_id)
+    const secondId = JSON.parse(second.body.metadata.user_id)
+    const otherId = JSON.parse(other.body.metadata.user_id)
+    const expectedSession = requestIdentityService._internal.formatUuidFromSeed(
+      'conv-hash-aaa::relay-session'
+    )
+
+    expect(firstId.account_uuid).toBe(ACCOUNT_UUID)
+    expect(firstId.device_id).toBe(account.unifiedClientId)
+    expect(firstId.session_id).toBe(expectedSession)
+    expect(secondId).toEqual(firstId)
+    expect(otherId.device_id).toBe(firstId.device_id)
+    expect(otherId.account_uuid).toBe(ACCOUNT_UUID)
+    expect(otherId.session_id).not.toBe(firstId.session_id)
+  })
+
+  it('keeps a real Claude Code session derived from the inbound session, not the scheduler hash', async () => {
+    const inboundSession = 'c72554f2-d198-4fd4-99c8-81e46410a1c5'
+    const result = await requestIdentityService.transform({
+      body: {
+        metadata: {
+          user_id: JSON.stringify({
+            device_id: 'd'.repeat(64),
+            account_uuid: '',
+            session_id: inboundSession
+          })
+        }
+      },
+      headers: {},
+      accountId: ACCOUNT_ID,
+      account: {
+        id: ACCOUNT_ID,
+        extInfo: { account_uuid: ACCOUNT_UUID }
+      },
+      sessionHash: 'conv-hash-aaa',
+      isRealClaudeCode: true
+    })
+
+    const userId = JSON.parse(result.body.metadata.user_id)
+    expect(userId.account_uuid).toBe(ACCOUNT_UUID)
+    expect(userId.device_id).toBe('d'.repeat(64))
+    expect(userId.session_id).toBe(
+      requestIdentityService._internal.formatUuidFromSeed(`${ACCOUNT_ID}::${inboundSession}`)
+    )
+    expect(userId.session_id).not.toBe(
+      requestIdentityService._internal.formatUuidFromSeed('conv-hash-aaa::relay-session')
+    )
   })
 })

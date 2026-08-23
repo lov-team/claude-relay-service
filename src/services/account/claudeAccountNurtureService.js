@@ -776,8 +776,9 @@ function createNurtureSchedulerError(code, { accountId, reason, message } = {}) 
   return error
 }
 
-function createAllNurtureLimitedError(evaluation = null) {
+function createAllNurtureLimitedError(evaluation = null, accountId = null) {
   return createNurtureSchedulerError(NURTURE_SCHEDULER_ERROR_CODES.ALL_LIMITED, {
+    accountId: accountId || evaluation?.accountId || null,
     reason: evaluation?.reason || null,
     message: 'All available Claude accounts are currently blocked by nurture guard limits'
   })

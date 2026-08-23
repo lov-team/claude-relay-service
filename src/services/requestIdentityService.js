@@ -33,6 +33,38 @@ const STAINLESS_HEADER_CASE_MAP = {
   'x-stainless-runtime-version': 'X-Stainless-Runtime-Version'
 }
 const REDIS_KEY_PREFIX = 'fmt_claude_req:stainless_headers:'
+const ACCOUNT_FINGERPRINT_DEFAULTS = {
+  macos: {
+    'x-stainless-retry-count': '0',
+    'x-stainless-timeout': '60',
+    'x-stainless-lang': 'js',
+    'x-stainless-package-version': '0.68.0',
+    'x-stainless-os': 'MacOS',
+    'x-stainless-arch': 'arm64',
+    'x-stainless-runtime': 'node',
+    'x-stainless-runtime-version': 'v22.18.0'
+  },
+  windows: {
+    'x-stainless-retry-count': '0',
+    'x-stainless-timeout': '60',
+    'x-stainless-lang': 'js',
+    'x-stainless-package-version': '0.55.1',
+    'x-stainless-os': 'Windows',
+    'x-stainless-arch': 'x64',
+    'x-stainless-runtime': 'node',
+    'x-stainless-runtime-version': 'v20.19.2'
+  },
+  linux: {
+    'x-stainless-retry-count': '0',
+    'x-stainless-timeout': '60',
+    'x-stainless-lang': 'js',
+    'x-stainless-package-version': '0.68.0',
+    'x-stainless-os': 'Linux',
+    'x-stainless-arch': 'x64',
+    'x-stainless-runtime': 'node',
+    'x-stainless-runtime-version': 'v22.18.0'
+  }
+}
 
 function formatUuidFromSeed(seed) {
   const digest = crypto.createHash('sha256').update(String(seed)).digest()
@@ -184,6 +216,46 @@ async function readPersistedFingerprint(accountId) {
   return sanitizeFingerprint(parsed)
 }
 
+function detectAccountPlatform(account, fingerprintHints = {}) {
+  const osHint = String(fingerprintHints['x-stainless-os'] || '').toLowerCase()
+  if (/win/.test(osHint)) {
+    return 'windows'
+  }
+  if (/linux/.test(osHint)) {
+    return 'linux'
+  }
+  if (/mac|darwin/.test(osHint)) {
+    return 'macos'
+  }
+
+  const platform = String(account?.userAgentPlatform || '').toLowerCase()
+  if (platform === 'windows' || platform === 'linux') {
+    return platform
+  }
+  if (platform === 'mac' || platform === 'macos') {
+    return 'macos'
+  }
+
+  const userAgent = String(account?.userAgent || '')
+  if (/windows/i.test(userAgent)) {
+    return 'windows'
+  }
+  if (/linux/i.test(userAgent)) {
+    return 'linux'
+  }
+  if (/mac|darwin/i.test(userAgent)) {
+    return 'macos'
+  }
+
+  return 'macos'
+}
+
+function completeAccountFingerprint(partial, account) {
+  const hints = sanitizeFingerprint(partial)
+  const defaults = ACCOUNT_FINGERPRINT_DEFAULTS[detectAccountPlatform(account, hints)]
+  return { ...defaults, ...hints }
+}
+
 function extractAccountFingerprint(account) {
   if (!account || typeof account !== 'object') {
     return {}
@@ -225,6 +297,21 @@ function headersChanged(original, updated) {
   return false
 }
 
+function resolveAccountDeviceId(account, accountId) {
+  if (
+    account &&
+    (account.useUnifiedClientId === true || account.useUnifiedClientId === 'true') &&
+    account.unifiedClientId
+  ) {
+    return String(account.unifiedClientId)
+  }
+
+  return crypto
+    .createHash('sha256')
+    .update(`relay-generated-device:${accountId || 'unknown-account'}`)
+    .digest('hex')
+}
+
 function resolveAccountId(payload) {
   if (!payload || typeof payload !== 'object') {
     return null
@@ -255,7 +342,47 @@ function resolveAccountId(payload) {
   return null
 }
 
-async function rewriteHeaders(headers, accountId, accountFingerprint = {}) {
+async function resolveCompleteAccountFingerprint({
+  accountId,
+  account,
+  accountFingerprint,
+  incomingHeaders,
+  isRealClaudeCode = false
+}) {
+  const pinnedFingerprint = sanitizeFingerprint(accountFingerprint)
+  if (hasCompleteFingerprint(pinnedFingerprint)) {
+    return { fingerprint: pinnedFingerprint, source: 'account_pinned' }
+  }
+
+  let persistedFingerprint = {}
+  try {
+    persistedFingerprint = await readPersistedFingerprint(accountId)
+    if (hasCompleteFingerprint(persistedFingerprint)) {
+      return { fingerprint: persistedFingerprint, source: 'redis_persisted' }
+    }
+  } catch (error) {
+    logger.error(`requestIdentityService: 读取指纹失败 (${accountId}): ${error.message}`)
+  }
+
+  const incomingFingerprint = collectFingerprintFromHeaders(incomingHeaders)
+  if (isRealClaudeCode && hasCompleteFingerprint(incomingFingerprint)) {
+    return { fingerprint: incomingFingerprint, source: 'request_headers', persist: true }
+  }
+
+  const forgedFingerprint = completeAccountFingerprint(
+    { ...persistedFingerprint, ...pinnedFingerprint },
+    account
+  )
+  return { fingerprint: forgedFingerprint, source: 'account_forged', persist: true }
+}
+
+async function rewriteHeaders(
+  headers,
+  accountId,
+  accountFingerprint = {},
+  account = null,
+  options = {}
+) {
   if (!headers || typeof headers !== 'object') {
     return { nextHeaders: headers, changed: false }
   }
@@ -265,66 +392,50 @@ async function rewriteHeaders(headers, accountId, accountFingerprint = {}) {
   }
 
   const workingHeaders = { ...headers }
-  const pinnedFingerprint = sanitizeFingerprint(accountFingerprint)
+  const resolved = await resolveCompleteAccountFingerprint({
+    accountId,
+    account,
+    accountFingerprint,
+    incomingHeaders: workingHeaders,
+    isRealClaudeCode: options.isRealClaudeCode === true
+  })
 
-  if (hasCompleteFingerprint(pinnedFingerprint)) {
-    return {
-      nextHeaders: applyFingerprintToHeaders(workingHeaders, pinnedFingerprint),
-      changed: true,
-      fingerprint: pinnedFingerprint,
-      source: 'account_pinned'
-    }
-  }
-
-  try {
-    const persistedFingerprint = await readPersistedFingerprint(accountId)
-    if (hasCompleteFingerprint(persistedFingerprint)) {
-      return {
-        nextHeaders: applyFingerprintToHeaders(workingHeaders, persistedFingerprint),
-        changed: true,
-        fingerprint: persistedFingerprint,
-        source: 'redis_persisted'
+  if (resolved.persist) {
+    try {
+      const persisted = await persistFingerprint(accountId, resolved.fingerprint)
+      if (!persisted) {
+        const winningFingerprint = await readPersistedFingerprint(accountId)
+        if (hasCompleteFingerprint(winningFingerprint)) {
+          return {
+            nextHeaders: applyFingerprintToHeaders(workingHeaders, winningFingerprint),
+            changed: true,
+            fingerprint: winningFingerprint,
+            source: 'redis_persisted_race_winner'
+          }
+        }
       }
-    }
-  } catch (error) {
-    logger.error(`requestIdentityService: 读取指纹失败 (${accountId}): ${error.message}`)
-  }
-
-  const fingerprint = collectFingerprintFromHeaders(workingHeaders)
-
-  if (!hasCompleteFingerprint(fingerprint)) {
-    logger.warn(`requestIdentityService: 账号 ${accountId} 未提供完整 Stainless 指纹，已保持原样`)
-    return { nextHeaders: workingHeaders, changed: false }
-  }
-
-  try {
-    const persisted = await persistFingerprint(accountId, fingerprint)
-    if (!persisted) {
-      const winningFingerprint = await readPersistedFingerprint(accountId)
-      if (hasCompleteFingerprint(winningFingerprint)) {
-        return {
-          nextHeaders: applyFingerprintToHeaders(workingHeaders, winningFingerprint),
-          changed: true,
-          fingerprint: winningFingerprint,
-          source: 'redis_persisted_race_winner'
+    } catch (error) {
+      logger.error(`requestIdentityService: 持久化指纹失败 (${accountId}): ${error.message}`)
+      return {
+        abortResponse: {
+          statusCode: 500,
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            error: 'fingerprint_persist_failed',
+            message: '指纹信息持久化失败'
+          })
         }
       }
     }
-  } catch (error) {
-    logger.error(`requestIdentityService: 持久化指纹失败 (${accountId}): ${error.message}`)
-    return {
-      abortResponse: {
-        statusCode: 500,
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ error: 'fingerprint_persist_failed', message: '指纹信息持久化失败' })
-      }
-    }
   }
 
-  const appliedHeaders = applyFingerprintToHeaders(workingHeaders, fingerprint)
-  const changed = headersChanged(workingHeaders, appliedHeaders)
-
-  return { nextHeaders: appliedHeaders, changed, fingerprint, source: 'request_headers' }
+  const appliedHeaders = applyFingerprintToHeaders(workingHeaders, resolved.fingerprint)
+  return {
+    nextHeaders: appliedHeaders,
+    changed: headersChanged(workingHeaders, appliedHeaders),
+    fingerprint: resolved.fingerprint,
+    source: resolved.source
+  }
 }
 
 function normalizeAccountUuid(candidate) {
@@ -392,10 +503,7 @@ function normalizeSessionSeed(sessionSeed) {
 function buildRelayGeneratedUserId(account, sessionSeed = null) {
   const accountId = resolveAccountId({ account }) || 'unknown-account'
   const accountUuid = extractAccountUuid(account) || ''
-  const deviceId = crypto
-    .createHash('sha256')
-    .update(`relay-generated-device:${accountId}`)
-    .digest('hex')
+  const deviceId = resolveAccountDeviceId(account, accountId)
   const conversationSeed = normalizeSessionSeed(sessionSeed) || 'missing-session'
   const sessionId = formatUuidFromSeed(`${conversationSeed}::relay-session`)
 
@@ -406,7 +514,17 @@ function buildRelayGeneratedUserId(account, sessionSeed = null) {
   })
 }
 
-function rewriteUserId(body, accountId, accountUuid) {
+function resolveSessionId(parsed, accountId, sessionHash, isRealClaudeCode) {
+  if (!isRealClaudeCode && normalizeSessionSeed(sessionHash)) {
+    return formatUuidFromSeed(`${normalizeSessionSeed(sessionHash)}::relay-session`)
+  }
+
+  const seedTail = parsed.sessionId || 'default'
+  const effectiveScheduler = accountId ? String(accountId) : 'unknown-scheduler'
+  return formatUuidFromSeed(`${effectiveScheduler}::${seedTail}`)
+}
+
+function rewriteUserId(body, accountId, accountUuid, sessionHash = null, options = {}) {
   if (!body || typeof body !== 'object') {
     return { nextBody: body, changed: false }
   }
@@ -426,19 +544,18 @@ function rewriteUserId(body, accountId, accountUuid) {
     return { nextBody: body, changed: false }
   }
 
-  // 哈希 session（与原逻辑一致）
-  const seedTail = parsed.sessionId || 'default'
-  const effectiveScheduler = accountId ? String(accountId) : 'unknown-scheduler'
-  const hashedSession = formatUuidFromSeed(`${effectiveScheduler}::${seedTail}`)
+  const account = options.account && typeof options.account === 'object' ? options.account : null
+  const accountDeviceId =
+    account &&
+    (account.useUnifiedClientId === true || account.useUnifiedClientId === 'true') &&
+    account.unifiedClientId
+      ? resolveAccountDeviceId(account, accountId)
+      : parsed.deviceId
 
-  // 注入真实 accountUuid
-  const effectiveUuid = normalizeAccountUuid(accountUuid) || parsed.accountUuid || ''
-
-  // 以原格式重建
   const nextUserId = metadataUserIdHelper.build({
-    deviceId: parsed.deviceId,
-    accountUuid: effectiveUuid,
-    sessionId: hashedSession,
+    deviceId: accountDeviceId,
+    accountUuid: normalizeAccountUuid(accountUuid) || parsed.accountUuid || '',
+    sessionId: resolveSessionId(parsed, accountId, sessionHash, options.isRealClaudeCode === true),
     isJsonFormat: parsed.isJsonFormat
   })
 
@@ -475,9 +592,25 @@ async function transform(payload = {}) {
   const accountUuid = extractAccountUuid(payload.account)
   const accountIdForHeaders = resolveAccountId(payload)
   const accountFingerprint = extractAccountFingerprint(payload.account)
+  const isRealClaudeCode = payload.isRealClaudeCode === true
 
-  const { nextBody } = rewriteUserId(currentBody, payload.accountId, accountUuid)
-  const headerResult = await rewriteHeaders(currentHeaders, accountIdForHeaders, accountFingerprint)
+  const { nextBody } = rewriteUserId(
+    currentBody,
+    payload.accountId,
+    accountUuid,
+    payload.sessionHash,
+    {
+      account: payload.account,
+      isRealClaudeCode
+    }
+  )
+  const headerResult = await rewriteHeaders(
+    currentHeaders,
+    accountIdForHeaders,
+    accountFingerprint,
+    payload.account,
+    { isRealClaudeCode }
+  )
 
   const nextHeaders = headerResult ? headerResult.nextHeaders : currentHeaders
   const abortResponse =

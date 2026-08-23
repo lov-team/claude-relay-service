@@ -114,6 +114,13 @@ describe('nurture scheduler error helpers', () => {
     expect(isNurtureSchedulerError(new Error('other'))).toBe(false)
   })
 
+  test('createAllNurtureLimitedError keeps the triggering account id', () => {
+    const error = createAllNurtureLimitedError({ reason: 'seven_day_velocity' }, 'acc-velocity')
+    expect(error.accountId).toBe('acc-velocity')
+    expect(error.nurtureReason).toBe('seven_day_velocity')
+    expect(error.statusCode).toBe(403)
+  })
+
   test('buildNurtureLimitHttpResponse uses 403 and structured body', () => {
     jest.useFakeTimers()
     jest.setSystemTime(Date.parse('2026-07-10T12:00:00.000Z'))

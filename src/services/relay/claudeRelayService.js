@@ -1473,7 +1473,7 @@ class ClaudeRelayService {
           try {
             await claudeAccountService.pinSuccessfulRequestIdentity(
               accountId,
-              headers,
+              response.headers,
               'relay_non_stream_success'
             )
           } catch (identityError) {
@@ -2417,7 +2417,8 @@ class ClaudeRelayService {
         sessionHash,
         clientHeaders,
         requestOptions,
-        isStream
+        isStream,
+        isRealClaudeCode
       }
     )
 
@@ -4060,7 +4061,7 @@ class ClaudeRelayService {
               try {
                 await claudeAccountService.pinSuccessfulRequestIdentity(
                   accountId,
-                  headers,
+                  res.headers,
                   'relay_stream_success'
                 )
               } catch (identityError) {
