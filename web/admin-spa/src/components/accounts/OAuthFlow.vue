@@ -12,7 +12,9 @@
             <i class="fas fa-link text-white" />
           </div>
           <div class="flex-1">
-            <h4 class="mb-3 font-semibold text-blue-900 dark:text-blue-200">Claude 账户授权</h4>
+            <h4 class="mb-3 font-semibold text-blue-900 dark:text-blue-200">
+              {{ isReauth ? '重新授权 Claude 账户' : 'Claude 账户授权' }}
+            </h4>
 
             <!-- 授权方式选择 -->
             <div class="mb-4">
@@ -51,7 +53,9 @@
                 class="rounded-lg border border-blue-300 bg-white/80 p-4 dark:border-blue-600 dark:bg-gray-800/80"
               >
                 <p class="mb-3 text-sm text-blue-700 dark:text-blue-300">
-                  使用 claude.ai 的 sessionKey 自动完成 OAuth 授权流程，无需手动打开浏览器。
+                  使用 claude.ai 的 sessionKey 自动完成 OAuth 授权流程，无需手动打开浏览器。{{
+                    isReauth ? '重新授权只会更新当前账户的凭证。' : ''
+                  }}
                 </p>
 
                 <!-- sessionKey输入 -->
@@ -78,15 +82,26 @@
                   <textarea
                     v-model="sessionKey"
                     class="form-input w-full resize-y font-mono text-sm"
-                    placeholder="每行一个 sessionKey，例如：&#10;sk-ant-sid01-xxxxx...&#10;sk-ant-sid01-yyyyy..."
+                    :placeholder="
+                      isReauth
+                        ? '请输入当前账户对应的 sessionKey，例如：&#10;sk-ant-sid01-xxxxx...'
+                        : '每行一个 sessionKey，例如：&#10;sk-ant-sid01-xxxxx...&#10;sk-ant-sid01-yyyyy...'
+                    "
                     rows="3"
                   />
                   <p
-                    v-if="parsedSessionKeyCount > 1"
+                    v-if="!isReauth && parsedSessionKeyCount > 1"
                     class="mt-1 text-xs text-blue-600 dark:text-blue-400"
                   >
                     <i class="fas fa-info-circle mr-1" />
                     将批量创建 {{ parsedSessionKeyCount }} 个账户
+                  </p>
+                  <p
+                    v-else-if="isReauth && parsedSessionKeyCount > 1"
+                    class="mt-1 text-xs text-amber-600 dark:text-amber-400"
+                  >
+                    <i class="fas fa-exclamation-triangle mr-1" />
+                    重新授权只支持一个 sessionKey
                   </p>
                 </div>
 
@@ -146,7 +161,7 @@
                     正在授权 {{ batchProgress.current }}/{{ batchProgress.total }}...
                   </template>
                   <template v-else-if="cookieAuthLoading"> 正在授权... </template>
-                  <template v-else> 开始自动授权 </template>
+                  <template v-else>{{ isReauth ? '开始重新授权' : '开始自动授权' }}</template>
                 </button>
               </div>
             </div>
@@ -785,7 +800,7 @@
         type="button"
         @click="$emit('back')"
       >
-        上一步
+        {{ isReauth ? '取消' : '上一步' }}
       </button>
       <!-- Cookie自动授权模式不显示此按钮（Claude平台） -->
       <button
@@ -796,7 +811,7 @@
         @click="exchangeCode"
       >
         <div v-if="exchanging" class="loading-spinner mr-2" />
-        {{ exchanging ? '验证中...' : '完成授权' }}
+        {{ exchanging ? '验证中...' : isReauth ? '完成重新授权' : '完成授权' }}
       </button>
     </div>
   </div>
@@ -815,8 +830,14 @@ const props = defineProps({
   proxy: {
     type: Object,
     default: null
+  },
+  mode: {
+    type: String,
+    default: 'create'
   }
 })
+
+const isReauth = computed(() => props.mode === 'reauth')
 
 const emit = defineEmits(['success', 'back'])
 
@@ -1190,6 +1211,11 @@ const handleCookieAuth = async () => {
 
   if (sessionKeys.length === 0) {
     cookieAuthError.value = '请输入至少一个 sessionKey'
+    return
+  }
+
+  if (isReauth.value && sessionKeys.length > 1) {
+    cookieAuthError.value = '重新授权只支持一个 sessionKey'
     return
   }
 

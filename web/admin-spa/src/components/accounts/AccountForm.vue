@@ -3984,8 +3984,96 @@
             </div>
           </div>
 
+          <div v-if="form.platform === 'claude'" class="space-y-4">
+            <div class="flex gap-2">
+              <button
+                class="flex-1 rounded-xl px-4 py-2 text-sm font-semibold transition-colors"
+                :class="
+                  tokenUpdateMode === 'oauth'
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700'
+                "
+                type="button"
+                @click="tokenUpdateMode = 'oauth'"
+              >
+                重新授权
+              </button>
+              <button
+                class="flex-1 rounded-xl px-4 py-2 text-sm font-semibold transition-colors"
+                :class="
+                  tokenUpdateMode === 'manual'
+                    ? 'bg-amber-500 text-white'
+                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700'
+                "
+                type="button"
+                @click="tokenUpdateMode = 'manual'"
+              >
+                手动填写
+              </button>
+            </div>
+
+            <OAuthFlow
+              v-if="tokenUpdateMode === 'oauth'"
+              ref="oauthFlowRef"
+              mode="reauth"
+              :platform="form.platform"
+              :proxy="form.proxy"
+              @back="tokenUpdateMode = 'manual'"
+              @success="handleOAuthSuccess"
+            />
+
+            <div
+              v-else
+              class="rounded-lg border border-amber-200 bg-amber-50 p-4 dark:border-amber-700 dark:bg-amber-900/30"
+            >
+              <div class="mb-4 flex items-start gap-3">
+                <div
+                  class="mt-1 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-amber-500"
+                >
+                  <i class="fas fa-key text-sm text-white" />
+                </div>
+                <div>
+                  <h5 class="mb-2 font-semibold text-amber-900 dark:text-amber-300">更新 Token</h5>
+                  <p class="mb-2 text-sm text-amber-800 dark:text-amber-300">
+                    可以更新 Access Token 和 Refresh Token。为了安全起见，不会显示当前的 Token 值。
+                  </p>
+                  <p class="text-xs text-amber-600 dark:text-amber-400">
+                    💡 留空表示不更新该字段。建议优先使用上方「重新授权」，以保持
+                    scopes、组织信息等与新建账户一致。
+                  </p>
+                </div>
+              </div>
+
+              <div class="space-y-4">
+                <div>
+                  <label class="mb-3 block text-sm font-semibold text-gray-700 dark:text-gray-300"
+                    >新的 Access Token</label
+                  >
+                  <textarea
+                    v-model="form.accessToken"
+                    class="form-input w-full resize-none border-gray-300 font-mono text-xs dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 dark:placeholder-gray-400"
+                    placeholder="留空表示不更新..."
+                    rows="4"
+                  />
+                </div>
+
+                <div>
+                  <label class="mb-3 block text-sm font-semibold text-gray-700 dark:text-gray-300"
+                    >新的 Refresh Token</label
+                  >
+                  <textarea
+                    v-model="form.refreshToken"
+                    class="form-input w-full resize-none border-gray-300 font-mono text-xs dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 dark:placeholder-gray-400"
+                    placeholder="留空表示不更新..."
+                    rows="4"
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+
           <div
-            v-if="
+            v-else-if="
               !(isEdit && isEditingDroidApiKey) &&
               form.platform !== 'claude-console' &&
               form.platform !== 'ccr' &&
@@ -4178,6 +4266,8 @@ const oauthFlowRef = ref(null)
 const oauthStep = ref(1)
 const loading = ref(false)
 const showApiKey = ref(false)
+const tokenUpdateMode = ref('oauth')
+const pendingClaudeOauth = ref(null)
 
 // Setup Token 相关状态
 const setupTokenLoading = ref(false)
@@ -5118,8 +5208,75 @@ const buildClaudeAccountData = (tokenInfo, accountName, clientId) => {
   return data
 }
 
+const extractClaudeExtInfo = (claudeOauthPayload) => {
+  if (!claudeOauthPayload || typeof claudeOauthPayload !== 'object') {
+    return null
+  }
+
+  const extInfoPayload = {}
+  const extSource = claudeOauthPayload.extInfo
+  if (extSource?.org_uuid) extInfoPayload.org_uuid = extSource.org_uuid
+  if (extSource?.account_uuid) extInfoPayload.account_uuid = extSource.account_uuid
+
+  if (!extSource) {
+    if (claudeOauthPayload.organization?.uuid) {
+      extInfoPayload.org_uuid = claudeOauthPayload.organization.uuid
+    }
+    if (claudeOauthPayload.account?.uuid) {
+      extInfoPayload.account_uuid = claudeOauthPayload.account.uuid
+    }
+  }
+
+  return Object.keys(extInfoPayload).length > 0 ? extInfoPayload : null
+}
+
+const normalizeClaudeOauthPayload = (tokenInfo) => {
+  const source = tokenInfo?.claudeAiOauth || tokenInfo
+  if (!source || typeof source !== 'object') {
+    return null
+  }
+
+  const scopes = Array.isArray(source.scopes)
+    ? source.scopes
+    : typeof source.scopes === 'string'
+      ? source.scopes.split(/\s+/).filter(Boolean)
+      : []
+
+  return {
+    ...source,
+    scopes
+  }
+}
+
+const applyClaudeOauthToUpdateData = (data, tokenInfo) => {
+  const claudeOauthPayload = normalizeClaudeOauthPayload(tokenInfo)
+  if (!claudeOauthPayload) {
+    return false
+  }
+
+  data.claudeAiOauth = claudeOauthPayload
+  const extInfoPayload = extractClaudeExtInfo(claudeOauthPayload)
+  if (extInfoPayload) {
+    data.extInfo = extInfoPayload
+  }
+  return true
+}
+
 // 处理OAuth成功（支持批量）
 const handleOAuthSuccess = async (tokenInfoOrList) => {
+  if (isEdit.value) {
+    const tokenInfo = Array.isArray(tokenInfoOrList) ? tokenInfoOrList[0] : tokenInfoOrList
+    if (!normalizeClaudeOauthPayload(tokenInfo)) {
+      showToast('授权成功但未返回凭证，请重试', 'error')
+      oauthFlowRef.value?.resetCookieAuth()
+      return
+    }
+    pendingClaudeOauth.value = tokenInfo
+    await updateAccount()
+    oauthFlowRef.value?.resetCookieAuth()
+    return
+  }
+
   loading.value = true
   try {
     const currentPlatform = form.value.platform
@@ -5847,8 +6004,14 @@ const updateAccount = async () => {
       proxy: proxyPayload
     }
 
-    // 只有非空时才更新token
-    if (form.value.accessToken || form.value.refreshToken) {
+    // 只有非空时才更新token；Claude 重新授权优先使用完整 OAuth 结果
+    if (props.account.platform === 'claude' && pendingClaudeOauth.value) {
+      if (!applyClaudeOauthToUpdateData(data, pendingClaudeOauth.value)) {
+        showToast('授权成功但未返回凭证，请重试', 'error')
+        loading.value = false
+        return
+      }
+    } else if (form.value.accessToken || form.value.refreshToken) {
       const trimmedAccessToken = form.value.accessToken?.trim() || ''
       const trimmedRefreshToken = form.value.refreshToken?.trim() || ''
 
@@ -6104,6 +6267,7 @@ const updateAccount = async () => {
 
     if (props.account.platform === 'claude') {
       await accountsStore.updateClaudeAccount(props.account.id, data)
+      pendingClaudeOauth.value = null
     } else if (props.account.platform === 'claude-console') {
       await accountsStore.updateClaudeConsoleAccount(props.account.id, data)
     } else if (props.account.platform === 'openai-responses') {
