@@ -82,11 +82,7 @@
                   <textarea
                     v-model="sessionKey"
                     class="form-input w-full resize-y font-mono text-sm"
-                    :placeholder="
-                      isReauth
-                        ? '请输入当前账户对应的 sessionKey，例如：&#10;sk-ant-sid01-xxxxx...'
-                        : '每行一个 sessionKey，例如：&#10;sk-ant-sid01-xxxxx...&#10;sk-ant-sid01-yyyyy...'
-                    "
+                    :placeholder="sessionKeyPlaceholder"
                     rows="3"
                   />
                   <p
@@ -838,6 +834,11 @@ const props = defineProps({
 })
 
 const isReauth = computed(() => props.mode === 'reauth')
+const sessionKeyPlaceholder = computed(() =>
+  isReauth.value
+    ? '请输入当前账户对应的 sessionKey，例如：\nsk-ant-sid01-xxxxx...'
+    : '每行一个 sessionKey，例如：\nsk-ant-sid01-xxxxx...\nsk-ant-sid01-yyyyy...'
+)
 
 const emit = defineEmits(['success', 'back'])
 
