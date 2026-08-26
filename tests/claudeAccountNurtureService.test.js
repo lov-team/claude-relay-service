@@ -133,6 +133,13 @@ describe('nurture scheduler error helpers', () => {
     expect(body.error.type).toBe('nurture_limit_reached')
     expect(body.error.code).toBe('nurture_limit_reached')
     expect(body.error.reason).toBe('seven_day_pace')
+    expect(body.error.metadata).toMatchObject({
+      source: 'claude-relay-service',
+      retryable: false,
+      disable_channel: true,
+      limit_kind: 'nurture',
+      nurture_reason: 'seven_day_pace'
+    })
     expect(buildNurtureLimitBody('rpm').error.reason).toBe('rpm')
 
     jest.useRealTimers()

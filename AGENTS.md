@@ -135,7 +135,7 @@ curl -s -o /dev/null -w "%{http_code}\n" https://niubi.cc-flyer.com/cc/health
 
 1. 打开 `https://niubi.cc-flyer.com/cc/admin-next/` → 账户列表
 2. 养号账户应显示「养号 Dn / 常驻」标签；有阻断时列表显示「养号阻断：…」
-3. 全号养号挡路时，new-api 渠道应收到 **429** + `disable_channel: false`（不要 403/500），只换渠道、不自动禁用
+3. 全号/专属养号挡路时，new-api 渠道应收到 **403** + `nurture_limit_reached` + `disable_channel: true`，自动禁用；共享池单号养号换号耗尽仍回 **429** + `disable_channel: false`，只换渠道、不自动禁用
 
 ## 常见问题
 

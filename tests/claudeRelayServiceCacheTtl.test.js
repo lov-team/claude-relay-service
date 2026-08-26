@@ -678,16 +678,16 @@ describe('Claude relay CC rate-limit policy', () => {
     expect(body.error.metadata.limit_kind).toBe('agent_view_auxiliary')
   })
 
-  test('returns retryable 429 when the shared pool is blocked by nurture limits', () => {
+  test('returns 403 so new-api can disable the channel when the shared pool is blocked by nurture limits', () => {
     const response = claudeRelayService._buildNurtureLimitedResponse('account-3', 'seven_day_pace')
     const body = JSON.parse(response.body)
 
-    expect(response.statusCode).toBe(429)
-    expect(body.error.code).toBe('crs_rate_limited')
+    expect(response.statusCode).toBe(403)
+    expect(body.error.code).toBe('nurture_limit_reached')
     expect(body.error.metadata).toMatchObject({
       source: 'claude-relay-service',
-      retryable: true,
-      disable_channel: false,
+      retryable: false,
+      disable_channel: true,
       limit_kind: 'nurture',
       nurture_reason: 'seven_day_pace'
     })

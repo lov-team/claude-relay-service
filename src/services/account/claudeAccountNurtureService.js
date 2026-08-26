@@ -804,8 +804,15 @@ function buildNurtureLimitBody(reason) {
     error: {
       type: 'nurture_limit_reached',
       code: 'nurture_limit_reached',
-      message: '账号养号护栏已达今日或当前窗口上限，请稍后重试。',
-      reason: reason || null
+      message: 'CRS account pool is blocked by nurture guard limits.',
+      reason: reason || null,
+      metadata: {
+        source: 'claude-relay-service',
+        retryable: false,
+        disable_channel: true,
+        limit_kind: 'nurture',
+        nurture_reason: reason || null
+      }
     }
   }
 }

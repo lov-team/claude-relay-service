@@ -128,8 +128,20 @@ class ClaudeRelayService {
   }
 
   _buildNurtureLimitedResponse(accountId, reason) {
-    // 养号窗口是临时挡路，不是渠道坏了。回 403 会被 new-api 按 AutomaticDisableStatusCodes 整渠禁用。
-    return this._buildRetryableNurtureResponse(accountId, reason)
+    // 全号/专属养号挡路：回 403，让 new-api 自动禁用该渠道。
+    logger.warn(
+      `🌱 Account ${accountId} blocked by nurture guard (${reason || 'unknown'}), returning 403`
+    )
+    const response = claudeAccountNurtureService.buildNurtureLimitHttpResponse(reason, 403)
+    return {
+      ...response,
+      headers: {
+        ...response.headers,
+        'retry-after': response.headers['Retry-After']
+      },
+      accountId,
+      nurtureReason: reason
+    }
   }
 
   _buildRetryableNurtureResponse(accountId, reason) {
@@ -143,7 +155,8 @@ class ClaudeRelayService {
         ...response.headers,
         'retry-after': response.headers['Retry-After']
       },
-      accountId
+      accountId,
+      nurtureReason: reason
     }
   }
 
@@ -951,8 +964,9 @@ class ClaudeRelayService {
               `⚠️ No healthy account available after nurture block on ${accountId}: ${failoverError.message}`
             )
           }
+          return nurtureBlockedResponse
         }
-        return nurtureBlockedResponse
+        return this._buildNurtureLimitedResponse(accountId, nurtureBlockedResponse.nurtureReason)
       }
 
       // 📬 用户消息队列处理：如果是用户消息请求，需要获取队列锁
@@ -2875,6 +2889,18 @@ class ClaudeRelayService {
               `⚠️ No healthy account available after stream nurture block on ${accountId}: ${failoverError.message}`
             )
           }
+        } else if (!responseStream.headersSent) {
+          const disableResponse = this._buildNurtureLimitedResponse(
+            accountId,
+            nurtureBlockedResponse.nurtureReason
+          )
+          responseStream.status(disableResponse.statusCode)
+          Object.entries(disableResponse.headers).forEach(([key, value]) => {
+            responseStream.setHeader(key, value)
+          })
+          responseStream.write(disableResponse.body)
+          responseStream.end()
+          return
         }
         if (!responseStream.headersSent) {
           responseStream.status(nurtureBlockedResponse.statusCode)

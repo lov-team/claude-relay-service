@@ -30,8 +30,9 @@ const {
 const router = express.Router()
 
 function respondToNurtureSchedulerError(res, error) {
-  const response = claudeAccountNurtureService.buildRetryableNurtureLimitHttpResponse(
-    error.nurtureReason
+  const response = claudeAccountNurtureService.buildNurtureLimitHttpResponse(
+    error.nurtureReason,
+    403
   )
   Object.entries(response.headers).forEach(([key, value]) => {
     res.set(key, value)
