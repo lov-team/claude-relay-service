@@ -128,18 +128,8 @@ class ClaudeRelayService {
   }
 
   _buildNurtureLimitedResponse(accountId, reason) {
-    logger.warn(
-      `🌱 Account ${accountId} blocked by nurture guard (${reason || 'unknown'}), returning 403`
-    )
-    const response = claudeAccountNurtureService.buildNurtureLimitHttpResponse(reason, 403)
-    return {
-      ...response,
-      headers: {
-        ...response.headers,
-        'retry-after': response.headers['Retry-After']
-      },
-      accountId
-    }
+    // 养号窗口是临时挡路，不是渠道坏了。回 403 会被 new-api 按 AutomaticDisableStatusCodes 整渠禁用。
+    return this._buildRetryableNurtureResponse(accountId, reason)
   }
 
   _buildRetryableNurtureResponse(accountId, reason) {
@@ -1556,12 +1546,18 @@ class ClaudeRelayService {
           response.statusCode,
           accountType,
           isDedicatedOfficialAccount,
-          response.statusCode === 403 || shouldFailoverForRateLimit
+          response.statusCode === 403 ||
+            shouldFailoverForRateLimit ||
+            suppressFailoverForAuxiliaryRequest
         )
       ) {
         return this._buildRetryableSharedPoolRateLimitResponse(
           accountId,
-          response.statusCode === 403 ? 'shared_pool_forbidden' : 'shared_pool'
+          suppressFailoverForAuxiliaryRequest
+            ? 'agent_view_auxiliary'
+            : response.statusCode === 403
+              ? 'shared_pool_forbidden'
+              : 'shared_pool'
         )
       }
 
@@ -3273,7 +3269,6 @@ class ClaudeRelayService {
             }
 
             if (
-              !isAgentViewAuxiliaryRequest &&
               this._shouldRewriteSharedPoolErrorAsRetryable(
                 res.statusCode,
                 accountType,
@@ -3282,7 +3277,11 @@ class ClaudeRelayService {
               isStreamWritable(responseStream) &&
               !responseStream.headersSent
             ) {
-              this._writeRetryableSharedPoolResponse(responseStream, accountId)
+              this._writeRetryableSharedPoolResponse(
+                responseStream,
+                accountId,
+                isAgentViewAuxiliaryRequest ? 'agent_view_auxiliary' : 'shared_pool'
+              )
               resolve()
               return
             }

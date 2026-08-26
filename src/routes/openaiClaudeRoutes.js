@@ -27,11 +27,13 @@ function checkPermissions(apiKeyData, requiredPermission = 'claude') {
 }
 
 function respondToNurtureSchedulerError(res, error) {
-  const retryAfter = claudeAccountNurtureService.calcNurtureRetryAfterSeconds()
-  return res
-    .status(error.statusCode || 403)
-    .set('Retry-After', String(retryAfter))
-    .json(claudeAccountNurtureService.buildNurtureLimitBody(error.nurtureReason))
+  const response = claudeAccountNurtureService.buildRetryableNurtureLimitHttpResponse(
+    error.nurtureReason
+  )
+  Object.entries(response.headers).forEach(([key, value]) => {
+    res.set(key, value)
+  })
+  return res.status(response.statusCode).type('application/json').send(response.body)
 }
 
 function queueRateLimitUpdate(

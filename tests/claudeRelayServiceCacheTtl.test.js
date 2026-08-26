@@ -628,4 +628,41 @@ describe('Claude relay CC rate-limit policy', () => {
     expect(body.error.metadata.disable_channel).toBe(false)
     expect(body.error.metadata.limit_kind).toBe('shared_pool_forbidden')
   })
+
+  test('rewrites Agent View auxiliary 429 as retryable so new-api does not disable the channel', () => {
+    expect(
+      claudeRelayService._shouldRewriteSharedPoolErrorAsRetryable(
+        429,
+        'claude-official',
+        false,
+        true
+      )
+    ).toBe(true)
+
+    const response = claudeRelayService._buildRetryableSharedPoolRateLimitResponse(
+      'account-3',
+      'agent_view_auxiliary'
+    )
+    const body = JSON.parse(response.body)
+
+    expect(response.statusCode).toBe(429)
+    expect(body.error.code).toBe('crs_rate_limited')
+    expect(body.error.metadata.disable_channel).toBe(false)
+    expect(body.error.metadata.limit_kind).toBe('agent_view_auxiliary')
+  })
+
+  test('returns retryable 429 when the shared pool is blocked by nurture limits', () => {
+    const response = claudeRelayService._buildNurtureLimitedResponse('account-3', 'seven_day_pace')
+    const body = JSON.parse(response.body)
+
+    expect(response.statusCode).toBe(429)
+    expect(body.error.code).toBe('crs_rate_limited')
+    expect(body.error.metadata).toMatchObject({
+      source: 'claude-relay-service',
+      retryable: true,
+      disable_channel: false,
+      limit_kind: 'nurture',
+      nurture_reason: 'seven_day_pace'
+    })
+  })
 })

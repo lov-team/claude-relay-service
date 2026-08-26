@@ -832,7 +832,8 @@ function buildRetryableNurtureLimitHttpResponse(reason) {
       error: {
         type: 'rate_limit_error',
         code: 'crs_rate_limited',
-        message: 'CRS selected account reached its nurture guard limit; retry another channel.',
+        message:
+          'CRS account pool is temporarily blocked by nurture guard limits; retry another upstream channel.',
         metadata: {
           source: 'claude-relay-service',
           retryable: true,
