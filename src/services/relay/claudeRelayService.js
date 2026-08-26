@@ -261,6 +261,41 @@ class ClaudeRelayService {
     return null
   }
 
+  _isDedicatedOfficialClaudeAccount(apiKeyData, accountId, accountType) {
+    return (
+      accountType === 'claude-official' &&
+      Boolean(apiKeyData?.claudeAccountId) &&
+      !String(apiKeyData.claudeAccountId).startsWith('group:') &&
+      apiKeyData.claudeAccountId === accountId
+    )
+  }
+
+  _shouldFailoverSharedNurtureBlock(apiKeyData, accountId, accountType, options = {}) {
+    return (
+      accountType === 'claude-official' &&
+      !this._isDedicatedOfficialClaudeAccount(apiKeyData, accountId, accountType) &&
+      Number(options.accountFailoverAttempt || 0) < SHARED_ACCOUNT_FAILOVER_MAX_ATTEMPTS
+    )
+  }
+
+  async _retryAfterSharedNurtureBlock({ accountId, sessionHash, options, retry }) {
+    const failoverAttempt = Number(options.accountFailoverAttempt || 0) + 1
+    const excludeAccountIds = [
+      ...new Set([...(options.excludeAccountIds || []), accountId].filter(Boolean))
+    ]
+    if (sessionHash) {
+      await unifiedClaudeScheduler.clearSessionMapping(sessionHash).catch(() => {})
+    }
+    logger.warn(
+      `🔄 Retrying request on another account after nurture block on ${accountId} (failover ${failoverAttempt}/${SHARED_ACCOUNT_FAILOVER_MAX_ATTEMPTS})`
+    )
+    return retry({
+      ...options,
+      accountFailoverAttempt: failoverAttempt,
+      excludeAccountIds
+    })
+  }
+
   // 🧾 提取错误消息文本
   _extractErrorMessage(body) {
     return extractClaudeOAuthError(body).message
@@ -845,7 +880,10 @@ class ClaudeRelayService {
         accountSelection = await unifiedClaudeScheduler.selectAccountForApiKey(
           apiKeyData,
           sessionHash,
-          requestBody.model
+          requestBody.model,
+          null,
+          clientHeaders,
+          { excludeAccountIds: options.excludeAccountIds || [] }
         )
       } catch (error) {
         if (error.code === 'CLAUDE_DEDICATED_RATE_LIMITED') {
@@ -892,6 +930,28 @@ class ClaudeRelayService {
 
       const nurtureBlockedResponse = await this._enforceNurtureBeforeRelay(accountId, accountType)
       if (nurtureBlockedResponse) {
+        if (this._shouldFailoverSharedNurtureBlock(apiKeyData, accountId, accountType, options)) {
+          try {
+            return await this._retryAfterSharedNurtureBlock({
+              accountId,
+              sessionHash,
+              options,
+              retry: (nextOptions) =>
+                this.relayRequest(
+                  requestBody,
+                  apiKeyData,
+                  clientRequest,
+                  clientResponse,
+                  clientHeaders,
+                  nextOptions
+                )
+            })
+          } catch (failoverError) {
+            logger.warn(
+              `⚠️ No healthy account available after nurture block on ${accountId}: ${failoverError.message}`
+            )
+          }
+        }
         return nurtureBlockedResponse
       }
 
@@ -2729,7 +2789,10 @@ class ClaudeRelayService {
         accountSelection = await unifiedClaudeScheduler.selectAccountForApiKey(
           apiKeyData,
           sessionHash,
-          requestBody.model
+          requestBody.model,
+          null,
+          clientHeaders,
+          { excludeAccountIds: options.excludeAccountIds || [] }
         )
       } catch (error) {
         if (error.code === 'CLAUDE_DEDICATED_RATE_LIMITED') {
@@ -2787,6 +2850,32 @@ class ClaudeRelayService {
 
       const nurtureBlockedResponse = await this._enforceNurtureBeforeRelay(accountId, accountType)
       if (nurtureBlockedResponse) {
+        if (
+          !responseStream.headersSent &&
+          this._shouldFailoverSharedNurtureBlock(apiKeyData, accountId, accountType, options)
+        ) {
+          try {
+            return await this._retryAfterSharedNurtureBlock({
+              accountId,
+              sessionHash,
+              options,
+              retry: (nextOptions) =>
+                this.relayStreamRequestWithUsageCapture(
+                  requestBody,
+                  apiKeyData,
+                  responseStream,
+                  clientHeaders,
+                  usageCallback,
+                  streamTransformer,
+                  nextOptions
+                )
+            })
+          } catch (failoverError) {
+            logger.warn(
+              `⚠️ No healthy account available after stream nurture block on ${accountId}: ${failoverError.message}`
+            )
+          }
+        }
         if (!responseStream.headersSent) {
           responseStream.status(nurtureBlockedResponse.statusCode)
           Object.entries(nurtureBlockedResponse.headers).forEach(([key, value]) => {

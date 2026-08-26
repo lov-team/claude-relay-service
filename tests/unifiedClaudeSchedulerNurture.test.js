@@ -171,6 +171,20 @@ describe('UnifiedClaudeScheduler nurture handling for auto-stopped accounts', ()
     expect(claudeAccountNurtureService.evaluate).not.toHaveBeenCalled()
   })
 
+  test('skips excluded accounts so a nurture retry can rotate to another available account', async () => {
+    const first = buildOfficialAccount('first-tried')
+    const fallback = buildOfficialAccount('fallback')
+    redis.getAllClaudeAccounts.mockResolvedValue([first, fallback])
+
+    await expect(
+      unifiedClaudeScheduler.selectAccountForApiKey({}, null, 'claude-sonnet-4-6', null, '', {
+        excludeAccountIds: ['first-tried']
+      })
+    ).resolves.toEqual({ accountId: 'fallback', accountType: 'claude-official' })
+    expect(claudeAccountNurtureService.evaluate).not.toHaveBeenCalledWith('first-tried')
+    expect(claudeAccountNurtureService.evaluate).toHaveBeenCalledWith('fallback')
+  })
+
   test('skips a seven_day_velocity account and uses an available fallback', async () => {
     const velocityBlocked = buildOfficialAccount('velocity-blocked')
     const fallback = buildOfficialAccount('fallback')

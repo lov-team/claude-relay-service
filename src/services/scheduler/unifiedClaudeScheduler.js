@@ -42,6 +42,13 @@ function isProAccount(info) {
   return info.accountType === 'claude_pro'
 }
 
+function normalizeExcludeAccountIds(value) {
+  if (!Array.isArray(value) || value.length === 0) {
+    return new Set()
+  }
+  return new Set(value.map((id) => String(id || '').trim()).filter(Boolean))
+}
+
 class UnifiedClaudeScheduler {
   constructor() {
     this.SESSION_MAPPING_PREFIX = 'unified_claude_session_mapping:'
@@ -224,8 +231,10 @@ class UnifiedClaudeScheduler {
     sessionHash = null,
     requestedModel = null,
     forcedAccount = null,
-    clientIdentity = ''
+    clientIdentity = '',
+    options = {}
   ) {
+    const excludeAccountIds = normalizeExcludeAccountIds(options?.excludeAccountIds)
     try {
       const clientHeaders =
         clientIdentity && typeof clientIdentity === 'object'
@@ -309,7 +318,8 @@ class UnifiedClaudeScheduler {
             sessionHash,
             effectiveModel,
             vendor === 'ccr',
-            requestPlatform
+            requestPlatform,
+            excludeAccountIds
           )
         }
 
@@ -491,7 +501,12 @@ class UnifiedClaudeScheduler {
       // 如果有会话哈希，检查是否有已映射的账户
       if (sessionHash) {
         const mappedAccount = await this._getSessionMapping(sessionHash)
-        if (mappedAccount) {
+        if (mappedAccount && excludeAccountIds.has(mappedAccount.accountId)) {
+          logger.info(
+            `ℹ️ Skipping sticky session mapping ${mappedAccount.accountId}; account was already tried for this request`
+          )
+          await this._deleteSessionMapping(sessionHash)
+        } else if (mappedAccount) {
           // 当本次请求不是 CCR 前缀时，不允许使用指向 CCR 的粘性会话映射
           if (vendor !== 'ccr' && mappedAccount.accountType === 'ccr') {
             logger.info(
@@ -526,7 +541,8 @@ class UnifiedClaudeScheduler {
       const availableAccounts = await this._getAllAvailableAccounts(
         apiKeyData,
         effectiveModel,
-        false // 仅前缀才走 CCR：默认池不包含 CCR 账户
+        false, // 仅前缀才走 CCR：默认池不包含 CCR 账户
+        excludeAccountIds
       )
 
       if (availableAccounts.length === 0) {
@@ -574,7 +590,12 @@ class UnifiedClaudeScheduler {
   }
 
   // 📋 获取所有可用账户（合并官方和Console）
-  async _getAllAvailableAccounts(apiKeyData, requestedModel = null, includeCcr = false) {
+  async _getAllAvailableAccounts(
+    apiKeyData,
+    requestedModel = null,
+    includeCcr = false,
+    excludeAccountIds = new Set()
+  ) {
     const availableAccounts = []
     let nurtureBlockedCount = 0
     let lastNurtureEvaluation = null
@@ -746,6 +767,9 @@ class UnifiedClaudeScheduler {
     // 获取官方Claude账户（共享池）
     const claudeAccounts = await redis.getAllClaudeAccounts()
     for (const account of claudeAccounts) {
+      if (excludeAccountIds.has(account.id)) {
+        continue
+      }
       if (
         account.isActive === 'true' &&
         account.status !== 'error' &&
@@ -1630,8 +1654,12 @@ class UnifiedClaudeScheduler {
     sessionHash = null,
     requestedModel = null,
     allowCcr = false,
-    requestPlatform = 'unknown'
+    requestPlatform = 'unknown',
+    excludeAccountIds = new Set()
   ) {
+    excludeAccountIds = normalizeExcludeAccountIds(
+      excludeAccountIds instanceof Set ? [...excludeAccountIds] : excludeAccountIds
+    )
     try {
       // 获取分组信息
       const group = await accountGroupService.getGroup(groupId)
@@ -1644,7 +1672,9 @@ class UnifiedClaudeScheduler {
       // 如果有会话哈希，检查是否有已映射的账户
       if (sessionHash) {
         const mappedAccount = await this._getSessionMapping(sessionHash)
-        if (mappedAccount) {
+        if (mappedAccount && excludeAccountIds.has(mappedAccount.accountId)) {
+          await this._deleteSessionMapping(sessionHash)
+        } else if (mappedAccount) {
           // 验证映射的账户是否属于这个分组
           const memberIds = await accountGroupService.getGroupMembers(groupId)
           if (memberIds.includes(mappedAccount.accountId)) {
@@ -1686,6 +1716,9 @@ class UnifiedClaudeScheduler {
 
       // 获取所有成员账户的详细信息
       for (const memberId of memberIds) {
+        if (excludeAccountIds.has(memberId)) {
+          continue
+        }
         let account = null
         let accountType = null
 

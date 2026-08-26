@@ -629,6 +629,33 @@ describe('Claude relay CC rate-limit policy', () => {
     expect(body.error.metadata.limit_kind).toBe('shared_pool_forbidden')
   })
 
+  test('failovers shared-pool nurture blocks and keeps dedicated accounts from rotating', () => {
+    expect(
+      claudeRelayService._shouldFailoverSharedNurtureBlock(
+        { name: 'newapi' },
+        'account-1',
+        'claude-official',
+        { accountFailoverAttempt: 0 }
+      )
+    ).toBe(true)
+    expect(
+      claudeRelayService._shouldFailoverSharedNurtureBlock(
+        { name: 'dedicated', claudeAccountId: 'account-1' },
+        'account-1',
+        'claude-official',
+        { accountFailoverAttempt: 0 }
+      )
+    ).toBe(false)
+    expect(
+      claudeRelayService._shouldFailoverSharedNurtureBlock(
+        { name: 'newapi' },
+        'account-1',
+        'claude-official',
+        { accountFailoverAttempt: 2 }
+      )
+    ).toBe(false)
+  })
+
   test('rewrites Agent View auxiliary 429 as retryable so new-api does not disable the channel', () => {
     expect(
       claudeRelayService._shouldRewriteSharedPoolErrorAsRetryable(
