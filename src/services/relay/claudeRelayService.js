@@ -4617,7 +4617,7 @@ class ClaudeRelayService {
   }
 
   // 🧪 测试账号连接（供Admin API使用，直接复用 _makeClaudeStreamRequestWithUsageCapture）
-  async testAccountConnection(accountId, responseStream, model = 'claude-sonnet-4-5-20250929') {
+  async testAccountConnection(accountId, responseStream, model = 'claude-opus-4-6') {
     const testRequestBody = createClaudeTestPayload(model, { stream: true })
 
     try {
@@ -4675,7 +4675,7 @@ class ClaudeRelayService {
 
   // 🧪 非流式测试账号连接（供定时任务使用）
   // 复用流式请求方法，收集结果后返回
-  async testAccountConnectionSync(accountId, model = 'claude-sonnet-4-5-20250929') {
+  async testAccountConnectionSync(accountId, model = 'claude-opus-4-6') {
     const testRequestBody = createClaudeTestPayload(model, { stream: true })
     const startTime = Date.now()
 

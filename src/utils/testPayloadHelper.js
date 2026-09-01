@@ -35,7 +35,7 @@ function generateSessionString() {
  * @param {number} options.maxTokens - 最大输出 token（默认 1000）
  * @returns {object} 测试请求体
  */
-function createClaudeTestPayload(model = 'claude-sonnet-4-5-20250929', options = {}) {
+function createClaudeTestPayload(model = 'claude-opus-4-6', options = {}) {
   const { stream, prompt = 'hi', maxTokens = 1000 } = options
   const payload = {
     model,
@@ -96,7 +96,7 @@ async function sendStreamTestRequest(options) {
     apiUrl,
     authorization,
     responseStream,
-    payload = createClaudeTestPayload('claude-sonnet-4-5-20250929', { stream: true }),
+    payload = createClaudeTestPayload('claude-opus-4-6', { stream: true }),
     proxyAgent = null,
     timeout = 30000,
     extraHeaders = {},

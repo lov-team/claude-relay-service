@@ -1047,7 +1047,7 @@ router.get('/claude-accounts/:accountId/test-config', authenticateAdmin, async (
         config: testConfig || {
           enabled: false,
           cronExpression: '0 8 * * *',
-          model: 'claude-sonnet-4-5-20250929'
+          model: 'claude-opus-4-6'
         }
       }
     })
@@ -1100,7 +1100,7 @@ router.put('/claude-accounts/:accountId/test-config', authenticateAdmin, async (
     }
 
     // 验证模型参数
-    const testModel = model || 'claude-sonnet-4-5-20250929'
+    const testModel = model || 'claude-opus-4-6'
     if (typeof testModel !== 'string' || testModel.length > 256) {
       return res.status(400).json({
         error: 'Invalid parameter',

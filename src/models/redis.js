@@ -4994,7 +4994,7 @@ redisClient.saveAccountTestConfig = async function (accountId, platform, testCon
     await client.hset(key, {
       enabled: testConfig.enabled ? 'true' : 'false',
       cronExpression: testConfig.cronExpression || '0 8 * * *', // 默认每天早上8点
-      model: testConfig.model || 'claude-sonnet-4-5-20250929', // 默认模型
+      model: testConfig.model || 'claude-opus-4-6', // 默认使用 Opus，避免连接测试消耗 Sonnet 限额
       updatedAt: new Date().toISOString()
     })
     // 设置过期时间（1年）
@@ -5027,7 +5027,7 @@ redisClient.getAccountTestConfig = async function (accountId, platform) {
     return {
       enabled: testConfig.enabled === 'true',
       cronExpression: cronExpression || '0 8 * * *',
-      model: testConfig.model || 'claude-sonnet-4-5-20250929',
+      model: testConfig.model || 'claude-opus-4-6',
       updatedAt: testConfig.updatedAt
     }
   } catch (error) {
@@ -5070,7 +5070,7 @@ redisClient.getEnabledTestAccounts = async function (platform) {
           accountIds.push({
             accountId,
             cronExpression: cronExpression || '0 8 * * *',
-            model: testConfig.model || 'claude-sonnet-4-5-20250929'
+            model: testConfig.model || 'claude-opus-4-6'
           })
         }
       }
