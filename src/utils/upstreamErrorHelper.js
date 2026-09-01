@@ -413,6 +413,70 @@ const isTempUnavailable = async (accountId, accountType) => {
   }
 }
 
+const getTempUnavailableInfo = async (accountId, accountType) => {
+  try {
+    const redis = getRedis()
+    const client = redis.getClientSafe()
+    const key = `${TEMP_UNAVAILABLE_PREFIX}:${accountType}:${accountId}`
+    const ttl = await client.ttl(key)
+
+    if (!Number.isFinite(ttl) || ttl <= 0) {
+      return null
+    }
+
+    let expiresAt = null
+    const value = await client.get(key)
+    if (value) {
+      try {
+        const data = JSON.parse(value)
+        expiresAt = data.expiresAt || null
+      } catch {
+        expiresAt = null
+      }
+    }
+
+    return {
+      remainingSeconds: ttl,
+      expiresAt
+    }
+  } catch (error) {
+    logger.warn(
+      `⚠️ [UpstreamError] Failed to read temp unavailable TTL for ${accountId} (${accountType}): ${error.message}`
+    )
+    return null
+  }
+}
+
+const isTempUnavailableSchedulerError = (error) =>
+  error?.code === 'CLAUDE_ALL_TEMPORARILY_UNAVAILABLE'
+
+const buildTempUnavailableHttpResponse = (error) => {
+  const retryAfterSeconds = Math.max(1, Math.ceil(Number(error?.retryAfterSeconds) || 1))
+  const retryAt = error?.temporaryUnavailableUntil || null
+  return {
+    statusCode: 503,
+    headers: {
+      'Content-Type': 'application/json',
+      'Retry-After': String(retryAfterSeconds),
+      'retry-after': String(retryAfterSeconds)
+    },
+    body: JSON.stringify({
+      error: {
+        type: 'service_unavailable',
+        code: 'accounts_temporarily_unavailable',
+        message: 'All available Claude accounts are temporarily unavailable.',
+        metadata: {
+          source: 'claude-relay-service',
+          retryable: true,
+          disable_channel: false,
+          retry_after_seconds: retryAfterSeconds,
+          retry_at: retryAt
+        }
+      }
+    })
+  }
+}
+
 // 清除临时不可用状态
 const clearTempUnavailable = async (accountId, accountType) => {
   try {
@@ -515,6 +579,9 @@ const sanitizeErrorForClient = (errorData) => {
 module.exports = {
   markTempUnavailable,
   isTempUnavailable,
+  getTempUnavailableInfo,
+  isTempUnavailableSchedulerError,
+  buildTempUnavailableHttpResponse,
   clearTempUnavailable,
   getAllTempUnavailable,
   classifyError,

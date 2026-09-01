@@ -20,6 +20,7 @@ const { updateRateLimitCounters } = require('../utils/rateLimitHelper')
 const pricingService = require('../services/pricingService')
 const { getEffectiveModel } = require('../utils/modelHelper')
 const { createRequestDetailMeta } = require('../utils/requestDetailHelper')
+const upstreamErrorHelper = require('../utils/upstreamErrorHelper')
 
 // 🔧 辅助函数：检查 API Key 权限
 function checkPermissions(apiKeyData, requiredPermission = 'claude') {
@@ -35,6 +36,19 @@ function respondToNurtureSchedulerError(res, error) {
     res.set(key, value)
   })
   return res.status(response.statusCode).type('application/json').send(response.body)
+}
+
+function respondToTemporaryUnavailableSchedulerError(res, error) {
+  if (
+    typeof upstreamErrorHelper.isTempUnavailableSchedulerError !== 'function' ||
+    !upstreamErrorHelper.isTempUnavailableSchedulerError(error)
+  ) {
+    return false
+  }
+  const response = upstreamErrorHelper.buildTempUnavailableHttpResponse(error)
+  Object.entries(response.headers).forEach(([key, value]) => res.set(key, value))
+  res.status(response.statusCode).type('application/json').send(response.body)
+  return true
 }
 
 function queueRateLimitUpdate(
@@ -529,6 +543,9 @@ async function handleChatCompletion(req, res, apiKeyData) {
     const duration = Date.now() - startTime
     logger.info(`✅ OpenAI-Claude request completed in ${duration}ms`)
   } catch (error) {
+    if (respondToTemporaryUnavailableSchedulerError(res, error)) {
+      return undefined
+    }
     // 客户端主动断开连接是正常情况，使用 INFO 级别
     if (error.message === 'Client disconnected') {
       logger.info('🔌 OpenAI-Claude stream ended: Client disconnected')

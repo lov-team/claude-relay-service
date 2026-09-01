@@ -917,6 +917,9 @@ class ClaudeRelayService {
         if (claudeAccountNurtureService.isNurtureSchedulerError(error)) {
           return this._buildNurtureLimitedResponse(error.accountId, error.nurtureReason)
         }
+        if (error.code === 'CLAUDE_ALL_TEMPORARILY_UNAVAILABLE') {
+          return upstreamErrorHelper.buildTempUnavailableHttpResponse(error)
+        }
         if (error.code === 'CLAUDE_DEDICATED_UNAVAILABLE') {
           logger.warn(
             `🚫 Dedicated account ${error.accountId} is unavailable (${error.reason}) for API key ${apiKeyData.name}, returning 503`
@@ -2836,6 +2839,18 @@ class ClaudeRelayService {
             })
           }
           responseStream.write(nurtureResponse.body)
+          responseStream.end()
+          return
+        }
+        if (error.code === 'CLAUDE_ALL_TEMPORARILY_UNAVAILABLE') {
+          const response = upstreamErrorHelper.buildTempUnavailableHttpResponse(error)
+          if (!responseStream.headersSent) {
+            responseStream.status(response.statusCode)
+            Object.entries(response.headers).forEach(([key, value]) => {
+              responseStream.setHeader(key, value)
+            })
+          }
+          responseStream.write(response.body)
           responseStream.end()
           return
         }

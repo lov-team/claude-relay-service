@@ -22,7 +22,8 @@ jest.mock('../src/utils/commonHelper', () => ({
 }))
 
 jest.mock('../src/utils/upstreamErrorHelper', () => ({
-  isTempUnavailable: jest.fn().mockResolvedValue(false)
+  isTempUnavailable: jest.fn().mockResolvedValue(false),
+  getTempUnavailableInfo: jest.fn().mockResolvedValue(null)
 }))
 
 jest.mock('../src/models/redis', () => ({
@@ -88,6 +89,7 @@ jest.mock('../src/services/account/claudeAccountNurtureService', () => ({
 const redis = require('../src/models/redis')
 const claudeAccountNurtureService = require('../src/services/account/claudeAccountNurtureService')
 const accountGroupService = require('../src/services/accountGroupService')
+const upstreamErrorHelper = require('../src/utils/upstreamErrorHelper')
 const unifiedClaudeScheduler = require('../src/services/scheduler/unifiedClaudeScheduler')
 
 const buildOfficialAccount = (id, overrides = {}) => ({
@@ -236,6 +238,47 @@ describe('UnifiedClaudeScheduler nurture handling for auto-stopped accounts', ()
       code: 'CLAUDE_NURTURE_LIMITED',
       statusCode: 403,
       accountId: 'dedicated'
+    })
+  })
+
+  test('returns the shortest temporary-unavailable cooldown when every shared account is blocked', async () => {
+    redis.getAllClaudeAccounts.mockResolvedValue([
+      buildOfficialAccount('slow-temp'),
+      buildOfficialAccount('fast-temp')
+    ])
+    upstreamErrorHelper.getTempUnavailableInfo.mockImplementation(async (accountId) =>
+      accountId === 'slow-temp'
+        ? { remainingSeconds: 120, expiresAt: '2026-09-01T00:02:00.000Z' }
+        : { remainingSeconds: 15, expiresAt: '2026-09-01T00:00:15.000Z' }
+    )
+
+    await expect(
+      unifiedClaudeScheduler.selectAccountForApiKey({}, null, 'claude-sonnet-4-6')
+    ).rejects.toMatchObject({
+      code: 'CLAUDE_ALL_TEMPORARILY_UNAVAILABLE',
+      statusCode: 503,
+      retryAfterSeconds: 15,
+      temporaryUnavailableUntil: '2026-09-01T00:00:15.000Z'
+    })
+  })
+
+  test('prefers a temporary cooldown over a nurture-only block when no account is available', async () => {
+    redis.getAllClaudeAccounts.mockResolvedValue([
+      buildOfficialAccount('temp'),
+      buildOfficialAccount('nurture')
+    ])
+    upstreamErrorHelper.getTempUnavailableInfo.mockImplementation(async (accountId) =>
+      accountId === 'temp' ? { remainingSeconds: 9, expiresAt: null } : null
+    )
+    claudeAccountNurtureService.evaluate.mockImplementation(async (accountId) =>
+      accountId === 'nurture' ? blockedEvaluation : allowedEvaluation
+    )
+
+    await expect(
+      unifiedClaudeScheduler.selectAccountForApiKey({}, null, 'claude-sonnet-4-6')
+    ).rejects.toMatchObject({
+      code: 'CLAUDE_ALL_TEMPORARILY_UNAVAILABLE',
+      retryAfterSeconds: 9
     })
   })
 })

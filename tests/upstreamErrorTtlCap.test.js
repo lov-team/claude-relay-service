@@ -6,11 +6,15 @@
 const mockSetex = jest.fn(async () => 'OK')
 const mockDel = jest.fn(async () => 1)
 const mockHgetall = jest.fn(async () => ({}))
+const mockGet = jest.fn(async () => null)
+const mockTtl = jest.fn(async () => -2)
 
 jest.mock('../src/models/redis', () => ({
   getClientSafe: () => ({
     setex: mockSetex,
     del: mockDel,
+    get: mockGet,
+    ttl: mockTtl,
     hgetall: mockHgetall,
     zadd: jest.fn(async () => 1),
     expire: jest.fn(async () => 1),
@@ -55,5 +59,33 @@ describe('markTempUnavailable clamps upstream retry-after', () => {
   it('falls back to the per-error-type default when no retry-after is given', async () => {
     await upstreamErrorHelper.markTempUnavailable(ACCOUNT, TYPE, 429, null)
     expect(ttlPassedToSetex()).toBe(300) // DEFAULT_TTL.rate_limit
+  })
+
+  it('returns the current temporary cooldown TTL and stored recovery time', async () => {
+    mockTtl.mockResolvedValue(17)
+    mockGet.mockResolvedValue(JSON.stringify({ expiresAt: '2026-09-01T00:00:17.000Z' }))
+
+    await expect(upstreamErrorHelper.getTempUnavailableInfo(ACCOUNT, TYPE)).resolves.toEqual({
+      remainingSeconds: 17,
+      expiresAt: '2026-09-01T00:00:17.000Z'
+    })
+  })
+
+  it('builds an upstream-safe retry response with Retry-After metadata', () => {
+    const response = upstreamErrorHelper.buildTempUnavailableHttpResponse({
+      retryAfterSeconds: 7,
+      temporaryUnavailableUntil: '2026-09-01T00:00:07.000Z'
+    })
+
+    expect(response.statusCode).toBe(503)
+    expect(response.headers['Retry-After']).toBe('7')
+    expect(JSON.parse(response.body).error.metadata).toEqual(
+      expect.objectContaining({
+        retryable: true,
+        disable_channel: false,
+        retry_after_seconds: 7,
+        retry_at: '2026-09-01T00:00:07.000Z'
+      })
+    )
   })
 })

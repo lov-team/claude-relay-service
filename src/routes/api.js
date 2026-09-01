@@ -21,6 +21,7 @@ const {
   sendMockWarmupStream
 } = require('../utils/warmupInterceptor')
 const { sanitizeUpstreamError } = require('../utils/errorSanitizer')
+const upstreamErrorHelper = require('../utils/upstreamErrorHelper')
 const { dumpAnthropicMessagesRequest } = require('../utils/anthropicRequestDump')
 const { createRequestDetailMeta } = require('../utils/requestDetailHelper')
 const {
@@ -38,6 +39,19 @@ function respondToNurtureSchedulerError(res, error) {
     res.set(key, value)
   })
   return res.status(response.statusCode).type('application/json').send(response.body)
+}
+
+function respondToTemporaryUnavailableSchedulerError(res, error) {
+  if (
+    typeof upstreamErrorHelper.isTempUnavailableSchedulerError !== 'function' ||
+    !upstreamErrorHelper.isTempUnavailableSchedulerError(error)
+  ) {
+    return false
+  }
+  const response = upstreamErrorHelper.buildTempUnavailableHttpResponse(error)
+  Object.entries(response.headers).forEach(([key, value]) => res.set(key, value))
+  res.status(response.statusCode).type('application/json').send(response.body)
+  return true
 }
 
 function queueRateLimitUpdate(
@@ -1377,6 +1391,10 @@ async function handleMessagesRequest(req, res) {
   } catch (error) {
     let handledError = error
 
+    if (respondToTemporaryUnavailableSchedulerError(res, handledError)) {
+      return undefined
+    }
+
     // 🔄 并发满额降级处理：捕获CONSOLE_ACCOUNT_CONCURRENCY_FULL错误
     if (
       handledError.code === 'CONSOLE_ACCOUNT_CONCURRENCY_FULL' &&
@@ -1879,6 +1897,9 @@ router.post('/v1/messages/count_tokens', authenticateApiKey, async (req, res) =>
 
       return
     } catch (error) {
+      if (respondToTemporaryUnavailableSchedulerError(res, error)) {
+        return
+      }
       if (error.code === 'CONSOLE_ACCOUNT_CONCURRENCY_FULL') {
         logger.warn(
           `⚠️ Console account concurrency full during count_tokens (attempt ${attempt + 1}/${maxAttempts})`

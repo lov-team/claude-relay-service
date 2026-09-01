@@ -85,6 +85,18 @@ class UnifiedClaudeScheduler {
     throw claudeAccountNurtureService.createAllNurtureLimitedError(evaluation)
   }
 
+  _throwAllTemporarilyUnavailableError(retryAfterSeconds, temporaryUnavailableUntil = null) {
+    const normalizedRetryAfterSeconds = Math.max(1, Math.ceil(Number(retryAfterSeconds) || 1))
+    const error = new Error('All available Claude accounts are temporarily unavailable')
+    error.code = 'CLAUDE_ALL_TEMPORARILY_UNAVAILABLE'
+    error.statusCode = 503
+    error.retryAfterSeconds = normalizedRetryAfterSeconds
+    error.temporaryUnavailableUntil =
+      temporaryUnavailableUntil ||
+      new Date(Date.now() + normalizedRetryAfterSeconds * 1000).toISOString()
+    throw error
+  }
+
   _shouldEvaluateAutoStoppedNurtureAccount(account, accountType = 'claude-official') {
     return (
       accountType === 'claude-official' &&
@@ -599,6 +611,8 @@ class UnifiedClaudeScheduler {
     const availableAccounts = []
     let nurtureBlockedCount = 0
     let lastNurtureEvaluation = null
+    let minTemporaryUnavailableSeconds = null
+    let minTemporaryUnavailableUntil = null
     // 请求模型所属的限流家族（opus/sonnet/haiku/fable）
     const requestedModelFamily = getRateLimitModelFamily(requestedModel)
 
@@ -789,11 +803,22 @@ class UnifiedClaudeScheduler {
         }
 
         // 检查是否临时不可用
-        const isTempUnavailable = await this.isAccountTemporarilyUnavailable(
+        const temporaryUnavailableInfo = await this.getAccountTemporarilyUnavailableInfo(
           account.id,
           'claude-official'
         )
-        if (isTempUnavailable) {
+        if (
+          temporaryUnavailableInfo ||
+          (await this.isAccountTemporarilyUnavailable(account.id, 'claude-official'))
+        ) {
+          if (
+            temporaryUnavailableInfo?.remainingSeconds > 0 &&
+            (minTemporaryUnavailableSeconds === null ||
+              temporaryUnavailableInfo.remainingSeconds < minTemporaryUnavailableSeconds)
+          ) {
+            minTemporaryUnavailableSeconds = temporaryUnavailableInfo.remainingSeconds
+            minTemporaryUnavailableUntil = temporaryUnavailableInfo.expiresAt || null
+          }
           logger.debug(
             `⏭️ Skipping Claude Official account ${account.name} - temporarily unavailable`
           )
@@ -925,11 +950,22 @@ class UnifiedClaudeScheduler {
         }
 
         // 检查是否临时不可用
-        const isTempUnavailable = await this.isAccountTemporarilyUnavailable(
+        const temporaryUnavailableInfo = await this.getAccountTemporarilyUnavailableInfo(
           currentAccount.id,
           'claude-console'
         )
-        if (isTempUnavailable) {
+        if (
+          temporaryUnavailableInfo ||
+          (await this.isAccountTemporarilyUnavailable(currentAccount.id, 'claude-console'))
+        ) {
+          if (
+            temporaryUnavailableInfo?.remainingSeconds > 0 &&
+            (minTemporaryUnavailableSeconds === null ||
+              temporaryUnavailableInfo.remainingSeconds < minTemporaryUnavailableSeconds)
+          ) {
+            minTemporaryUnavailableSeconds = temporaryUnavailableInfo.remainingSeconds
+            minTemporaryUnavailableUntil = temporaryUnavailableInfo.expiresAt || null
+          }
           logger.debug(
             `⏭️ Skipping Claude Console account ${currentAccount.name} - temporarily unavailable`
           )
@@ -1035,11 +1071,22 @@ class UnifiedClaudeScheduler {
           isSchedulable(account.schedulable)
         ) {
           // 检查是否临时不可用
-          const isTempUnavailable = await this.isAccountTemporarilyUnavailable(
+          const temporaryUnavailableInfo = await this.getAccountTemporarilyUnavailableInfo(
             account.id,
             'bedrock'
           )
-          if (isTempUnavailable) {
+          if (
+            temporaryUnavailableInfo ||
+            (await this.isAccountTemporarilyUnavailable(account.id, 'bedrock'))
+          ) {
+            if (
+              temporaryUnavailableInfo?.remainingSeconds > 0 &&
+              (minTemporaryUnavailableSeconds === null ||
+                temporaryUnavailableInfo.remainingSeconds < minTemporaryUnavailableSeconds)
+            ) {
+              minTemporaryUnavailableSeconds = temporaryUnavailableInfo.remainingSeconds
+              minTemporaryUnavailableUntil = temporaryUnavailableInfo.expiresAt || null
+            }
             logger.debug(`⏭️ Skipping Bedrock account ${account.name} - temporarily unavailable`)
             continue
           }
@@ -1092,8 +1139,22 @@ class UnifiedClaudeScheduler {
           }
 
           // 检查是否临时不可用
-          const isTempUnavailable = await this.isAccountTemporarilyUnavailable(account.id, 'ccr')
-          if (isTempUnavailable) {
+          const temporaryUnavailableInfo = await this.getAccountTemporarilyUnavailableInfo(
+            account.id,
+            'ccr'
+          )
+          if (
+            temporaryUnavailableInfo ||
+            (await this.isAccountTemporarilyUnavailable(account.id, 'ccr'))
+          ) {
+            if (
+              temporaryUnavailableInfo?.remainingSeconds > 0 &&
+              (minTemporaryUnavailableSeconds === null ||
+                temporaryUnavailableInfo.remainingSeconds < minTemporaryUnavailableSeconds)
+            ) {
+              minTemporaryUnavailableSeconds = temporaryUnavailableInfo.remainingSeconds
+              minTemporaryUnavailableUntil = temporaryUnavailableInfo.expiresAt || null
+            }
             logger.debug(`⏭️ Skipping CCR account ${account.name} - temporarily unavailable`)
             continue
           }
@@ -1135,6 +1196,12 @@ class UnifiedClaudeScheduler {
 
     // 🚨 最终检查：只有在没有任何可用账户时，才根据Console并发排除情况抛出专用错误码
     if (availableAccounts.length === 0) {
+      if (minTemporaryUnavailableSeconds !== null) {
+        this._throwAllTemporarilyUnavailableError(
+          minTemporaryUnavailableSeconds,
+          minTemporaryUnavailableUntil
+        )
+      }
       // 如果所有Console账户都因并发满额被排除，抛出专用错误码（503）
       if (
         consoleAccountsEligibleCount > 0 &&
@@ -1509,6 +1576,13 @@ class UnifiedClaudeScheduler {
     return upstreamErrorHelper.isTempUnavailable(accountId, accountType)
   }
 
+  async getAccountTemporarilyUnavailableInfo(accountId, accountType) {
+    if (typeof upstreamErrorHelper.getTempUnavailableInfo !== 'function') {
+      return null
+    }
+    return upstreamErrorHelper.getTempUnavailableInfo(accountId, accountType)
+  }
+
   // 🚫 标记账户为限流状态
   async markAccountRateLimited(
     accountId,
@@ -1711,6 +1785,8 @@ class UnifiedClaudeScheduler {
       const availableAccounts = []
       let nurtureBlockedCount = 0
       let lastNurtureEvaluation = null
+      let minTemporaryUnavailableSeconds = null
+      let minTemporaryUnavailableUntil = null
       // 请求模型所属的限流家族（opus/sonnet/haiku/fable）
       const requestedModelFamily = getRateLimitModelFamily(requestedModel)
 
@@ -1782,7 +1858,22 @@ class UnifiedClaudeScheduler {
           }
 
           // 检查是否临时不可用
-          if (await this.isAccountTemporarilyUnavailable(account.id, accountType)) {
+          const temporaryUnavailableInfo = await this.getAccountTemporarilyUnavailableInfo(
+            account.id,
+            accountType
+          )
+          if (
+            temporaryUnavailableInfo ||
+            (await this.isAccountTemporarilyUnavailable(account.id, accountType))
+          ) {
+            if (
+              temporaryUnavailableInfo?.remainingSeconds > 0 &&
+              (minTemporaryUnavailableSeconds === null ||
+                temporaryUnavailableInfo.remainingSeconds < minTemporaryUnavailableSeconds)
+            ) {
+              minTemporaryUnavailableSeconds = temporaryUnavailableInfo.remainingSeconds
+              minTemporaryUnavailableUntil = temporaryUnavailableInfo.expiresAt || null
+            }
             continue
           }
 
@@ -1843,6 +1934,12 @@ class UnifiedClaudeScheduler {
       }
 
       if (availableAccounts.length === 0) {
+        if (minTemporaryUnavailableSeconds !== null) {
+          this._throwAllTemporarilyUnavailableError(
+            minTemporaryUnavailableSeconds,
+            minTemporaryUnavailableUntil
+          )
+        }
         if (nurtureBlockedCount > 0) {
           logger.error(
             `❌ All ${nurtureBlockedCount} nurture-eligible group member(s) in ${group.name} are under nurture guard limits`
@@ -1956,6 +2053,8 @@ class UnifiedClaudeScheduler {
   // 📋 获取所有可用的CCR账户
   async _getAvailableCcrAccounts(requestedModel = null) {
     const availableAccounts = []
+    let minTemporaryUnavailableSeconds = null
+    let minTemporaryUnavailableUntil = null
 
     try {
       const ccrAccounts = await ccrAccountService.getAllAccounts()
@@ -1987,7 +2086,22 @@ class UnifiedClaudeScheduler {
           }
 
           // 检查是否临时不可用
-          if (await this.isAccountTemporarilyUnavailable(account.id, 'ccr')) {
+          const temporaryUnavailableInfo = await this.getAccountTemporarilyUnavailableInfo(
+            account.id,
+            'ccr'
+          )
+          if (
+            temporaryUnavailableInfo ||
+            (await this.isAccountTemporarilyUnavailable(account.id, 'ccr'))
+          ) {
+            if (
+              temporaryUnavailableInfo?.remainingSeconds > 0 &&
+              (minTemporaryUnavailableSeconds === null ||
+                temporaryUnavailableInfo.remainingSeconds < minTemporaryUnavailableSeconds)
+            ) {
+              minTemporaryUnavailableSeconds = temporaryUnavailableInfo.remainingSeconds
+              minTemporaryUnavailableUntil = temporaryUnavailableInfo.expiresAt || null
+            }
             continue
           }
 
@@ -2018,9 +2132,18 @@ class UnifiedClaudeScheduler {
       }
 
       logger.info(`📊 Total available CCR accounts: ${availableAccounts.length}`)
+      if (availableAccounts.length === 0 && minTemporaryUnavailableSeconds !== null) {
+        this._throwAllTemporarilyUnavailableError(
+          minTemporaryUnavailableSeconds,
+          minTemporaryUnavailableUntil
+        )
+      }
       return availableAccounts
     } catch (error) {
       logger.error('❌ Failed to get available CCR accounts:', error)
+      if (error.code === 'CLAUDE_ALL_TEMPORARILY_UNAVAILABLE') {
+        throw error
+      }
       return []
     }
   }
