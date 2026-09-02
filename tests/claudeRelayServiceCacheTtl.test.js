@@ -347,6 +347,25 @@ describe('Claude relay cache_control ttl handling', () => {
     ).toBe('claude-cli/2.1.255 (external, sdk-cli)')
   })
 
+  test('normalizes legacy Claude billing version for real Claude Code requests', () => {
+    const body = {
+      model: 'claude-opus-4-7',
+      system: [
+        {
+          type: 'text',
+          text: 'x-anthropic-billing-header: cc_version=2.1.247.dd0; cc_entrypoint=claude-desktop-3p; cch=abc;'
+        }
+      ],
+      messages: [{ role: 'user', content: 'hello' }]
+    }
+
+    const processed = claudeRelayService._processRequestBody(body, null, true)
+
+    expect(processed.system[0].text).toContain('cc_version=2.1.255')
+    expect(processed.system[0].text).not.toContain('2.1.247')
+    expect(processed.system[0].text).toContain('cc_entrypoint=claude-desktop-3p')
+  })
+
   test('keeps real Claude Code user agent when present', () => {
     expect(
       claudeRelayService._resolveClaudeUserAgent(

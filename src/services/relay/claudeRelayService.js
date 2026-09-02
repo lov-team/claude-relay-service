@@ -1867,8 +1867,12 @@ class ClaudeRelayService {
       }
     }
 
-    // 移除 x-anthropic-billing-header 系统元素，避免将客户端 billing 标识传递给上游 API
-    this._removeBillingHeaderFromSystem(processedBody)
+    // 真实 Claude Code 请求保留 billing 标识但升级版本；其他请求移除该标识。
+    if (isRealClaudeCode) {
+      this._normalizeClaudeCodeBillingHeader(processedBody)
+    } else {
+      this._removeBillingHeaderFromSystem(processedBody)
+    }
 
     this._enforceCacheControlLimit(processedBody)
 
@@ -1970,6 +1974,36 @@ class ClaudeRelayService {
           `🧹 Removed ${originalLength - processedBody.system.length} billing header element(s) from system array`
         )
       }
+    }
+  }
+
+  _normalizeClaudeCodeBillingHeader(processedBody) {
+    if (!processedBody || !processedBody.system) {
+      return
+    }
+    const targetVersion =
+      userAgentPoolService.getConfiguredClaudeCodeVersion() ||
+      userAgentPoolService.MIN_CLAUDE_CODE_VERSION
+    const normalizeText = (text) => text.replace(/(cc_version=)[^;\s]+/i, `$1${targetVersion}`)
+
+    if (typeof processedBody.system === 'string') {
+      if (/x-anthropic-billing-header\s*:/i.test(processedBody.system)) {
+        processedBody.system = normalizeText(processedBody.system)
+      }
+      return
+    }
+
+    if (Array.isArray(processedBody.system)) {
+      processedBody.system.forEach((item) => {
+        if (
+          item &&
+          item.type === 'text' &&
+          typeof item.text === 'string' &&
+          /x-anthropic-billing-header\s*:/i.test(item.text)
+        ) {
+          item.text = normalizeText(item.text)
+        }
+      })
     }
   }
 
@@ -2502,8 +2536,12 @@ class ClaudeRelayService {
 
     requestPayload = extensionResult.body
     finalHeaders = extensionResult.headers
-    // 最终序列化前再次清理客户端 billing 标识，覆盖直接传入原始请求体的入口。
-    this._removeBillingHeaderFromSystem(requestPayload)
+    // 最终序列化前再次处理 billing 标识，覆盖直接传入原始请求体的入口。
+    if (isRealClaudeCode) {
+      this._normalizeClaudeCodeBillingHeader(requestPayload)
+    } else {
+      this._removeBillingHeaderFromSystem(requestPayload)
+    }
 
     let toolNameMap = null
     if (!isRealClaudeCode) {
