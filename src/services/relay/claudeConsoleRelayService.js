@@ -241,6 +241,8 @@ class ClaudeConsoleRelayService {
           clientHeaders?.['User-Agent'] ||
           this.defaultUserAgent
       )
+      delete filteredHeaders['user-agent']
+      delete filteredHeaders['User-Agent']
 
       // 准备请求配置
       const requestConfig = {
@@ -248,10 +250,10 @@ class ClaudeConsoleRelayService {
         url: apiEndpoint,
         data: modifiedRequestBody,
         headers: {
+          ...filteredHeaders,
           'Content-Type': 'application/json',
           'anthropic-version': '2023-06-01',
-          'User-Agent': userAgent,
-          ...filteredHeaders
+          'User-Agent': userAgent
         },
         timeout: config.requestTimeout || 600000,
         signal: abortController.signal,
@@ -800,6 +802,8 @@ class ClaudeConsoleRelayService {
           clientHeaders?.['User-Agent'] ||
           this.defaultUserAgent
       )
+      delete filteredHeaders['user-agent']
+      delete filteredHeaders['User-Agent']
 
       // 准备请求配置
       const requestConfig = {
@@ -807,10 +811,10 @@ class ClaudeConsoleRelayService {
         url: apiEndpoint,
         data: body,
         headers: {
+          ...filteredHeaders,
           'Content-Type': 'application/json',
           'anthropic-version': '2023-06-01',
-          'User-Agent': userAgent,
-          ...filteredHeaders
+          'User-Agent': userAgent
         },
         timeout: config.requestTimeout || 600000,
         responseType: 'stream',
