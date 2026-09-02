@@ -9,6 +9,23 @@
 // Gemini/Antigravity 采用“路径分流”，避免在 model 字段里混入 vendor 前缀造成混乱
 const SUPPORTED_VENDOR_PREFIXES = ['ccr']
 
+// Claude model aliases accepted from clients but not understood consistently by
+// Anthropic/Claude Code. Keep one canonical spelling throughout scheduling,
+// upstream payloads, rate-limit buckets, and usage accounting.
+const CLAUDE_MODEL_ALIASES = new Map([
+  ['claude-fable-5.1', 'claude-fable-5-1'],
+  ['anthropic/claude-fable-5.1', 'claude-fable-5-1']
+])
+
+function normalizeClaudeModelAlias(modelName) {
+  if (typeof modelName !== 'string') {
+    return modelName
+  }
+
+  const trimmed = modelName.trim()
+  return CLAUDE_MODEL_ALIASES.get(trimmed.toLowerCase()) || trimmed
+}
+
 /**
  * Parse vendor-prefixed model string
  * @param {string} modelStr - Model string, potentially with vendor prefix (e.g., "ccr,gemini-2.5-pro")
@@ -260,6 +277,7 @@ function getRateLimitModelFamily(modelName) {
 
 module.exports = {
   parseVendorPrefixedModel,
+  normalizeClaudeModelAlias,
   hasVendorPrefix,
   getEffectiveModel,
   getVendorType,

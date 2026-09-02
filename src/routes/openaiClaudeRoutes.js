@@ -18,7 +18,7 @@ const { getSafeMessage } = require('../utils/errorSanitizer')
 const sessionHelper = require('../utils/sessionHelper')
 const { updateRateLimitCounters } = require('../utils/rateLimitHelper')
 const pricingService = require('../services/pricingService')
-const { getEffectiveModel } = require('../utils/modelHelper')
+const { getEffectiveModel, normalizeClaudeModelAlias } = require('../utils/modelHelper')
 const { createRequestDetailMeta } = require('../utils/requestDetailHelper')
 const upstreamErrorHelper = require('../utils/upstreamErrorHelper')
 
@@ -235,6 +235,7 @@ async function handleChatCompletion(req, res, apiKeyData) {
 
     // 转换 OpenAI 请求为 Claude 格式
     const claudeRequest = openaiToClaude.convertRequest(req.body)
+    claudeRequest.model = normalizeClaudeModelAlias(claudeRequest.model)
 
     // 模型限制（黑名单）：命中受限模型则拒绝
     if (apiKeyData.enableModelRestriction && apiKeyData.restrictedModels?.length > 0) {

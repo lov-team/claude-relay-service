@@ -1,4 +1,8 @@
-const { getRateLimitModelFamily, RATE_LIMITED_MODEL_FAMILIES } = require('../src/utils/modelHelper')
+const {
+  getRateLimitModelFamily,
+  RATE_LIMITED_MODEL_FAMILIES,
+  normalizeClaudeModelAlias
+} = require('../src/utils/modelHelper')
 
 describe('getRateLimitModelFamily', () => {
   it('maps each Claude model to its independent rate-limit family', () => {
@@ -13,6 +17,12 @@ describe('getRateLimitModelFamily', () => {
 
   it('strips vendor prefixes before matching', () => {
     expect(getRateLimitModelFamily('ccr,claude-sonnet-4-5')).toBe('sonnet')
+  })
+
+  it('normalizes Fable aliases to the canonical upstream model id', () => {
+    expect(normalizeClaudeModelAlias('claude-fable-5.1')).toBe('claude-fable-5-1')
+    expect(normalizeClaudeModelAlias('anthropic/claude-fable-5.1')).toBe('claude-fable-5-1')
+    expect(normalizeClaudeModelAlias(' CLAUDE-FABLE-5.1 ')).toBe('claude-fable-5-1')
   })
 
   it('returns null for unknown or invalid models', () => {

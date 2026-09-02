@@ -8,7 +8,11 @@ const unifiedClaudeScheduler = require('../services/scheduler/unifiedClaudeSched
 const apiKeyService = require('../services/apiKeyService')
 const { authenticateApiKey } = require('../middleware/auth')
 const logger = require('../utils/logger')
-const { getEffectiveModel, parseVendorPrefixedModel } = require('../utils/modelHelper')
+const {
+  getEffectiveModel,
+  parseVendorPrefixedModel,
+  normalizeClaudeModelAlias
+} = require('../utils/modelHelper')
 const sessionHelper = require('../utils/sessionHelper')
 const { updateRateLimitCounters } = require('../utils/rateLimitHelper')
 const claudeRelayConfigService = require('../services/claudeRelayConfigService')
@@ -205,6 +209,10 @@ async function handleMessagesRequest(req, res) {
         error: 'Invalid request',
         message: 'Messages array cannot be empty'
       })
+    }
+
+    if (typeof req.body.model === 'string') {
+      req.body.model = normalizeClaudeModelAlias(req.body.model)
     }
 
     // 模型限制（黑名单）校验：统一在此处处理（去除供应商前缀）
