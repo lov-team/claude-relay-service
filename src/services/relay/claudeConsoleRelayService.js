@@ -21,7 +21,7 @@ function removeClaudeCodeBillingHeader(body) {
   }
   const next = { ...body }
   if (typeof next.system === 'string') {
-    if (next.system.trim().startsWith('x-anthropic-billing-header')) {
+    if (/x-anthropic-billing-header\s*:/i.test(next.system)) {
       delete next.system
     }
     return next
@@ -33,7 +33,7 @@ function removeClaudeCodeBillingHeader(body) {
           item &&
           item.type === 'text' &&
           typeof item.text === 'string' &&
-          item.text.trim().startsWith('x-anthropic-billing-header')
+          /x-anthropic-billing-header\s*:/i.test(item.text)
         )
     )
   }

@@ -1947,7 +1947,7 @@ class ClaudeRelayService {
     }
 
     if (typeof processedBody.system === 'string') {
-      if (processedBody.system.trim().startsWith('x-anthropic-billing-header')) {
+      if (/x-anthropic-billing-header\s*:/i.test(processedBody.system)) {
         logger.debug('🧹 Removed billing header from string system prompt')
         delete processedBody.system
       }
@@ -1962,7 +1962,7 @@ class ClaudeRelayService {
             item &&
             item.type === 'text' &&
             typeof item.text === 'string' &&
-            item.text.trim().startsWith('x-anthropic-billing-header')
+            /x-anthropic-billing-header\s*:/i.test(item.text)
           )
       )
       if (processedBody.system.length < originalLength) {
@@ -2502,6 +2502,8 @@ class ClaudeRelayService {
 
     requestPayload = extensionResult.body
     finalHeaders = extensionResult.headers
+    // 最终序列化前再次清理客户端 billing 标识，覆盖直接传入原始请求体的入口。
+    this._removeBillingHeaderFromSystem(requestPayload)
 
     let toolNameMap = null
     if (!isRealClaudeCode) {
