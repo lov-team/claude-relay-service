@@ -15,6 +15,31 @@ const { isStreamWritable } = require('../../utils/streamHelper')
 const { filterForClaude } = require('../../utils/headerFilter')
 const userAgentPoolService = require('../userAgentPoolService')
 
+function removeClaudeCodeBillingHeader(body) {
+  if (!body || typeof body !== 'object' || !body.system) {
+    return body
+  }
+  const next = { ...body }
+  if (typeof next.system === 'string') {
+    if (next.system.trim().startsWith('x-anthropic-billing-header')) {
+      delete next.system
+    }
+    return next
+  }
+  if (Array.isArray(next.system)) {
+    next.system = next.system.filter(
+      (item) =>
+        !(
+          item &&
+          item.type === 'text' &&
+          typeof item.text === 'string' &&
+          item.text.trim().startsWith('x-anthropic-billing-header')
+        )
+    )
+  }
+  return next
+}
+
 class ClaudeConsoleRelayService {
   constructor() {
     this.defaultUserAgent = userAgentPoolService.DEFAULT_CLAUDE_USER_AGENT
@@ -159,10 +184,10 @@ class ClaudeConsoleRelayService {
       }
 
       // 创建修改后的请求体
-      const modifiedRequestBody = {
+      const modifiedRequestBody = removeClaudeCodeBillingHeader({
         ...requestBody,
         model: mappedModel
-      }
+      })
 
       // 模型兼容性检查已经在调度器中完成，这里不需要再检查
 
@@ -210,11 +235,12 @@ class ClaudeConsoleRelayService {
       logger.debug(`[DEBUG] Filtered client headers: ${JSON.stringify(filteredHeaders)}`)
 
       // 决定使用的 User-Agent：优先使用账户自定义的，否则透传客户端的，最后才使用默认值
-      const userAgent =
+      const userAgent = userAgentPoolService.normalizeClaudeCodeUserAgent(
         account.userAgent ||
-        clientHeaders?.['user-agent'] ||
-        clientHeaders?.['User-Agent'] ||
-        this.defaultUserAgent
+          clientHeaders?.['user-agent'] ||
+          clientHeaders?.['User-Agent'] ||
+          this.defaultUserAgent
+      )
 
       // 准备请求配置
       const requestConfig = {
@@ -645,10 +671,10 @@ class ClaudeConsoleRelayService {
       }
 
       // 创建修改后的请求体
-      const modifiedRequestBody = {
+      const modifiedRequestBody = removeClaudeCodeBillingHeader({
         ...requestBody,
         model: mappedModel
-      }
+      })
 
       // 模型兼容性检查已经在调度器中完成，这里不需要再检查
 
@@ -768,11 +794,12 @@ class ClaudeConsoleRelayService {
       logger.debug(`[DEBUG] Filtered client headers: ${JSON.stringify(filteredHeaders)}`)
 
       // 决定使用的 User-Agent：优先使用账户自定义的，否则透传客户端的，最后才使用默认值
-      const userAgent =
+      const userAgent = userAgentPoolService.normalizeClaudeCodeUserAgent(
         account.userAgent ||
-        clientHeaders?.['user-agent'] ||
-        clientHeaders?.['User-Agent'] ||
-        this.defaultUserAgent
+          clientHeaders?.['user-agent'] ||
+          clientHeaders?.['User-Agent'] ||
+          this.defaultUserAgent
+      )
 
       // 准备请求配置
       const requestConfig = {

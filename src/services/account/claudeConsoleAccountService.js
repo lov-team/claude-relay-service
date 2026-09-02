@@ -225,7 +225,9 @@ class ClaudeConsoleAccountService {
             apiUrl: accountData.apiUrl,
             priority: parseInt(accountData.priority) || 50,
             supportedModels: JSON.parse(accountData.supportedModels || '[]'),
-            userAgent: accountData.userAgent,
+            userAgent: userAgentPoolService.normalizeClaudeCodeUserAgent(
+              accountData.userAgent || ''
+            ),
             userAgentPlatform:
               accountData.userAgentPlatform ||
               userAgentPoolService.detectPlatform(accountData.userAgent),
@@ -300,6 +302,9 @@ class ClaudeConsoleAccountService {
     )
 
     accountData.apiKey = decryptedKey
+    accountData.userAgent = userAgentPoolService.normalizeClaudeCodeUserAgent(
+      accountData.userAgent || ''
+    )
 
     // 解析JSON字段
     const parsedModels = JSON.parse(accountData.supportedModels || '[]')
