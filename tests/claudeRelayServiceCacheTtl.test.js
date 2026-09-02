@@ -344,7 +344,7 @@ describe('Claude relay cache_control ttl handling', () => {
         true,
         null
       )
-    ).toBe('claude-cli/2.1.150 (external, sdk-cli)')
+    ).toBe('claude-cli/2.1.255 (external, sdk-cli)')
   })
 
   test('keeps real Claude Code user agent when present', () => {
@@ -355,7 +355,7 @@ describe('Claude relay cache_control ttl handling', () => {
         true,
         null
       )
-    ).toBe('claude-cli/2.1.150 (external, cli)')
+    ).toBe('claude-cli/2.1.255 (external, cli)')
   })
 
   test('uses the account-pinned user agent ahead of the legacy unified value', () => {
@@ -380,7 +380,7 @@ describe('Claude relay cache_control ttl handling', () => {
         'claude-cli/2.1.151 (external, cli)',
         'claude-cli/2.2.0 (external, cli, linux, x64)'
       )
-    ).toBe('claude-cli/2.1.151 (external, cli)')
+    ).toBe('claude-cli/2.1.255 (external, cli)')
   })
 })
 

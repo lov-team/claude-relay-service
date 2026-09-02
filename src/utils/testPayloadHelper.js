@@ -145,7 +145,7 @@ async function sendStreamTestRequest(options) {
     headers: {
       'Content-Type': 'application/json',
       'anthropic-version': '2023-06-01',
-      'User-Agent': 'claude-cli/2.0.52 (external, cli)',
+      'User-Agent': 'claude-cli/2.1.255 (external, cli)',
       ...(authorization ? { authorization } : {}),
       ...extraHeaders
     },

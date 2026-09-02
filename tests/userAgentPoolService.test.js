@@ -21,12 +21,15 @@ jest.mock('../src/utils/logger', () => ({
 }))
 
 const userAgentPoolService = require('../src/services/userAgentPoolService')
+const config = require('../config/config')
 const {
   USER_AGENT_POOL_KEY,
   USER_AGENT_POOL_METADATA_KEY
 } = require('../src/services/userAgentPoolService')
 
 describe('UserAgentPoolService', () => {
+  const originalCodeVersion = config.claude.codeVersion
+
   beforeEach(() => {
     jest.clearAllMocks()
     mockClient.pipeline.mockReturnValue(mockPipeline)
@@ -36,6 +39,24 @@ describe('UserAgentPoolService', () => {
     mockPipeline.exec.mockResolvedValue([])
     mockClient.hget.mockResolvedValue(null)
     mockClient.hmget.mockResolvedValue([])
+    config.claude.codeVersion = originalCodeVersion
+  })
+
+  afterAll(() => {
+    config.claude.codeVersion = originalCodeVersion
+  })
+
+  test('bumps old Claude Code identities to the minimum supported version', () => {
+    expect(
+      userAgentPoolService.normalizeClaudeCodeUserAgent('claude-cli/2.1.151 (external, cli)')
+    ).toBe('claude-cli/2.1.255 (external, cli)')
+  })
+
+  test('uses an explicitly configured Claude Code version as the source of truth', () => {
+    config.claude.codeVersion = '2.1.300'
+    expect(
+      userAgentPoolService.normalizeClaudeCodeUserAgent('claude-cli/2.1.255 (external, cli)')
+    ).toBe('claude-cli/2.1.300 (external, cli)')
   })
 
   test.each([
@@ -49,7 +70,7 @@ describe('UserAgentPoolService', () => {
 
   test('records the latest observation in a bounded Redis sorted set', async () => {
     const now = jest.spyOn(Date, 'now').mockReturnValue(1775577600000)
-    const userAgent = 'claude-cli/2.1.0 (external, cli, linux, x64)'
+    const userAgent = 'claude-cli/2.1.255 (external, cli, linux, x64)'
 
     await expect(userAgentPoolService.recordUserAgent(userAgent)).resolves.toEqual({
       userAgent,
@@ -101,7 +122,7 @@ describe('UserAgentPoolService', () => {
     await expect(
       userAgentPoolService.assignLatestUserAgent(userAgentPoolService.DEFAULT_CLAUDE_USER_AGENT)
     ).resolves.toEqual({
-      userAgent: 'claude-cli/2.1.228 (external, cli)',
+      userAgent: 'claude-cli/2.1.255 (external, cli)',
       platform: 'unknown',
       stainlessFingerprint: {},
       detectionSource: 'fallback_default',
@@ -113,7 +134,7 @@ describe('UserAgentPoolService', () => {
     mockClient.zrevrange.mockResolvedValue([
       'claude-cli/2.2.0 (external, cli, windows, x64)',
       '1775577600000',
-      'claude-cli/2.1.0 (external, cli, linux, x64)',
+      'claude-cli/2.1.255 (external, cli, linux, x64)',
       '1775577500000'
     ])
     mockClient.hmget.mockResolvedValue([null, null])
@@ -127,7 +148,7 @@ describe('UserAgentPoolService', () => {
         lastSeenAt: 1775577600000
       },
       {
-        userAgent: 'claude-cli/2.1.0 (external, cli, linux, x64)',
+        userAgent: 'claude-cli/2.1.255 (external, cli, linux, x64)',
         platform: 'linux',
         stainlessFingerprint: {},
         detectionSource: 'user_agent',
@@ -138,7 +159,7 @@ describe('UserAgentPoolService', () => {
   })
 
   test('uses Stainless OS and stores the complete fingerprint metadata', async () => {
-    const userAgent = 'claude-cli/2.1.228 (external, cli)'
+    const userAgent = 'claude-cli/2.1.255 (external, cli)'
     const headers = {
       'user-agent': userAgent,
       'x-stainless-retry-count': '0',

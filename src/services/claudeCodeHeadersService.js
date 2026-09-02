@@ -5,6 +5,7 @@
 
 const redis = require('../models/redis')
 const logger = require('../utils/logger')
+const userAgentPoolService = require('./userAgentPoolService')
 const {
   getCachedConfig,
   setCachedConfig,
@@ -24,7 +25,7 @@ class ClaudeCodeHeadersService {
       'x-stainless-runtime-version': 'v20.19.2',
       'anthropic-dangerous-direct-browser-access': 'true',
       'x-app': 'cli',
-      'user-agent': 'claude-cli/1.0.57 (external, cli)',
+      'user-agent': userAgentPoolService.DEFAULT_CLAUDE_USER_AGENT,
       'accept-language': '*',
       'sec-fetch-mode': 'cors'
     }
@@ -126,7 +127,9 @@ class ClaudeCodeHeadersService {
         return
       }
 
-      const version = this.extractVersionFromUserAgent(userAgent)
+      extractedHeaders['user-agent'] = userAgentPoolService.normalizeClaudeCodeUserAgent(userAgent)
+
+      const version = this.extractVersionFromUserAgent(extractedHeaders['user-agent'])
       if (!version) {
         logger.warn(`⚠️ Failed to extract version from user-agent: ${userAgent}`)
         return
@@ -173,7 +176,13 @@ class ClaudeCodeHeadersService {
     // 检查内存缓存
     const cached = getCachedConfig(cacheKey)
     if (cached) {
-      return cached
+      const normalizedCached = { ...cached }
+      if (normalizedCached['user-agent']) {
+        normalizedCached['user-agent'] = userAgentPoolService.normalizeClaudeCodeUserAgent(
+          normalizedCached['user-agent']
+        )
+      }
+      return normalizedCached
     }
 
     try {
@@ -185,8 +194,14 @@ class ClaudeCodeHeadersService {
           `📋 Retrieved Claude Code headers for account ${accountId}, version: ${parsed.version}`
         )
         // 缓存到内存
-        setCachedConfig(cacheKey, parsed.headers, this.headersCacheTtl)
-        return parsed.headers
+        const normalizedHeaders = { ...parsed.headers }
+        if (normalizedHeaders['user-agent']) {
+          normalizedHeaders['user-agent'] = userAgentPoolService.normalizeClaudeCodeUserAgent(
+            normalizedHeaders['user-agent']
+          )
+        }
+        setCachedConfig(cacheKey, normalizedHeaders, this.headersCacheTtl)
+        return normalizedHeaders
       }
 
       // 返回默认 headers

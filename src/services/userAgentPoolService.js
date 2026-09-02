@@ -1,13 +1,15 @@
 const redis = require('../models/redis')
 const logger = require('../utils/logger')
 const requestIdentityService = require('./requestIdentityService')
+const config = require('../../config/config')
 
 const USER_AGENT_POOL_KEY = 'claude:user_agent_pool'
 const USER_AGENT_POOL_METADATA_KEY = 'claude:user_agent_pool:metadata'
 const MAX_POOL_SIZE = 200
 const MAX_USER_AGENT_LENGTH = 1024
-const DEFAULT_CLAUDE_USER_AGENT = 'claude-cli/2.1.228 (external, cli)'
-const DEFAULT_CONSOLE_USER_AGENT = 'claude-cli/1.0.69 (external, cli)'
+const MIN_CLAUDE_CODE_VERSION = '2.1.255'
+const DEFAULT_CLAUDE_USER_AGENT = `claude-cli/${MIN_CLAUDE_CODE_VERSION} (external, cli)`
+const DEFAULT_CONSOLE_USER_AGENT = DEFAULT_CLAUDE_USER_AGENT
 
 class UserAgentPoolService {
   normalizeUserAgent(userAgent) {
@@ -15,6 +17,60 @@ class UserAgentPoolService {
       return ''
     }
     return userAgent.trim().slice(0, MAX_USER_AGENT_LENGTH)
+  }
+
+  getConfiguredClaudeCodeVersion() {
+    const configured = String(config?.claude?.codeVersion || '').trim()
+    return /^\d+(?:\.\d+){1,2}(?:[-+][0-9A-Za-z.-]+)?$/.test(configured) ? configured : ''
+  }
+
+  extractClaudeCodeVersion(userAgent) {
+    const match = this.normalizeUserAgent(userAgent).match(
+      /claude-cli\/([\d.]+(?:[a-zA-Z0-9-]*)?)/i
+    )
+    return match ? match[1] : null
+  }
+
+  compareClaudeCodeVersions(version1, version2) {
+    const parts1 = String(version1 || '')
+      .split('.')
+      .map((part) => Number.parseInt(part, 10) || 0)
+    const parts2 = String(version2 || '')
+      .split('.')
+      .map((part) => Number.parseInt(part, 10) || 0)
+    for (let index = 0; index < Math.max(parts1.length, parts2.length); index += 1) {
+      if ((parts1[index] || 0) > (parts2[index] || 0)) {
+        return 1
+      }
+      if ((parts1[index] || 0) < (parts2[index] || 0)) {
+        return -1
+      }
+    }
+    return 0
+  }
+
+  normalizeClaudeCodeUserAgent(userAgent) {
+    const normalized = this.normalizeUserAgent(userAgent)
+    if (!/^claude-cli\/[\w.-]+\s+\(/i.test(normalized)) {
+      return normalized
+    }
+
+    const currentVersion = this.extractClaudeCodeVersion(normalized)
+    if (!currentVersion) {
+      return normalized
+    }
+
+    const configuredVersion = this.getConfiguredClaudeCodeVersion()
+    const targetVersion =
+      configuredVersion ||
+      (this.compareClaudeCodeVersions(currentVersion, MIN_CLAUDE_CODE_VERSION) < 0
+        ? MIN_CLAUDE_CODE_VERSION
+        : currentVersion)
+
+    if (targetVersion === currentVersion) {
+      return normalized
+    }
+    return normalized.replace(`claude-cli/${currentVersion}`, `claude-cli/${targetVersion}`)
   }
 
   detectPlatform(userAgent, headersOrFingerprint = null) {
@@ -52,7 +108,7 @@ class UserAgentPoolService {
   }
 
   async recordUserAgent(userAgent, clientHeaders = null) {
-    const normalized = this.normalizeUserAgent(userAgent)
+    const normalized = this.normalizeClaudeCodeUserAgent(userAgent)
     // UA 池只接受真实 Claude Code 格式，避免浏览器、curl 或网关 UA
     // 成为新账号的固定上游身份。
     if (!this.isClaudeCodeUserAgent(normalized)) {
@@ -92,7 +148,7 @@ class UserAgentPoolService {
         return null
       }
 
-      const userAgent = this.normalizeUserAgent(entries[0])
+      const userAgent = this.normalizeClaudeCodeUserAgent(entries[0])
       if (!userAgent) {
         return null
       }
@@ -125,7 +181,7 @@ class UserAgentPoolService {
       const items = []
       const observations = []
       for (let index = 0; index < entries.length; index += 2) {
-        const userAgent = this.normalizeUserAgent(entries[index])
+        const userAgent = this.normalizeClaudeCodeUserAgent(entries[index])
         if (!userAgent) {
           continue
         }
@@ -162,7 +218,7 @@ class UserAgentPoolService {
       return latest
     }
 
-    const userAgent = this.normalizeUserAgent(fallbackUserAgent)
+    const userAgent = this.normalizeClaudeCodeUserAgent(fallbackUserAgent)
     return {
       userAgent,
       platform: this.detectPlatform(userAgent),
@@ -190,3 +246,4 @@ module.exports.USER_AGENT_POOL_KEY = USER_AGENT_POOL_KEY
 module.exports.USER_AGENT_POOL_METADATA_KEY = USER_AGENT_POOL_METADATA_KEY
 module.exports.DEFAULT_CLAUDE_USER_AGENT = DEFAULT_CLAUDE_USER_AGENT
 module.exports.DEFAULT_CONSOLE_USER_AGENT = DEFAULT_CONSOLE_USER_AGENT
+module.exports.MIN_CLAUDE_CODE_VERSION = MIN_CLAUDE_CODE_VERSION

@@ -114,7 +114,7 @@ class ClaudeAccountService {
     } = options
 
     const accountId = uuidv4()
-    const normalizedUserAgent = userAgentPoolService.normalizeUserAgent(userAgent)
+    const normalizedUserAgent = userAgentPoolService.normalizeClaudeCodeUserAgent(userAgent)
     const assignedUserAgent = normalizedUserAgent
       ? {
           userAgent: normalizedUserAgent,
@@ -679,7 +679,7 @@ class ClaudeAccountService {
     outboundHeaders,
     detectionSource = 'successful_upstream_request'
   ) {
-    const userAgent = userAgentPoolService.normalizeUserAgent(
+    const userAgent = userAgentPoolService.normalizeClaudeCodeUserAgent(
       outboundHeaders?.['User-Agent'] || outboundHeaders?.['user-agent'] || ''
     )
     const stainlessFingerprint = requestIdentityService.extractStainlessFingerprint(outboundHeaders)
@@ -909,7 +909,7 @@ class ClaudeAccountService {
             fiveHourStoppedAt: account.fiveHourStoppedAt || null,
             // 添加统一User-Agent设置
             useUnifiedUserAgent: account.useUnifiedUserAgent === 'true', // 默认为false
-            userAgent: account.userAgent || '',
+            userAgent: userAgentPoolService.normalizeClaudeCodeUserAgent(account.userAgent || ''),
             userAgentPlatform:
               account.userAgentPlatform || userAgentPoolService.detectPlatform(account.userAgent),
             userAgentMode: account.userAgentMode || '',
@@ -1056,7 +1056,7 @@ class ClaudeAccountService {
           } else if (field === 'proxy') {
             updatedData[field] = value ? JSON.stringify(value) : ''
           } else if (field === 'userAgent') {
-            const normalizedUserAgent = userAgentPoolService.normalizeUserAgent(value)
+            const normalizedUserAgent = userAgentPoolService.normalizeClaudeCodeUserAgent(value)
             updatedData.userAgent = normalizedUserAgent || DEFAULT_CLAUDE_USER_AGENT
             updatedData.userAgentPlatform = userAgentPoolService.detectPlatform(
               updatedData.userAgent

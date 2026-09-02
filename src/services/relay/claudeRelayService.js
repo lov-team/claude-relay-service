@@ -19,6 +19,7 @@ const { formatDateWithTimezone } = require('../../utils/dateHelper')
 const requestIdentityService = require('../requestIdentityService')
 const { createClaudeTestPayload } = require('../../utils/testPayloadHelper')
 const userMessageQueueService = require('../userMessageQueueService')
+const userAgentPoolService = require('../userAgentPoolService')
 const { isStreamWritable } = require('../../utils/streamHelper')
 const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
 const metadataUserIdHelper = require('../../utils/metadataUserIdHelper')
@@ -40,7 +41,7 @@ const VALID_CACHE_CONTROL_TTLS = new Set(['5m', '1h'])
 const CACHE_DEBUG_ENV = 'ANTHROPIC_CACHE_DEBUG'
 const SHARED_ACCOUNT_FAILOVER_MAX_ATTEMPTS = 2
 // 只服务于未建立 pinned 身份的存量账号；新账号默认版本见 userAgentPoolService。
-const LEGACY_CLAUDE_USER_AGENT_FALLBACK = 'claude-cli/1.0.119 (external, cli)'
+const LEGACY_CLAUDE_USER_AGENT_FALLBACK = userAgentPoolService.DEFAULT_CLAUDE_USER_AGENT
 
 // structuredClone polyfill for Node < 17
 const safeClone =
@@ -413,23 +414,23 @@ class ClaudeRelayService {
     accountUserAgentMode = ''
   ) {
     if (accountUserAgentMode === 'pinned' && typeof accountUA === 'string' && accountUA.trim()) {
-      return accountUA
+      return userAgentPoolService.normalizeClaudeCodeUserAgent(accountUA)
     }
 
     // 没有 pinned 身份的存量账号继续沿用原 unified UA 行为。
     if (unifiedUA) {
-      return unifiedUA
+      return userAgentPoolService.normalizeClaudeCodeUserAgent(unifiedUA)
     }
 
     const userAgent = headers?.['user-agent'] || headers?.['User-Agent']
     if (typeof userAgent === 'string' && /^claude-cli\/[^\s]+\s+\(/i.test(userAgent)) {
-      return userAgent
+      return userAgentPoolService.normalizeClaudeCodeUserAgent(userAgent)
     }
 
     if (isRealClaudeCode) {
-      return (
+      return userAgentPoolService.normalizeClaudeCodeUserAgent(
         this._extractClaudeCodeUserAgentFromBillingHeader(requestPayload) ||
-        LEGACY_CLAUDE_USER_AGENT_FALLBACK
+          LEGACY_CLAUDE_USER_AGENT_FALLBACK
       )
     }
 
@@ -4475,16 +4476,20 @@ class ClaudeRelayService {
     if (clientUA && CLAUDE_CODE_UA_PATTERN.test(clientUA)) {
       if (!cachedUA) {
         // 没有缓存，直接存储
-        await redis.client.setex(CACHE_KEY, TTL, clientUA)
-        logger.info(`📱 Captured unified Claude Code User-Agent: ${clientUA}`)
-        cachedUA = clientUA
+        const normalizedClientUA = userAgentPoolService.normalizeClaudeCodeUserAgent(clientUA)
+        await redis.client.setex(CACHE_KEY, TTL, normalizedClientUA)
+        logger.info(`📱 Captured unified Claude Code User-Agent: ${normalizedClientUA}`)
+        cachedUA = normalizedClientUA
       } else {
         // 有缓存，比较版本号，保存更新的版本
         const shouldUpdate = this.compareClaudeCodeVersions(clientUA, cachedUA)
         if (shouldUpdate) {
-          await redis.client.setex(CACHE_KEY, TTL, clientUA)
-          logger.info(`🔄 Updated to newer Claude Code User-Agent: ${clientUA} (was: ${cachedUA})`)
-          cachedUA = clientUA
+          const normalizedClientUA = userAgentPoolService.normalizeClaudeCodeUserAgent(clientUA)
+          await redis.client.setex(CACHE_KEY, TTL, normalizedClientUA)
+          logger.info(
+            `🔄 Updated to newer Claude Code User-Agent: ${normalizedClientUA} (was: ${cachedUA})`
+          )
+          cachedUA = normalizedClientUA
         } else {
           // 当前版本不比缓存版本新，仅刷新TTL
           await redis.client.expire(CACHE_KEY, TTL)
@@ -4492,7 +4497,7 @@ class ClaudeRelayService {
       }
     }
 
-    return cachedUA // 没有缓存返回 null
+    return cachedUA ? userAgentPoolService.normalizeClaudeCodeUserAgent(cachedUA) : null // 没有缓存返回 null
   }
 
   // 🔄 比较Claude Code版本号，判断是否需要更新

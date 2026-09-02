@@ -13,10 +13,11 @@ const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
 const userMessageQueueService = require('../userMessageQueueService')
 const { isStreamWritable } = require('../../utils/streamHelper')
 const { filterForClaude } = require('../../utils/headerFilter')
+const userAgentPoolService = require('../userAgentPoolService')
 
 class ClaudeConsoleRelayService {
   constructor() {
-    this.defaultUserAgent = 'claude-cli/2.0.52 (external, cli)'
+    this.defaultUserAgent = userAgentPoolService.DEFAULT_CLAUDE_USER_AGENT
   }
 
   // 🚀 转发请求到Claude Console API

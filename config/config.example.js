@@ -46,6 +46,8 @@ const config = {
     oauthTokenUrl:
       process.env.CLAUDE_OAUTH_TOKEN_URL || 'https://platform.claude.com/v1/oauth/token',
     apiVersion: process.env.CLAUDE_API_VERSION || '2023-06-01',
+    // Claude Code CLI 身份版本。设置后优先使用该版本；未设置时自动确保不低于服务端要求。
+    codeVersion: process.env.CLAUDE_CODE_VERSION || '',
     // 专属账号不可用时是否回退到共享池。
     // 默认 false：API Key 绑定了专属账号就必须使用该账号，不可用时直接报错，
     // 否则「限定账号」的语义会被破坏（请求会静默用到别的账号）。
