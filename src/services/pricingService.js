@@ -357,6 +357,14 @@ class PricingService {
       return null
     }
 
+    // Fable 5.1 follows the Fable 5 price schedule. Keep this alias ahead of
+    // fuzzy matching so a newer upstream pricing file cannot split the two
+    // model revisions into different cache prices.
+    if (modelName === 'claude-fable-5-1' && this.pricingData['claude-fable-5']) {
+      logger.debug(`💰 Using claude-fable-5 pricing for ${modelName}`)
+      return this.pricingData['claude-fable-5']
+    }
+
     // 尝试直接匹配
     if (this.pricingData[modelName]) {
       logger.debug(`💰 Found exact pricing match for ${modelName}`)

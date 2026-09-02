@@ -7,4 +7,11 @@ describe('models config', () => {
       label: 'Claude Sonnet 4.6'
     })
   })
+
+  it('exposes the canonical Claude Fable 5.1 model id', () => {
+    expect(CLAUDE_MODELS).toContainEqual({
+      value: 'claude-fable-5-1',
+      label: 'Claude Fable 5.1'
+    })
+  })
 })

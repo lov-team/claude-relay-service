@@ -25,6 +25,20 @@ const MODEL_PRICING = {
     cacheRead: 0.3
   },
 
+  // Claude Fable 5 / 5.1
+  'claude-fable-5': {
+    input: 10.0,
+    output: 50.0,
+    cacheWrite: 12.5,
+    cacheRead: 1.0
+  },
+  'claude-fable-5-1': {
+    input: 10.0,
+    output: 50.0,
+    cacheWrite: 12.5,
+    cacheRead: 1.0
+  },
+
   // Claude 3.5 Haiku
   'claude-3-5-haiku-20241022': {
     input: 0.25,
