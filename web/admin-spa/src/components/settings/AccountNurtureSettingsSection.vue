@@ -136,10 +136,10 @@
                     v-model.number="form.rateLimitCooldowns[tier.key][index]"
                     :aria-label="`${tier.label} ${label} 429 冷却秒数`"
                     class="w-24 rounded-lg border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white"
-                    type="number"
-                    min="1"
                     max="86400"
+                    min="1"
                     step="1"
+                    type="number"
                   />
                 </td>
               </tr>
