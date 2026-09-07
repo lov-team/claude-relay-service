@@ -4497,8 +4497,13 @@ const getClaudeAccountType = (account) => {
       // 订阅信息已解析
 
       // 根据 has_claude_max 和 has_claude_pro 判断
-      if (info.hasClaudeMax === true) {
-        return 'Claude Max'
+      if (info.accountType === 'claude_max_20x') {
+        return 'Claude Max 20x'
+      } else if (
+        info.hasClaudeMax === true ||
+        ['claude_max', 'claude_max_5x'].includes(info.accountType)
+      ) {
+        return 'Claude Max 5x'
       } else if (info.hasClaudePro === true) {
         return 'Claude Pro'
       } else {

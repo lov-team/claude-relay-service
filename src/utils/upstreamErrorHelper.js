@@ -94,7 +94,7 @@ const getAccountTempUnavailablePolicy = async (accountId, accountType) => {
       return EMPTY_TEMP_UNAVAILABLE_POLICY
     }
 
-    return normalizeTempUnavailablePolicyFromAccountData(accountData)
+    return { ...normalizeTempUnavailablePolicyFromAccountData(accountData), accountData }
   } catch (error) {
     logger.warn(
       `⚠️ [UpstreamError] Failed to load account temp-unavailable policy for ${accountType}:${accountId}: ${error.message}`
@@ -346,6 +346,25 @@ const markTempUnavailable = async (
       policyDecision.ttlOverrideSeconds > 0
     ) {
       ttlSeconds = policyDecision.ttlOverrideSeconds
+    }
+    if (statusCode === 429 && policy.accountData) {
+      try {
+        const { getNurtureRateLimitCooldownSeconds } = require('./accountNurtureDefaults')
+        const nurtureConfig = await require('../services/accountNurtureConfigService').getConfig()
+        const nurtureCooldown = getNurtureRateLimitCooldownSeconds(
+          nurtureConfig,
+          policy.accountData
+        )
+        if (nurtureCooldown !== null) {
+          // 普通 429 使用养号冷却；上游明确的 Retry-After 作为下限。
+          ttlSeconds = Math.max(
+            nurtureCooldown,
+            Number.isFinite(parsedCustomTtl) && parsedCustomTtl > 0 ? ttlSeconds : 0
+          )
+        }
+      } catch (error) {
+        logger.warn(`Failed to resolve nurture 429 cooldown for ${accountId}: ${error.message}`)
+      }
     }
     const markedAtIso = new Date().toISOString()
     const expiresAtIso = new Date(Date.now() + ttlSeconds * 1000).toISOString()

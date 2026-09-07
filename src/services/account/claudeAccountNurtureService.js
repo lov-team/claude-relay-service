@@ -4,6 +4,9 @@ const logger = require('../../utils/logger')
 const accountNurtureConfigService = require('../accountNurtureConfigService')
 const claudeAccountService = require('./claudeAccountService')
 const {
+  getNurtureTier,
+  isProAccount,
+  isMaxAccount,
   pickInRange,
   calcSevenDayPaceLimit,
   calcSevenDaySteadyPaceLimit,
@@ -18,50 +21,6 @@ const RPM_WINDOW_MS = 60000
 const FIVE_HOUR_WINDOW_MS = 5 * 60 * 60 * 1000
 const FIVE_HOUR_GUARD_JITTER_MS = 60 * 60 * 1000
 const FIVE_HOUR_BLOCK_REASONS = new Set(['five_hour_curve', 'five_hour_steady'])
-
-function parseSubscriptionInfo(account) {
-  if (!account?.subscriptionInfo) {
-    return null
-  }
-  try {
-    return typeof account.subscriptionInfo === 'string'
-      ? JSON.parse(account.subscriptionInfo)
-      : account.subscriptionInfo
-  } catch (error) {
-    return null
-  }
-}
-
-function isProAccount(info) {
-  if (!info) {
-    return false
-  }
-  if (info.hasClaudePro === true && info.hasClaudeMax !== true) {
-    return true
-  }
-  return info.accountType === 'claude_pro'
-}
-
-function isMaxAccount(info) {
-  if (!info) {
-    return false
-  }
-  if (info.hasClaudeMax === true) {
-    return true
-  }
-  return info.accountType === 'claude_max'
-}
-
-function getNurtureTier(account) {
-  const info = parseSubscriptionInfo(account)
-  if (isMaxAccount(info)) {
-    return 'max'
-  }
-  if (isProAccount(info)) {
-    return 'pro'
-  }
-  return null
-}
 
 function toNumberOrNull(value) {
   if (value === undefined || value === null || value === '') {
@@ -94,7 +53,8 @@ function calcFiveHourGuardReleaseAt(accountId, resetsAt) {
 class ClaudeAccountNurtureService {
   async resolveAndSyncTier(accountId, account) {
     const subscriptionTier = getNurtureTier(account)
-    const tier = subscriptionTier || account?.nurtureTier || null
+    const tier =
+      subscriptionTier || (account?.nurtureTier === 'max5x' ? 'max' : account?.nurtureTier) || null
 
     if (subscriptionTier && account?.nurtureTier !== subscriptionTier) {
       account.nurtureTier = subscriptionTier
@@ -112,7 +72,10 @@ class ClaudeAccountNurtureService {
   async getEffectiveConfig(accountId, accountData = null) {
     const account = accountData || (await redis.getClaudeAccount(accountId))
     const systemConfig = await accountNurtureConfigService.getConfig()
-    const tier = getNurtureTier(account) || account?.nurtureTier || 'pro'
+    const tier =
+      getNurtureTier(account) ||
+      (account?.nurtureTier === 'max5x' ? 'max' : account?.nurtureTier) ||
+      'pro'
     const steadyCaps = { ...systemConfig.steadyCaps[tier] }
 
     if (isTruthyFlag(account?.nurtureOverrideEnabled) && account?.nurtureOverrideSteadyCaps) {
@@ -138,7 +101,12 @@ class ClaudeAccountNurtureService {
   }
 
   getDayPlan(config, tier, dayIndex) {
-    const plans = tier === 'max' ? config.maxDayPlans : config.proDayPlans
+    const plans =
+      tier === 'max20x'
+        ? config.max20xDayPlans
+        : tier === 'max' || tier === 'max5x'
+          ? config.maxDayPlans
+          : config.proDayPlans
     return plans.find((plan) => plan.day === dayIndex) || plans[plans.length - 1]
   }
 

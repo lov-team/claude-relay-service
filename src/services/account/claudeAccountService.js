@@ -269,7 +269,8 @@ class ClaudeAccountService {
         nurtureConfig.enabled &&
         tier &&
         ((tier === 'pro' && nurtureConfig.defaultEnabledForNewPro) ||
-          (tier === 'max' && nurtureConfig.defaultEnabledForNewMax))
+          (tier === 'max' && nurtureConfig.defaultEnabledForNewMax) ||
+          (tier === 'max20x' && nurtureConfig.defaultEnabledForNewMax20x))
       if (shouldEnable) {
         await claudeAccountNurtureService.initializeForAccount(accountId, tier, true)
       }
@@ -1698,6 +1699,21 @@ class ClaudeAccountService {
     }
   }
 
+  async _getNurtureRateLimitEndAt(accountData, resetTimestamp) {
+    const upstreamResetMs = resetTimestamp ? resetTimestamp * 1000 : 0
+    try {
+      const { getNurtureRateLimitCooldownSeconds } = require('../../utils/accountNurtureDefaults')
+      const config = await accountNurtureConfigService.getConfig()
+      const seconds = getNurtureRateLimitCooldownSeconds(config, accountData)
+      if (seconds !== null) {
+        return new Date(Math.max(upstreamResetMs, Date.now() + seconds * 1000)).toISOString()
+      }
+    } catch (error) {
+      logger.warn(`Failed to resolve nurture rate limit expiry: ${error.message}`)
+    }
+    return upstreamResetMs ? new Date(upstreamResetMs).toISOString() : null
+  }
+
   // 🚫 标记账号为限流状态
   async markAccountRateLimited(accountId, sessionHash = null, rateLimitResetTimestamp = null) {
     try {
@@ -1743,7 +1759,10 @@ class ClaudeAccountService {
 
       // 将Unix时间戳（秒）转换为毫秒并创建Date对象
       const resetTime = new Date(rateLimitResetTimestamp * 1000)
-      updatedAccountData.rateLimitEndAt = resetTime.toISOString()
+      updatedAccountData.rateLimitEndAt = await this._getNurtureRateLimitEndAt(
+        accountData,
+        rateLimitResetTimestamp
+      )
 
       // 计算当前会话窗口的开始时间（重置时间减去5小时）
       const windowStartTime = new Date(resetTime.getTime() - 5 * 60 * 60 * 1000)
@@ -1822,8 +1841,12 @@ class ClaudeAccountService {
       const updatedAccountData = { ...accountData }
       updatedAccountData[atField] = new Date().toISOString()
 
-      if (rateLimitResetTimestamp) {
-        const resetTime = new Date(rateLimitResetTimestamp * 1000)
+      const rateLimitEndAt = await this._getNurtureRateLimitEndAt(
+        accountData,
+        rateLimitResetTimestamp
+      )
+      if (rateLimitEndAt) {
+        const resetTime = new Date(rateLimitEndAt)
         updatedAccountData[endField] = resetTime.toISOString()
         logger.warn(
           `🚫 Account ${accountData.name} (${accountId}) reached ${family} model cap, resets at ${resetTime.toISOString()}`
@@ -2663,6 +2686,20 @@ class ClaudeAccountService {
         const hasClaudeMax = profileData.account?.has_claude_max === true || isEnterpriseOrg
         const hasClaudePro = profileData.account?.has_claude_pro === true && !hasClaudeMax
 
+        let previousSubscription = {}
+        try {
+          previousSubscription =
+            typeof accountData.subscriptionInfo === 'string'
+              ? JSON.parse(accountData.subscriptionInfo)
+              : accountData.subscriptionInfo || {}
+        } catch {
+          /* 旧订阅信息损坏时从上游重建 */
+        }
+        const isMax20x =
+          profileData.organization?.rate_limit_tier === 'default_claude_max_20x' ||
+          (!profileData.organization?.rate_limit_tier &&
+            previousSubscription.accountType === 'claude_max_20x')
+
         // 构建订阅信息
         const subscriptionInfo = {
           // 账号信息
@@ -2681,7 +2718,7 @@ class ClaudeAccountService {
           organizationType: profileData.organization?.organization_type,
 
           // 账号类型：Enterprise 组织按 Max 能力处理，确保可调度 Opus
-          accountType: hasClaudeMax ? 'claude_max' : hasClaudePro ? 'claude_pro' : 'claude_max',
+          accountType: hasClaudePro ? 'claude_pro' : isMax20x ? 'claude_max_20x' : 'claude_max',
 
           // 更新时间
           profileFetchedAt: new Date().toISOString()

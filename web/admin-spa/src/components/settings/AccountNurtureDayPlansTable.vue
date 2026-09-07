@@ -220,7 +220,7 @@ const props = defineProps({
   tier: {
     type: String,
     required: true,
-    validator: (value) => ['pro', 'max'].includes(value)
+    validator: (value) => ['pro', 'max', 'max20x'].includes(value)
   },
   plans: {
     type: Array,
@@ -234,7 +234,7 @@ const props = defineProps({
 
 const emit = defineEmits(['update:plans', 'change'])
 
-const tierLabel = computed(() => (props.tier === 'max' ? 'Max' : 'Pro'))
+const tierLabel = computed(() => ({ pro: 'Pro', max: 'Max 5x', max20x: 'Max 20x' })[props.tier])
 const percentScale = 90
 
 const localScale = computed(() => {

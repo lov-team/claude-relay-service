@@ -159,3 +159,60 @@ describe('claudeAccountService.removeAccountRateLimit', () => {
     expect(redis.setClaudeAccount).not.toHaveBeenCalled()
   })
 })
+
+describe('nurture cooldown and authoritative reset times', () => {
+  let configSpy
+  beforeEach(() => {
+    jest.useFakeTimers()
+    jest.setSystemTime(new Date('2026-07-29T00:00:00Z'))
+    configSpy = jest
+      .spyOn(require('../src/services/accountNurtureConfigService'), 'getConfig')
+      .mockResolvedValue(require('../src/utils/accountNurtureDefaults').cloneDefaultConfig())
+  })
+  afterEach(() => {
+    configSpy.mockRestore()
+    jest.useRealTimers()
+  })
+
+  test('waits for the later of nurture cooldown and quota reset', async () => {
+    const account = { nurtureEnabled: 'true', nurtureTier: 'max20x', nurtureDayIndex: '1' }
+    const now = Date.now() / 1000
+    expect(await claudeAccountService._getNurtureRateLimitEndAt(account, now + 60)).toBe(
+      '2026-07-29T00:30:00.000Z'
+    )
+    expect(await claudeAccountService._getNurtureRateLimitEndAt(account, now + 7 * 86400)).toBe(
+      '2026-08-05T00:00:00.000Z'
+    )
+    expect(
+      await claudeAccountService._getNurtureRateLimitEndAt(
+        { ...account, nurturePhase: 'steady' },
+        now + 10
+      )
+    ).toBe('2026-07-29T00:05:00.000Z')
+    expect(
+      await claudeAccountService._getNurtureRateLimitEndAt(
+        { ...account, nurtureEnabled: false },
+        now + 60
+      )
+    ).toBe('2026-07-29T00:01:00.000Z')
+  })
+
+  test('model family limit uses its own cooldown without stopping the whole account', async () => {
+    jest.clearAllMocks()
+    redis.getClaudeAccount.mockResolvedValue({
+      id: 'model-account',
+      nurtureEnabled: true,
+      nurtureTier: 'max20x',
+      nurturePhase: 'steady'
+    })
+    await claudeAccountService.markAccountModelRateLimited(
+      'model-account',
+      'opus',
+      Date.now() / 1000 + 10
+    )
+    expect(redis.setClaudeAccount.mock.calls[0][1]).toEqual(
+      expect.objectContaining({ opusRateLimitEndAt: '2026-07-29T00:05:00.000Z' })
+    )
+    expect(redis.setClaudeAccount.mock.calls[0][1].schedulable).toBeUndefined()
+  })
+})

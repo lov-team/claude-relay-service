@@ -1798,9 +1798,18 @@
                     v-model="form.subscriptionType"
                     class="mr-2 text-blue-600 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-700"
                     type="radio"
-                    value="claude_max"
+                    value="claude_max_5x"
                   />
-                  <span class="text-sm text-gray-700 dark:text-gray-300">Claude Max</span>
+                  <span class="text-sm text-gray-700 dark:text-gray-300">Claude Max 5x</span>
+                </label>
+                <label class="flex cursor-pointer items-center">
+                  <input
+                    v-model="form.subscriptionType"
+                    class="mr-2 text-blue-600"
+                    type="radio"
+                    value="claude_max_20x"
+                  />
+                  <span class="text-sm text-gray-700 dark:text-gray-300">Claude Max 20x</span>
                 </label>
                 <label class="flex cursor-pointer items-center">
                   <input
@@ -2828,9 +2837,18 @@
                   v-model="form.subscriptionType"
                   class="mr-2 text-blue-600 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-700"
                   type="radio"
-                  value="claude_max"
+                  value="claude_max_5x"
                 />
-                <span class="text-sm text-gray-700 dark:text-gray-300">Claude Max</span>
+                <span class="text-sm text-gray-700 dark:text-gray-300">Claude Max 5x</span>
+              </label>
+              <label class="flex cursor-pointer items-center">
+                <input
+                  v-model="form.subscriptionType"
+                  class="mr-2 text-blue-600"
+                  type="radio"
+                  value="claude_max_20x"
+                />
+                <span class="text-sm text-gray-700 dark:text-gray-300">Claude Max 20x</span>
               </label>
               <label class="flex cursor-pointer items-center">
                 <input
@@ -4477,7 +4495,7 @@ const form = ref({
   description: props.account?.description || '',
   accountType: props.account?.accountType || 'shared',
   authenticationMethod: props.account?.authenticationMethod || '',
-  subscriptionType: 'claude_max', // 默认为 Claude Max，兼容旧数据
+  subscriptionType: 'claude_max_5x', // 默认为 Claude Max，兼容旧数据
   autoStopOnWarning: props.account?.autoStopOnWarning || false, // 5小时限制自动停止调度
   useUnifiedUserAgent: props.account?.useUnifiedUserAgent || false, // 使用统一Claude Code版本
   useUnifiedClientId: props.account?.useUnifiedClientId || false, // 使用统一的客户端标识
@@ -4585,7 +4603,9 @@ const formatUserAgentSeenAt = (timestamp) => {
 }
 
 const isClaudeProOrMaxSubscription = computed(
-  () => form.value.subscriptionType === 'claude_pro' || form.value.subscriptionType === 'claude_max'
+  () =>
+    form.value.subscriptionType === 'claude_pro' ||
+    ['claude_max', 'claude_max_5x', 'claude_max_20x'].includes(form.value.subscriptionType)
 )
 const nurtureStatus = ref(null)
 const nurtureStatusLabel = computed(() => {
@@ -5178,7 +5198,9 @@ const buildClaudeAccountData = (tokenInfo, accountName, clientId) => {
     maxConcurrency: form.value.serialQueueEnabled ? 1 : 0,
     subscriptionInfo: {
       accountType: form.value.subscriptionType || 'claude_max',
-      hasClaudeMax: form.value.subscriptionType === 'claude_max',
+      hasClaudeMax: ['claude_max', 'claude_max_5x', 'claude_max_20x'].includes(
+        form.value.subscriptionType
+      ),
       hasClaudePro: form.value.subscriptionType === 'claude_pro',
       manuallySet: true
     }
@@ -5386,7 +5408,9 @@ const handleOAuthSuccess = async (tokenInfoOrList) => {
       // 添加订阅类型信息
       data.subscriptionInfo = {
         accountType: form.value.subscriptionType || 'claude_max',
-        hasClaudeMax: form.value.subscriptionType === 'claude_max',
+        hasClaudeMax: ['claude_max', 'claude_max_5x', 'claude_max_20x'].includes(
+          form.value.subscriptionType
+        ),
         hasClaudePro: form.value.subscriptionType === 'claude_pro',
         manuallySet: true // 标记为手动设置
       }
@@ -5725,7 +5749,9 @@ const createAccount = async () => {
       // 添加订阅类型信息
       data.subscriptionInfo = {
         accountType: form.value.subscriptionType || 'claude_max',
-        hasClaudeMax: form.value.subscriptionType === 'claude_max',
+        hasClaudeMax: ['claude_max', 'claude_max_5x', 'claude_max_20x'].includes(
+          form.value.subscriptionType
+        ),
         hasClaudePro: form.value.subscriptionType === 'claude_pro',
         manuallySet: true // 标记为手动设置
       }
@@ -6142,7 +6168,9 @@ const updateAccount = async () => {
       // 更新订阅类型信息
       data.subscriptionInfo = {
         accountType: form.value.subscriptionType || 'claude_max',
-        hasClaudeMax: form.value.subscriptionType === 'claude_max',
+        hasClaudeMax: ['claude_max', 'claude_max_5x', 'claude_max_20x'].includes(
+          form.value.subscriptionType
+        ),
         hasClaudePro: form.value.subscriptionType === 'claude_pro',
         manuallySet: true // 标记为手动设置
       }
@@ -6734,7 +6762,7 @@ watch(
       }
 
       // 初始化订阅类型（从 subscriptionInfo 中提取，兼容旧数据默认为 claude_max）
-      let subscriptionType = 'claude_max'
+      let subscriptionType = 'claude_max_5x'
       if (newAccount.subscriptionInfo) {
         const info =
           typeof newAccount.subscriptionInfo === 'string'
@@ -6742,9 +6770,9 @@ watch(
             : newAccount.subscriptionInfo
 
         if (info.accountType) {
-          subscriptionType = info.accountType
+          subscriptionType = info.accountType === 'claude_max' ? 'claude_max_5x' : info.accountType
         } else if (info.hasClaudeMax) {
-          subscriptionType = 'claude_max'
+          subscriptionType = 'claude_max_5x'
         } else if (info.hasClaudePro) {
           subscriptionType = 'claude_pro'
         } else {

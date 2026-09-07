@@ -314,3 +314,83 @@ describe('accountNurtureDefaults', () => {
     ).toThrow(/trafficGuardrails.maxTools/)
   })
 })
+
+describe('nurture 429 cooldown schedules', () => {
+  const {
+    getNurtureTier,
+    getNurtureRateLimitCooldownSeconds
+  } = require('../src/utils/accountNurtureDefaults')
+
+  test.each([
+    ['claude_pro', 'pro'],
+    ['claude_max', 'max'],
+    ['claude_max_5x', 'max'],
+    ['claude_max_20x', 'max20x']
+  ])('selects %s cooldowns by day and graduation', (accountType, tier) => {
+    const config = normalizeAccountNurtureConfig()
+    const account = {
+      subscriptionInfo: JSON.stringify({ accountType }),
+      nurtureEnabled: 'true',
+      nurturePhase: 'nurturing'
+    }
+    expect(getNurtureTier(account)).toBe(tier)
+    for (let day = 1; day <= 7; day++) {
+      expect(
+        getNurtureRateLimitCooldownSeconds(config, { ...account, nurtureDayIndex: String(day) })
+      ).toBe(config.rateLimitCooldowns[tier][day - 1])
+      if (day > 1)
+        expect(config.rateLimitCooldowns[tier][day - 1]).toBeLessThan(
+          config.rateLimitCooldowns[tier][day - 2]
+        )
+    }
+    expect(getNurtureRateLimitCooldownSeconds(config, { ...account, nurturePhase: 'steady' })).toBe(
+      config.rateLimitCooldowns[tier][7]
+    )
+  })
+
+  test('keeps existing Max customization and gives 20x independent defaults', () => {
+    const config = normalizeAccountNurtureConfig({ steadyCaps: { max: { rpm: 17, fiveHour: 60 } } })
+    expect(config.steadyCaps.max.rpm).toBe(17)
+    expect(config.steadyCaps.max.fiveHour).toBe(60)
+    expect(config.steadyCaps.max20x.rpm).toBe(100)
+    expect(config.max20xDayPlans[6].localRequestsMax).toBe(960)
+    expect(config.rateLimitCooldowns.max20x).toHaveLength(8)
+  })
+
+  test('uses the requested initial 429 cooldowns for each subscription tier', () => {
+    const config = normalizeAccountNurtureConfig()
+    expect(config.rateLimitCooldowns.pro[0]).toBe(60 * 60)
+    expect(config.rateLimitCooldowns.pro[7]).toBe(10 * 60)
+    expect(config.rateLimitCooldowns.max[0]).toBe(45 * 60)
+    expect(config.rateLimitCooldowns.max[7]).toBe(5 * 60)
+    expect(config.rateLimitCooldowns.max20x[0]).toBe(30 * 60)
+    expect(config.rateLimitCooldowns.max20x[7]).toBe(5 * 60)
+  })
+
+  test('respects disabled guardrails and handles missing or invalid days conservatively', () => {
+    const config = cloneDefaultConfig()
+    const account = { nurtureEnabled: true, nurtureTier: 'max', nurtureDayIndex: 'bad' }
+    expect(getNurtureRateLimitCooldownSeconds(config, account)).toBe(2700)
+    expect(
+      getNurtureRateLimitCooldownSeconds(config, { ...account, nurtureEnabled: false })
+    ).toBeNull()
+    expect(getNurtureRateLimitCooldownSeconds({ ...config, enabled: false }, account)).toBeNull()
+    expect(
+      getNurtureRateLimitCooldownSeconds(config, { ...account, disableAutoProtection: 'true' })
+    ).toBeNull()
+  })
+
+  test.each(
+    [
+      [100],
+      [100, 90, 80, 70, 60, 50, 40, 41],
+      [100, 90, 80, 70, 60, 50, 40, 0],
+      [100, 90, 80, 70, 60, 50, 40, 1.5],
+      [86401, 90, 80, 70, 60, 50, 40, 1]
+    ].map((schedule) => [schedule])
+  )('rejects invalid cooldown schedule %j', (schedule) => {
+    expect(() =>
+      normalizeAccountNurtureConfig({ rateLimitCooldowns: { max20x: schedule } })
+    ).toThrow(/rateLimitCooldowns/)
+  })
+})

@@ -89,3 +89,81 @@ describe('markTempUnavailable clamps upstream retry-after', () => {
     )
   })
 })
+
+describe('nurture-aware upstream 429 temporary cooldown', () => {
+  const { cloneDefaultConfig } = require('../src/utils/accountNurtureDefaults')
+  const configService = require('../src/services/accountNurtureConfigService')
+  let configSpy
+  beforeEach(() => {
+    jest.clearAllMocks()
+    configSpy = jest.spyOn(configService, 'getConfig').mockResolvedValue(cloneDefaultConfig())
+    mockHgetall.mockResolvedValue({
+      nurtureEnabled: 'true',
+      nurtureTier: 'max20x',
+      nurtureDayIndex: '1'
+    })
+  })
+  afterEach(() => {
+    configSpy.mockRestore()
+    mockHgetall.mockResolvedValue({})
+  })
+
+  test('uses the tier day cooldown and persists matching expiry metadata', async () => {
+    const before = Date.now()
+    const result = await upstreamErrorHelper.markTempUnavailable(ACCOUNT, TYPE, 429)
+    expect(result.ttlSeconds).toBe(1800)
+    const record = JSON.parse(mockSetex.mock.calls[0][2])
+    expect(record.cooldownSeconds).toBe(1800)
+    expect(Date.parse(record.expiresAt)).toBeGreaterThanOrEqual(before + 1800000)
+  })
+
+  test('steady cooldown can be shorter than the original 5-minute fallback', async () => {
+    mockHgetall.mockResolvedValue({
+      nurtureEnabled: true,
+      nurtureTier: 'max20x',
+      nurturePhase: 'steady'
+    })
+    await upstreamErrorHelper.markTempUnavailable(ACCOUNT, 'claude', 429)
+    expect(ttlPassedToSetex()).toBe(300)
+  })
+
+  test('retains a longer upstream Retry-After and the transient weekly TTL cap', async () => {
+    mockHgetall.mockResolvedValue({
+      nurtureEnabled: true,
+      nurtureTier: 'max20x',
+      nurturePhase: 'steady'
+    })
+    expect(
+      (await upstreamErrorHelper.markTempUnavailable(ACCOUNT, TYPE, 429, 600)).ttlSeconds
+    ).toBe(600)
+    expect(
+      (await upstreamErrorHelper.markTempUnavailable(ACCOUNT, TYPE, 429, 443300)).ttlSeconds
+    ).toBe(1800)
+  })
+
+  test('uses the configured Pro early-day cooldown', async () => {
+    mockHgetall.mockResolvedValue({
+      nurtureEnabled: true,
+      nurtureTier: 'pro',
+      nurtureDayIndex: '1'
+    })
+    expect((await upstreamErrorHelper.markTempUnavailable(ACCOUNT, TYPE, 429)).ttlSeconds).toBe(
+      3600
+    )
+  })
+
+  test('keeps other errors, other platforms and disabled accounts on existing behavior', async () => {
+    expect((await upstreamErrorHelper.markTempUnavailable(ACCOUNT, TYPE, 503)).ttlSeconds).toBe(60)
+    expect((await upstreamErrorHelper.markTempUnavailable(ACCOUNT, 'openai', 429)).ttlSeconds).toBe(
+      300
+    )
+    mockHgetall.mockResolvedValue({ nurtureEnabled: false, nurtureTier: 'max20x' })
+    expect((await upstreamErrorHelper.markTempUnavailable(ACCOUNT, TYPE, 429)).ttlSeconds).toBe(300)
+    mockHgetall.mockResolvedValue({
+      nurtureEnabled: true,
+      nurtureTier: 'max20x',
+      disableTempUnavailable: 'true'
+    })
+    expect((await upstreamErrorHelper.markTempUnavailable(ACCOUNT, TYPE, 429)).skipped).toBe(true)
+  })
+})

@@ -39,9 +39,10 @@ const DEFAULT_ACCOUNT_NURTURE_CONFIG = {
   enabled: true,
   defaultEnabledForNewPro: true,
   defaultEnabledForNewMax: true,
+  defaultEnabledForNewMax20x: true,
   usageSnapshotMaxAgeMs: 300000,
   paceBuffer: 1.08,
-  maxDailySevenDayDelta: { pro: 10, max: 15 },
+  maxDailySevenDayDelta: { pro: 10, max: 15, max20x: 30 },
   steadyCaps: {
     pro: {
       rpm: 30,
@@ -50,6 +51,14 @@ const DEFAULT_ACCOUNT_NURTURE_CONFIG = {
       sevenDayOpus: 78,
       sevenDayVelocity: 10,
       localRequests: 260
+    },
+    max20x: {
+      rpm: 100,
+      fiveHour: 89,
+      sevenDay: 89,
+      sevenDayOpus: 88,
+      sevenDayVelocity: 30,
+      localRequests: 960
     },
     max: {
       rpm: 50,
@@ -67,6 +76,19 @@ const DEFAULT_ACCOUNT_NURTURE_CONFIG = {
   trafficGuardrails: { ...DEFAULT_CLAUDE_TRAFFIC_GUARDRAILS },
   proDayPlans: DEFAULT_PRO_DAY_PLANS,
   maxDayPlans: DEFAULT_MAX_DAY_PLANS,
+  max20xDayPlans: DEFAULT_MAX_DAY_PLANS.map((plan) => ({
+    ...plan,
+    rpm: plan.rpm * 2,
+    localRequestsMin: plan.localRequestsMin * 2,
+    localRequestsMax: plan.localRequestsMax * 2
+  })),
+  // 秒：Day 1–7 后接常驻期。max 保留旧配置键，对应 Max 5x。
+  rateLimitCooldowns: {
+    // 秒：第 1–7 天及常驻期。随着养号时间增加，冷却时间逐步缩短。
+    pro: [3600, 3000, 2400, 1800, 1500, 1200, 900, 600],
+    max: [2700, 2100, 1500, 900, 600, 450, 360, 300],
+    max20x: [1800, 1500, 900, 600, 450, 360, 300, 300]
+  },
   updatedAt: null,
   updatedBy: null
 }
@@ -120,7 +142,7 @@ function normalizeIntegerRange(value, fallback, min, max, label) {
 }
 
 function assertSteadyCapsBelowMax(steadyCaps) {
-  ;['pro', 'max'].forEach((tier) => {
+  ;['pro', 'max', 'max20x'].forEach((tier) => {
     ;['fiveHour', 'sevenDay', 'sevenDayOpus', 'sevenDayVelocity'].forEach((field) => {
       const value = steadyCaps?.[tier]?.[field]
       if (!Number.isFinite(value) || value >= MAX_CAP_PERCENT) {
@@ -191,89 +213,53 @@ function normalizeAccountNurtureConfig(input = {}) {
     throw new Error('paceBuffer must be between 1 and 1.2')
   }
 
-  const maxDailySevenDayDelta = {
-    pro: Number(merged.maxDailySevenDayDelta?.pro ?? base.maxDailySevenDayDelta.pro),
-    max: Number(merged.maxDailySevenDayDelta?.max ?? base.maxDailySevenDayDelta.max)
-  }
-  if (
-    !Number.isFinite(maxDailySevenDayDelta.pro) ||
-    maxDailySevenDayDelta.pro <= 0 ||
-    !Number.isFinite(maxDailySevenDayDelta.max) ||
-    maxDailySevenDayDelta.max <= 0
-  ) {
-    throw new Error('maxDailySevenDayDelta must be positive numbers')
-  }
-
-  const proDayPlans = normalizeDayPlans(merged.proDayPlans, 'proDayPlans')
-  const maxDayPlans = normalizeDayPlans(merged.maxDayPlans, 'maxDayPlans')
-  const proDaySevenMax = proDayPlans[proDayPlans.length - 1].localRequestsMax
-  const maxDaySevenMax = maxDayPlans[maxDayPlans.length - 1].localRequestsMax
-
-  const steadyCaps = {
-    pro: {
-      rpm: Number(merged.steadyCaps?.pro?.rpm ?? base.steadyCaps.pro.rpm),
-      fiveHour: normalizeCapPercent(
-        merged.steadyCaps?.pro?.fiveHour ?? base.steadyCaps.pro.fiveHour,
-        'steadyCaps.pro.fiveHour'
-      ),
-      sevenDay: normalizeCapPercent(
-        merged.steadyCaps?.pro?.sevenDay ?? base.steadyCaps.pro.sevenDay,
-        'steadyCaps.pro.sevenDay'
-      ),
-      sevenDayOpus: normalizeCapPercent(
-        merged.steadyCaps?.pro?.sevenDayOpus ?? base.steadyCaps.pro.sevenDayOpus,
-        'steadyCaps.pro.sevenDayOpus'
-      ),
-      sevenDayVelocity: normalizeCapPercent(
-        merged.steadyCaps?.pro?.sevenDayVelocity ?? base.steadyCaps.pro.sevenDayVelocity,
-        'steadyCaps.pro.sevenDayVelocity'
-      ),
-      localRequests: Number(
-        merged.steadyCaps?.pro?.localRequests ??
-          Math.max(base.steadyCaps.pro.localRequests, proDaySevenMax)
-      )
-    },
-    max: {
-      rpm: Number(merged.steadyCaps?.max?.rpm ?? base.steadyCaps.max.rpm),
-      fiveHour: normalizeCapPercent(
-        merged.steadyCaps?.max?.fiveHour ?? base.steadyCaps.max.fiveHour,
-        'steadyCaps.max.fiveHour'
-      ),
-      sevenDay: normalizeCapPercent(
-        merged.steadyCaps?.max?.sevenDay ?? base.steadyCaps.max.sevenDay,
-        'steadyCaps.max.sevenDay'
-      ),
-      sevenDayOpus: normalizeCapPercent(
-        merged.steadyCaps?.max?.sevenDayOpus ?? base.steadyCaps.max.sevenDayOpus,
-        'steadyCaps.max.sevenDayOpus'
-      ),
-      sevenDayVelocity: normalizeCapPercent(
-        merged.steadyCaps?.max?.sevenDayVelocity ?? base.steadyCaps.max.sevenDayVelocity,
-        'steadyCaps.max.sevenDayVelocity'
-      ),
-      localRequests: Number(
-        merged.steadyCaps?.max?.localRequests ??
-          Math.max(base.steadyCaps.max.localRequests, maxDaySevenMax)
-      )
+  const maxDailySevenDayDelta = {}
+  const steadyCaps = {}
+  const dayPlans = {}
+  const rateLimitCooldowns = {}
+  for (const tier of ['pro', 'max', 'max20x']) {
+    const delta = Number(merged.maxDailySevenDayDelta?.[tier] ?? base.maxDailySevenDayDelta[tier])
+    if (!Number.isFinite(delta) || delta <= 0) {
+      throw new Error('maxDailySevenDayDelta must be positive numbers')
     }
-  }
-
-  if (!Number.isFinite(steadyCaps.pro.rpm) || steadyCaps.pro.rpm < 1) {
-    throw new Error('steadyCaps.pro.rpm must be >= 1')
-  }
-  if (!Number.isFinite(steadyCaps.max.rpm) || steadyCaps.max.rpm < 1) {
-    throw new Error('steadyCaps.max.rpm must be >= 1')
-  }
-  ;['pro', 'max'].forEach((tier) => {
-    const { localRequests } = steadyCaps[tier]
-    const daySevenMax = tier === 'pro' ? proDaySevenMax : maxDaySevenMax
-    if (!Number.isInteger(localRequests) || localRequests < daySevenMax) {
+    maxDailySevenDayDelta[tier] = delta
+    const planKey = `${tier}DayPlans`
+    dayPlans[planKey] = normalizeDayPlans(merged[planKey], planKey)
+    const daySevenMax = dayPlans[planKey][6].localRequestsMax
+    const capInput = merged.steadyCaps?.[tier] || {}
+    const cap = { ...base.steadyCaps[tier], ...capInput }
+    cap.rpm = Number(cap.rpm)
+    if (!Number.isFinite(cap.rpm) || cap.rpm < 1) {
+      throw new Error(`steadyCaps.${tier}.rpm must be >= 1`)
+    }
+    for (const field of ['fiveHour', 'sevenDay', 'sevenDayOpus', 'sevenDayVelocity']) {
+      cap[field] = normalizeCapPercent(cap[field], `steadyCaps.${tier}.${field}`)
+    }
+    cap.localRequests = Number(
+      capInput.localRequests ?? Math.max(base.steadyCaps[tier].localRequests, daySevenMax)
+    )
+    if (!Number.isInteger(cap.localRequests) || cap.localRequests < daySevenMax) {
       throw new Error(
         `steadyCaps.${tier}.localRequests must be an integer at or above Day 7 maximum`
       )
     }
-  })
+    steadyCaps[tier] = cap
 
+    const cooldowns = merged.rateLimitCooldowns?.[tier] ?? base.rateLimitCooldowns[tier]
+    if (!Array.isArray(cooldowns) || cooldowns.length !== 8) {
+      throw new Error(`rateLimitCooldowns.${tier} must contain 8 values (Day 1–7 and steady)`)
+    }
+    rateLimitCooldowns[tier] = cooldowns.map((value, index) => {
+      const seconds = Number(value)
+      if (!Number.isInteger(seconds) || seconds < 1 || seconds > 86400) {
+        throw new Error(`rateLimitCooldowns.${tier} must be integer seconds between 1 and 86400`)
+      }
+      if (index > 0 && seconds > Number(cooldowns[index - 1])) {
+        throw new Error(`rateLimitCooldowns.${tier} must not increase as the account matures`)
+      }
+      return seconds
+    })
+  }
   assertSteadyCapsBelowMax(steadyCaps)
 
   const oauthErrorPatterns = {
@@ -333,17 +319,88 @@ function normalizeAccountNurtureConfig(input = {}) {
     enabled,
     defaultEnabledForNewPro,
     defaultEnabledForNewMax,
+    defaultEnabledForNewMax20x:
+      merged.defaultEnabledForNewMax20x === true || merged.defaultEnabledForNewMax20x === 'true',
     usageSnapshotMaxAgeMs,
     paceBuffer,
     maxDailySevenDayDelta,
     steadyCaps,
     oauthErrorPatterns,
     trafficGuardrails,
-    proDayPlans,
-    maxDayPlans,
+    ...dayPlans,
+    rateLimitCooldowns,
     updatedAt: merged.updatedAt || null,
     updatedBy: merged.updatedBy || null
   }
+}
+
+function parseSubscriptionInfo(account) {
+  if (!account?.subscriptionInfo) {
+    return null
+  }
+  try {
+    return typeof account.subscriptionInfo === 'string'
+      ? JSON.parse(account.subscriptionInfo)
+      : account.subscriptionInfo
+  } catch (error) {
+    return null
+  }
+}
+
+function isProAccount(info) {
+  if (!info) {
+    return false
+  }
+  if (info.hasClaudePro === true && info.hasClaudeMax !== true) {
+    return true
+  }
+  return info.accountType === 'claude_pro'
+}
+
+function isMaxAccount(info) {
+  if (!info) {
+    return false
+  }
+  if (info.hasClaudeMax === true) {
+    return true
+  }
+  return (
+    info.accountType === 'claude_max' ||
+    info.accountType === 'claude_max_5x' ||
+    info.accountType === 'claude_max_20x'
+  )
+}
+
+function getNurtureTier(account) {
+  const info = parseSubscriptionInfo(account)
+  if (isMaxAccount(info)) {
+    return info.accountType === 'claude_max_20x' ? 'max20x' : 'max'
+  }
+  if (isProAccount(info)) {
+    return 'pro'
+  }
+  return null
+}
+
+function getNurtureRateLimitCooldownSeconds(config, account) {
+  const flag = (value) => value === true || value === 'true'
+  if (
+    !flag(config?.enabled) ||
+    !flag(account?.nurtureEnabled) ||
+    flag(account?.disableAutoProtection)
+  ) {
+    return null
+  }
+  const tier =
+    getNurtureTier(account) || (account?.nurtureTier === 'max5x' ? 'max' : account?.nurtureTier)
+  const cooldowns = config.rateLimitCooldowns?.[tier]
+  if (!cooldowns) return null
+  const day = Number.parseInt(account.nurtureDayIndex, 10)
+  const index =
+    account.nurturePhase === 'steady'
+      ? 7
+      : Math.min(6, Math.max(0, (Number.isFinite(day) ? day : 1) - 1))
+  return cooldowns[index]
 }
 
 function seededUnitRandom(seed, accountId, field) {
@@ -460,6 +517,10 @@ function getUtcDateKey(date = new Date()) {
 }
 
 module.exports = {
+  getNurtureTier,
+  isProAccount,
+  isMaxAccount,
+  getNurtureRateLimitCooldownSeconds,
   WINDOW_MS,
   DAY_MS,
   MAX_CAP_PERCENT,

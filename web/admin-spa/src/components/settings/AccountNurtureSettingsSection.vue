@@ -24,8 +24,14 @@
           <label
             class="flex items-center justify-between rounded-lg border border-gray-200 p-4 dark:border-gray-700"
           >
-            <span class="text-sm text-gray-700 dark:text-gray-200">新建 Max 默认开启</span>
+            <span class="text-sm text-gray-700 dark:text-gray-200">新建 Max 5x 默认开启</span>
             <input v-model="form.defaultEnabledForNewMax" type="checkbox" @change="saveConfig" />
+          </label>
+          <label
+            class="flex items-center justify-between rounded-lg border border-gray-200 p-4 dark:border-gray-700"
+          >
+            <span class="text-sm text-gray-700 dark:text-gray-200">新建 Max 20x 默认开启</span>
+            <input v-model="form.defaultEnabledForNewMax20x" type="checkbox" @change="saveConfig" />
           </label>
         </div>
       </div>
@@ -92,23 +98,12 @@
               @change="saveConfig"
             />
           </div>
-          <div>
+          <div v-for="tier in tiers" :key="tier.key">
             <label class="text-sm text-gray-600 dark:text-gray-300"
-              >养号期 Pro 日增速上限 (%)</label
+              >养号期 {{ tier.label }} 日增速上限 (%)</label
             >
             <input
-              v-model.number="form.maxDailySevenDayDelta.pro"
-              class="mt-1 w-full rounded-lg border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white"
-              type="number"
-              @change="saveConfig"
-            />
-          </div>
-          <div>
-            <label class="text-sm text-gray-600 dark:text-gray-300"
-              >养号期 Max 日增速上限 (%)</label
-            >
-            <input
-              v-model.number="form.maxDailySevenDayDelta.max"
+              v-model.number="form.maxDailySevenDayDelta[tier.key]"
               class="mt-1 w-full rounded-lg border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white"
               type="number"
               @change="saveConfig"
@@ -117,29 +112,62 @@
         </div>
       </div>
 
-      <AccountNurtureDayPlansTable
-        v-if="form.proDayPlans.length === 7"
-        v-model:plans="form.proDayPlans"
-        :steady-caps="form.steadyCaps.pro"
-        tier="pro"
-        @change="saveConfig"
-      />
+      <div class="rounded-lg bg-white/80 p-6 shadow-lg backdrop-blur-sm dark:bg-gray-800/80">
+        <h4 class="mb-2 text-lg font-semibold text-gray-900 dark:text-gray-100">
+          上游 429 冷却时间
+        </h4>
+        <p class="mb-4 text-sm text-gray-500 dark:text-gray-400">
+          单位为秒，按养号第 1–7 天和毕业后的常驻期生效；时间须逐步缩短或保持不变。
+          仅用于已开启养号护栏的账号，上游明确的额度重置时间仍须等待。
+        </p>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm text-gray-700 dark:text-gray-200">
+            <thead>
+              <tr>
+                <th class="p-2 text-left">套餐</th>
+                <th v-for="label in cooldownLabels" :key="label" class="p-2">{{ label }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="tier in tiers" :key="tier.key">
+                <th class="whitespace-nowrap p-2 text-left">{{ tier.label }}</th>
+                <td v-for="(label, index) in cooldownLabels" :key="label" class="p-2">
+                  <input
+                    v-model.number="form.rateLimitCooldowns[tier.key][index]"
+                    :aria-label="`${tier.label} ${label} 429 冷却秒数`"
+                    class="w-24 rounded-lg border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white"
+                    type="number"
+                    min="1"
+                    max="86400"
+                    step="1"
+                  />
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="mt-3 text-xs text-gray-500 dark:text-gray-400">
+          修改后点击页面底部「保存配置」，后续发生的 429 将使用新配置。
+        </p>
+      </div>
 
-      <AccountNurtureDayPlansTable
-        v-if="form.maxDayPlans.length === 7"
-        v-model:plans="form.maxDayPlans"
-        :steady-caps="form.steadyCaps.max"
-        tier="max"
-        @change="saveConfig"
-      />
+      <template v-for="tier in tiers" :key="tier.key">
+        <AccountNurtureDayPlansTable
+          v-if="form[tier.planKey].length === 7"
+          v-model:plans="form[tier.planKey]"
+          :steady-caps="form.steadyCaps[tier.key]"
+          :tier="tier.key"
+          @change="saveConfig"
+        />
+      </template>
 
       <div
-        v-for="tier in ['pro', 'max']"
+        v-for="tier in ['pro', 'max', 'max20x']"
         :key="tier"
         class="rounded-lg bg-white/80 p-6 shadow-lg backdrop-blur-sm dark:bg-gray-800/80"
       >
         <h4 class="mb-4 text-lg font-semibold uppercase text-gray-900 dark:text-gray-100">
-          {{ tier }} 常驻上限
+          {{ tiers.find((item) => item.key === tier).label }} 常驻上限
         </h4>
         <div class="grid gap-4 md:grid-cols-3 xl:grid-cols-6">
           <div v-for="field in steadyFields" :key="`${tier}-${field.key}`">
@@ -184,13 +212,29 @@ import {
   resetAccountNurtureConfigApi
 } from '@/utils/http_apis'
 
+const tiers = [
+  { key: 'pro', label: 'Pro', planKey: 'proDayPlans' },
+  { key: 'max', label: 'Max 5x', planKey: 'maxDayPlans' },
+  { key: 'max20x', label: 'Max 20x', planKey: 'max20xDayPlans' }
+]
+const cooldownLabels = [
+  '第 1 天',
+  '第 2 天',
+  '第 3 天',
+  '第 4 天',
+  '第 5 天',
+  '第 6 天',
+  '第 7 天',
+  '常驻期'
+]
 const loading = ref(true)
 const form = ref({
   enabled: true,
   defaultEnabledForNewPro: true,
   defaultEnabledForNewMax: true,
+  defaultEnabledForNewMax20x: true,
   paceBuffer: 1.08,
-  maxDailySevenDayDelta: { pro: 10, max: 15 },
+  maxDailySevenDayDelta: { pro: 10, max: 15, max20x: 30 },
   oauthErrorPatterns: {
     blocked: [],
     revoked: []
@@ -219,10 +263,20 @@ const form = ref({
       sevenDayOpus: 84,
       sevenDayVelocity: 15,
       localRequests: 480
+    },
+    max20x: {
+      rpm: 100,
+      fiveHour: 89,
+      sevenDay: 89,
+      sevenDayOpus: 88,
+      sevenDayVelocity: 30,
+      localRequests: 960
     }
   },
   proDayPlans: [],
-  maxDayPlans: []
+  maxDayPlans: [],
+  max20xDayPlans: [],
+  rateLimitCooldowns: { pro: [], max: [], max20x: [] }
 })
 
 const steadyFields = [
@@ -301,8 +355,25 @@ const hasInvalidDayPlans = (plans) =>
   )
 
 const hasInvalidSteadyLocalCaps = () =>
-  form.value.steadyCaps.pro.localRequests < form.value.proDayPlans[6].localRequestsMax ||
-  form.value.steadyCaps.max.localRequests < form.value.maxDayPlans[6].localRequestsMax
+  tiers.some(
+    ({ key, planKey }) =>
+      form.value.steadyCaps[key].localRequests < form.value[planKey][6]?.localRequestsMax
+  )
+
+const hasInvalidCooldowns = () =>
+  tiers.some(({ key }) => {
+    const values = form.value.rateLimitCooldowns[key]
+    return (
+      values.length !== 8 ||
+      values.some(
+        (value, index) =>
+          !Number.isInteger(value) ||
+          value < 1 ||
+          value > 86400 ||
+          (index > 0 && value > values[index - 1])
+      )
+    )
+  })
 
 const hasInvalidTrafficGuardrails = () =>
   trafficGuardrailFields.some(({ key, min, max }) => {
@@ -317,7 +388,11 @@ const hasInvalidOAuthPatterns = () =>
   })
 
 const saveConfig = async () => {
-  if (hasInvalidDayPlans(form.value.proDayPlans) || hasInvalidDayPlans(form.value.maxDayPlans)) {
+  if (hasInvalidCooldowns()) {
+    showToast('429 冷却须为 1–86400 秒的整数，且不能随养号天数增加而变长', 'error')
+    return
+  }
+  if (tiers.some(({ planKey }) => hasInvalidDayPlans(form.value[planKey]))) {
     showToast('七天曲线存在无效区间（min > max 或百分比 ≥ 90%）', 'error')
     return
   }
