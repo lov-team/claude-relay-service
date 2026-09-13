@@ -13,6 +13,9 @@ const {
 
 class ClaudeCodeHeadersService {
   constructor() {
+    // Accounts created from 2026-09-14 onward always relay the current Claude Code version.
+    this.forcedVersion = '2.1.270'
+    this.versionEnforcementStart = new Date('2026-09-14T00:00:00+08:00')
     this.defaultHeaders = {
       'x-stainless-retry-count': '0',
       'x-stainless-timeout': '60',
@@ -60,6 +63,24 @@ class ClaudeCodeHeadersService {
     }
     const match = userAgent.match(/claude-cli\/([\d.]+(?:[a-zA-Z0-9-]*)?)/i)
     return match ? match[1] : null
+  }
+
+  isVersionEnforcedForAccount(createdAt) {
+    if (!createdAt) {
+      return false
+    }
+    const createdDate = new Date(createdAt)
+    return !Number.isNaN(createdDate.getTime()) && createdDate >= this.versionEnforcementStart
+  }
+
+  forceVersion(headers) {
+    const forcedHeaders = { ...headers }
+    const userAgent = forcedHeaders['user-agent'] || this.defaultHeaders['user-agent']
+    forcedHeaders['user-agent'] = userAgent.replace(
+      /claude-cli\/[^\s(]+/i,
+      `claude-cli/${this.forcedVersion}`
+    )
+    return forcedHeaders
   }
 
   /**
@@ -115,9 +136,12 @@ class ClaudeCodeHeadersService {
   /**
    * 存储账号的 Claude Code headers
    */
-  async storeAccountHeaders(accountId, clientHeaders) {
+  async storeAccountHeaders(accountId, clientHeaders, accountCreatedAt = null) {
     try {
-      const extractedHeaders = this.extractClaudeCodeHeaders(clientHeaders)
+      let extractedHeaders = this.extractClaudeCodeHeaders(clientHeaders)
+      if (this.isVersionEnforcedForAccount(accountCreatedAt)) {
+        extractedHeaders = this.forceVersion(extractedHeaders)
+      }
 
       // 检查是否有 user-agent
       const userAgent = extractedHeaders['user-agent']
@@ -167,13 +191,13 @@ class ClaudeCodeHeadersService {
   /**
    * 获取账号的 Claude Code headers（带内存缓存）
    */
-  async getAccountHeaders(accountId) {
+  async getAccountHeaders(accountId, accountCreatedAt = null) {
     const cacheKey = `claude_code_headers:${accountId}`
 
     // 检查内存缓存
     const cached = getCachedConfig(cacheKey)
     if (cached) {
-      return cached
+      return this.isVersionEnforcedForAccount(accountCreatedAt) ? this.forceVersion(cached) : cached
     }
 
     try {
@@ -186,15 +210,21 @@ class ClaudeCodeHeadersService {
         )
         // 缓存到内存
         setCachedConfig(cacheKey, parsed.headers, this.headersCacheTtl)
-        return parsed.headers
+        return this.isVersionEnforcedForAccount(accountCreatedAt)
+          ? this.forceVersion(parsed.headers)
+          : parsed.headers
       }
 
       // 返回默认 headers
       logger.debug(`📋 Using default Claude Code headers for account ${accountId}`)
-      return this.defaultHeaders
+      return this.isVersionEnforcedForAccount(accountCreatedAt)
+        ? this.forceVersion(this.defaultHeaders)
+        : this.defaultHeaders
     } catch (error) {
       logger.error(`❌ Failed to get Claude Code headers for account ${accountId}:`, error)
-      return this.defaultHeaders
+      return this.isVersionEnforcedForAccount(accountCreatedAt)
+        ? this.forceVersion(this.defaultHeaders)
+        : this.defaultHeaders
     }
   }
 

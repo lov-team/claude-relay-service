@@ -1144,7 +1144,11 @@ class ClaudeRelayService {
           Object.keys(clientHeaders).length > 0 &&
           this.isRealClaudeCodeRequest(requestBody)
         ) {
-          await claudeCodeHeadersService.storeAccountHeaders(accountId, clientHeaders)
+          await claudeCodeHeadersService.storeAccountHeaders(
+            accountId,
+            clientHeaders,
+            account?.createdAt
+          )
         }
       }
 
@@ -2016,10 +2020,19 @@ class ClaudeRelayService {
     let requestPayload = body
 
     if (!isRealClaudeCode) {
-      const claudeCodeHeaders = await claudeCodeHeadersService.getAccountHeaders(accountId)
+      const claudeCodeHeaders = await claudeCodeHeadersService.getAccountHeaders(
+        accountId,
+        account?.createdAt
+      )
       Object.keys(claudeCodeHeaders).forEach((key) => {
         finalHeaders[key] = claudeCodeHeaders[key]
       })
+    }
+
+    // New accounts must advertise the fixed Claude Code version on every request,
+    // including the first real Claude Code request before headers are persisted.
+    if (claudeCodeHeadersService.isVersionEnforcedForAccount(account?.createdAt)) {
+      finalHeaders = claudeCodeHeadersService.forceVersion(finalHeaders)
     }
 
     // 应用请求身份转换
@@ -2039,6 +2052,9 @@ class ClaudeRelayService {
 
     requestPayload = extensionResult.body
     finalHeaders = extensionResult.headers
+    if (claudeCodeHeadersService.isVersionEnforcedForAccount(account?.createdAt)) {
+      finalHeaders = claudeCodeHeadersService.forceVersion(finalHeaders)
+    }
 
     let toolNameMap = null
     if (!isRealClaudeCode) {
@@ -3453,7 +3469,11 @@ class ClaudeRelayService {
 
             // 只有真实的 Claude Code 请求才更新 headers（流式请求）
             if (clientHeaders && Object.keys(clientHeaders).length > 0 && isRealClaudeCodeRequest) {
-              await claudeCodeHeadersService.storeAccountHeaders(accountId, clientHeaders)
+              await claudeCodeHeadersService.storeAccountHeaders(
+                accountId,
+                clientHeaders,
+                account?.createdAt
+              )
             }
           }
 
