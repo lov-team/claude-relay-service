@@ -1305,7 +1305,7 @@ class ClaudeRelayService {
           oauth401Handled = recovery.handled
 
           if (recovery.retry) {
-            accessToken = recovery.accessToken
+            ;({ accessToken } = recovery)
             ;({ response, retryCount } = await makeRequestWithRetries(requestOptions))
 
             if (response.statusCode === 401) {
