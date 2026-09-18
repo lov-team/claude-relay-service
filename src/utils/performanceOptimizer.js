@@ -7,6 +7,7 @@ const https = require('https')
 const http = require('http')
 const fs = require('fs')
 const LRUCache = require('./lruCache')
+const { getClaudeTlsOptions } = require('./claudeTlsAgent')
 
 // 连接池配置（从环境变量读取）
 const STREAM_MAX_SOCKETS = parseInt(process.env.HTTPS_MAX_SOCKETS_STREAM) || 65535
@@ -15,7 +16,9 @@ const MAX_FREE_SOCKETS = parseInt(process.env.HTTPS_MAX_FREE_SOCKETS) || 2048
 const FREE_SOCKET_TIMEOUT = parseInt(process.env.HTTPS_FREE_SOCKET_TIMEOUT) || 30000
 
 // 流式请求 agent：高 maxSockets，timeout=0（不限制）
+// 叠加 Claude Code (Node 24) TLS 指纹参数，见 claudeTlsAgent.js
 const httpsAgentStream = new https.Agent({
+  ...getClaudeTlsOptions(),
   keepAlive: true,
   maxSockets: STREAM_MAX_SOCKETS,
   maxFreeSockets: MAX_FREE_SOCKETS,
@@ -25,6 +28,7 @@ const httpsAgentStream = new https.Agent({
 
 // 非流式请求 agent：较小 maxSockets
 const httpsAgentNonStream = new https.Agent({
+  ...getClaudeTlsOptions(),
   keepAlive: true,
   maxSockets: NON_STREAM_MAX_SOCKETS,
   maxFreeSockets: MAX_FREE_SOCKETS,

@@ -23,6 +23,11 @@ const userAgentPoolService = require('../userAgentPoolService')
 const { isStreamWritable } = require('../../utils/streamHelper')
 const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
 const metadataUserIdHelper = require('../../utils/metadataUserIdHelper')
+const { normalizeDateline } = require('../../utils/anthropicFingerprint')
+const {
+  buildBillingAttributionText,
+  syncBillingHeaderVersion
+} = require('../../utils/claudeBillingFingerprint')
 const {
   classifyClaudeOAuthError,
   extractClaudeOAuthError
@@ -37,6 +42,11 @@ const {
 const EXTENDED_CACHE_TTL_BETA = 'extended-cache-ttl-2025-04-11'
 const PROMPT_CACHING_SCOPE_BETA = 'prompt-caching-scope-2026-01-05'
 const CONTEXT_MANAGEMENT_BETA = 'context-management-2025-06-27'
+const THINKING_BINDING_CONTROLS_BETA = 'thinking-binding-controls-2026-08-01'
+const SERVER_SIDE_FALLBACK_BETA = 'server-side-fallback-2026-07-01'
+const FALLBACK_CREDIT_BETA = 'fallback-credit-2026-07-01'
+const FALLBACK_CREDIT_LEGACY_BETA = 'fallback-credit-2026-06-01'
+const MID_CONVERSATION_OUTPUT_CONFIG_BETA = 'mid-conversation-output-config-2026-07-01'
 const VALID_CACHE_CONTROL_TTLS = new Set(['5m', '1h'])
 const CACHE_DEBUG_ENV = 'ANTHROPIC_CACHE_DEBUG'
 const SHARED_ACCOUNT_FAILOVER_MAX_ATTEMPTS = 2
@@ -57,6 +67,13 @@ class ClaudeRelayService {
     this.betaHeader = config.claude.betaHeader
     this.systemPrompt = config.claude.systemPrompt
     this.claudeCodeSystemPrompt = "You are Claude Code, Anthropic's official CLI for Claude."
+    // 与 sub2api claudeCodeSystemPromptExpansion 对齐：真实 CLI 主 system
+    // 中与具体工具无关的通用段落（身份总述 + 安全声明 + URL 告警 +
+    // Tone and style）。伪装路径用它把 system 形态从 1 块凑到 3 块，
+    // 体量贴近真实 CC，同时刻意排除 # Doing tasks 等工具专属指令，
+    // 避免污染被代理用户的实际行为。
+    this.claudeCodeSystemPromptExpansion =
+      'You are an interactive agent that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.\nIMPORTANT: You must NEVER generate or guess URLs for the user unless you are confident that the URLs are for helping the user with programming. You may use URLs provided by the user in their messages or local files.\n\n# Tone and style\n - Only use emojis if the user explicitly requests it. Avoid using emojis in all communication unless asked.\n - Your responses should be short and concise.\n - When referencing specific functions or pieces of code include the pattern file_path:line_number to allow the user to easily navigate to the source code location.\n - When referencing GitHub issues or pull requests, use the owner/repo#123 format (e.g. anthropics/claude-code#100) so they render as clickable links.\n - Do not use a colon before tool calls. Your tool calls may not be shown directly in the output, so text like "Let me read the file:" followed by a read tool call should just be "Let me read the file." with a period.'
     this.toolNameSuffix = null
     this.toolNameSuffixGeneratedAt = 0
     this.toolNameSuffixTtlMs = 60 * 60 * 1000
@@ -110,6 +127,114 @@ class ClaudeRelayService {
     }
 
     return betaList.join(',')
+  }
+
+  // beta token 是否存在于最终 anthropic-beta header
+  _betaHeaderContains(betaHeader, token) {
+    if (typeof betaHeader !== 'string' || !betaHeader) {
+      return false
+    }
+    return betaHeader
+      .split(',')
+      .map((t) => t.trim())
+      .includes(token)
+  }
+
+  // 当 field 存在且 beta header 不含任一 requiredToken 时删除该字段。
+  // 返回是否发生了实际删除。
+  _stripBodyFieldUnlessBeta(body, field, betaHeader, requiredTokens) {
+    if (!body || body[field] === undefined) {
+      return false
+    }
+    for (const token of requiredTokens) {
+      if (this._betaHeaderContains(betaHeader, token)) {
+        return false
+      }
+    }
+    delete body[field]
+    return true
+  }
+
+  // messages[].output_config：mid-conversation-output-config beta
+  // 专属字段。顶层 output_config/effort 不受该 beta 约束，仅净化
+  // 消息内字段（pi-ai / Harness 会为 opus5 生成这类控制消息）。
+  _stripMessageOutputConfigUnlessBeta(body, betaHeader) {
+    if (this._betaHeaderContains(betaHeader, MID_CONVERSATION_OUTPUT_CONFIG_BETA)) {
+      return false
+    }
+    if (!body || !Array.isArray(body.messages)) {
+      return false
+    }
+    let changed = false
+    body.messages.forEach((msg) => {
+      if (msg && typeof msg === 'object' && msg.output_config !== undefined) {
+        delete msg.output_config
+        changed = true
+      }
+    })
+    return changed
+  }
+
+  // thinking.block_binding：Fable 5.1 的会话前缀绑定控制，受
+  // thinking-binding-controls beta 保护；缺 token 时上游拒收。
+  _stripThinkingBlockBindingUnlessBeta(body, betaHeader) {
+    if (this._betaHeaderContains(betaHeader, THINKING_BINDING_CONTROLS_BETA)) {
+      return false
+    }
+    if (body && body.thinking && typeof body.thinking === 'object') {
+      if (body.thinking.block_binding !== undefined) {
+        delete body.thinking.block_binding
+        return true
+      }
+    }
+    return false
+  }
+
+  // beta↔body 能力对称净化：缺对应 beta token 的 body 字段会被
+  // 上游 Pydantic extra='forbid' 拒收（400 Extra inputs are not
+  // permitted）。按最终 anthropic-beta header 决定保留/剥离。
+  _sanitizeBodyForBetaTokens(body, betaHeader) {
+    if (!body || typeof body !== 'object') {
+      return body
+    }
+    const stripped = []
+
+    if (
+      this._stripBodyFieldUnlessBeta(body, 'context_management', betaHeader, [
+        CONTEXT_MANAGEMENT_BETA
+      ])
+    ) {
+      stripped.push('context_management')
+    }
+    if (this._stripThinkingBlockBindingUnlessBeta(body, betaHeader)) {
+      stripped.push('thinking.block_binding')
+    }
+    if (
+      this._stripBodyFieldUnlessBeta(body, 'fallbacks', betaHeader, [SERVER_SIDE_FALLBACK_BETA])
+    ) {
+      stripped.push('fallbacks')
+    }
+    if (
+      this._stripBodyFieldUnlessBeta(body, 'fallback_credit_token', betaHeader, [
+        SERVER_SIDE_FALLBACK_BETA,
+        FALLBACK_CREDIT_BETA,
+        FALLBACK_CREDIT_LEGACY_BETA
+      ])
+    ) {
+      stripped.push('fallback_credit_token')
+    }
+    if (this._stripMessageOutputConfigUnlessBeta(body, betaHeader)) {
+      stripped.push('messages[].output_config')
+    }
+
+    if (stripped.length > 0) {
+      logger.debug(
+        `Stripped beta-gated body fields missing matching anthropic-beta token: ${stripped.join(
+          ', '
+        )}`
+      )
+    }
+    return body
   }
 
   _buildStandardRateLimitMessage(resetTime) {
@@ -1811,10 +1936,27 @@ class ClaudeRelayService {
         ? isRealClaudeCodeOverride
         : this.isRealClaudeCodeRequest(processedBody)
 
+    // Scrub steganographic dateline fingerprints the client embedded
+    // ("Today's date is ..." with variant apostrophes / "/" separator).
+    // Scoped to system and <system-reminder> blocks only. Applied to
+    // both real CC and mimic paths -- real CC embeds it too when it
+    // detects a non-official base URL.
+    const datelineResult = normalizeDateline(processedBody)
+    if (datelineResult.hits > 0) {
+      logger.debug(`Normalized ${datelineResult.hits} client dateline fingerprint(s)`)
+      // 归一化是纯变换（返回新对象），把命中的字段写回 processedBody，
+      // 保证后续 system/messages 改写都基于同一引用。
+      processedBody.system = datelineResult.body.system
+      processedBody.messages = datelineResult.body.messages
+    }
+
     // 如果不是真实的 Claude Code 请求，需要处理 system prompt
-    // 策略：将原始 system prompt 迁移至 messages，system 仅保留 Claude Code 标识
-    // 原因：Anthropic 基于 system 参数内容检测第三方应用，仅前置追加 Claude Code 提示词
-    //       无法通过检测，因为后续内容仍为非 Claude Code 格式
+    // 策略：重建真实 Claude Code CLI 的 3-block system 形态
+    //   [0] billing attribution 块（cc_version=X.Y.Z.{fp}; cc_entrypoint=cli;）
+    //   [1] "You are Claude Code..." 身份前缀块
+    //   [2] 工具无关的通用提示词扩充块（带 cache_control 稳定断点）
+    // 原因：Anthropic 基于 system 参数内容检测第三方应用，缺 billing 块
+    //       是关键信号；原 system 迁移为 user/assistant 消息对保留功能。
     if (!isRealClaudeCode) {
       // 提取原始 system prompt 文本
       let originalSystemText = ''
@@ -1827,8 +1969,28 @@ class ClaudeRelayService {
           .join('\n\n')
       }
 
-      // 将 system 替换为 Claude Code 标准提示词
-      processedBody.system = this.claudeCodeSystemPrompt
+      // 重建真实 CLI 的 3-block system 形态
+      const cliVersion =
+        userAgentPoolService.getConfiguredClaudeCodeVersion() ||
+        userAgentPoolService.MIN_CLAUDE_CODE_VERSION
+      let billingText = null
+      try {
+        // fp 必须在 messages 注入（unshift）之前用原始 body 计算
+        billingText = buildBillingAttributionText(processedBody, cliVersion)
+      } catch (billingError) {
+        logger.warn('Failed to build billing attribution block:', billingError)
+      }
+      const systemBlocks = []
+      if (billingText) {
+        systemBlocks.push({ type: 'text', text: billingText })
+      }
+      systemBlocks.push({ type: 'text', text: this.claudeCodeSystemPrompt })
+      systemBlocks.push({
+        type: 'text',
+        text: this.claudeCodeSystemPromptExpansion,
+        cache_control: { type: 'ephemeral', ttl: '5m' }
+      })
+      processedBody.system = systemBlocks
 
       // 将原始 system prompt 作为 user/assistant 消息对注入到 messages 开头
       // 模型仍通过 messages 接收完整指令，保留客户端功能
@@ -1867,11 +2029,39 @@ class ClaudeRelayService {
       }
     }
 
-    // 真实 Claude Code 请求保留 billing 标识但升级版本；其他请求移除该标识。
+    // 真实 Claude Code 请求保留 billing 标识并同步版本+指纹；
+    // 伪装路径上面已生成新的 billing 块，无需再清理。
     if (isRealClaudeCode) {
-      this._normalizeClaudeCodeBillingHeader(processedBody)
-    } else {
-      this._removeBillingHeaderFromSystem(processedBody)
+      this._syncClaudeCodeBillingHeader(processedBody)
+    }
+
+    // CLI 形态补全（仅伪装路径）：真实 Claude Code 总是携带
+    // tools 数组（可为空）、temperature（默认 1）、max_tokens
+    // （默认 128000）；thinking 开启时自动附带 context_management。
+    // 缺字段会让 payload 与真实 CLI 字节级不同构。
+    if (!isRealClaudeCode) {
+      if (!Array.isArray(processedBody.tools)) {
+        processedBody.tools = []
+      }
+      if (processedBody.temperature === undefined) {
+        processedBody.temperature = 1
+      }
+      if (processedBody.max_tokens === undefined) {
+        processedBody.max_tokens = 128000
+      }
+      const thinkingType = processedBody.thinking && processedBody.thinking.type
+      if (
+        (thinkingType === 'enabled' || thinkingType === 'adaptive') &&
+        processedBody.context_management === undefined
+      ) {
+        processedBody.context_management = {
+          edits: [{ type: 'clear_thinking_20251015', keep: 'all' }]
+        }
+      }
+      // tools 为空时 tool_choice 无意义，真实 CLI 不会发
+      if (processedBody.tools.length === 0 && processedBody.tool_choice !== undefined) {
+        delete processedBody.tool_choice
+      }
     }
 
     this._enforceCacheControlLimit(processedBody)
@@ -1977,33 +2167,20 @@ class ClaudeRelayService {
     }
   }
 
-  _normalizeClaudeCodeBillingHeader(processedBody) {
+  // Sync cc_version in real-CC billing blocks, recomputing the fp
+  // suffix. The previous implementation replaced the version and
+  // dropped {fp} -- real CLI always sends cc_version=X.Y.Z.{fp},
+  // a missing fp is a third-party signal.
+  _syncClaudeCodeBillingHeader(processedBody) {
     if (!processedBody || !processedBody.system) {
       return
     }
     const targetVersion =
       userAgentPoolService.getConfiguredClaudeCodeVersion() ||
       userAgentPoolService.MIN_CLAUDE_CODE_VERSION
-    const normalizeText = (text) => text.replace(/(cc_version=)[^;\s]+/i, `$1${targetVersion}`)
-
-    if (typeof processedBody.system === 'string') {
-      if (/x-anthropic-billing-header\s*:/i.test(processedBody.system)) {
-        processedBody.system = normalizeText(processedBody.system)
-      }
-      return
-    }
-
-    if (Array.isArray(processedBody.system)) {
-      processedBody.system.forEach((item) => {
-        if (
-          item &&
-          item.type === 'text' &&
-          typeof item.text === 'string' &&
-          /x-anthropic-billing-header\s*:/i.test(item.text)
-        ) {
-          item.text = normalizeText(item.text)
-        }
-      })
+    const next = syncBillingHeaderVersion(processedBody, targetVersion)
+    if (next !== processedBody && next && Array.isArray(next.system)) {
+      processedBody.system = next.system
     }
   }
 
@@ -2536,11 +2713,11 @@ class ClaudeRelayService {
 
     requestPayload = extensionResult.body
     finalHeaders = extensionResult.headers
-    // 最终序列化前再次处理 billing 标识，覆盖直接传入原始请求体的入口。
+    // 最终序列化前再次同步 billing 标识（cc_version + fp），
+    // 覆盖直接传入原始请求体的入口。伪装路径的 billing 块由
+    // _processRequestBody 生成，无需清理。
     if (isRealClaudeCode) {
-      this._normalizeClaudeCodeBillingHeader(requestPayload)
-    } else {
-      this._removeBillingHeaderFromSystem(requestPayload)
+      this._syncClaudeCodeBillingHeader(requestPayload)
     }
 
     let toolNameMap = null
@@ -2549,6 +2726,19 @@ class ClaudeRelayService {
         useRandomizedToolNames: requestOptions.useRandomizedToolNames === true
       })
     }
+
+    // === beta↔body 能力对称（必须在序列化之前）===
+    // body 里受 beta token 保护的字段（context_management /
+    // thinking.block_binding / fallbacks / fallback_credit_token /
+    // messages[].output_config），若最终 anthropic-beta header 不含
+    // 对应 token，上游 Pydantic extra='forbid' 会直接 400：
+    //   "xxx: Extra inputs are not permitted"。
+    // 与 sub2api sanitizeAnthropicBodyForBetaTokens 对称：缺 token 则
+    // 剥字段，让 header 与 body 保持能力维度一致。
+    const modelId = requestPayload?.model || body?.model
+    const clientBetaHeader = this._getHeaderValueCaseInsensitive(clientHeaders, 'anthropic-beta')
+    const finalBetaHeader = this._getBetaHeader(modelId, clientBetaHeader, requestPayload)
+    requestPayload = this._sanitizeBodyForBetaTokens(requestPayload, finalBetaHeader)
 
     // 序列化请求体，计算 content-length
     const bodyString = JSON.stringify(requestPayload)
@@ -2593,10 +2783,8 @@ class ClaudeRelayService {
 
     logger.debug(`🔗 Request User-Agent: ${headers['User-Agent']}`)
 
-    // 根据模型和客户端传递的 anthropic-beta 动态设置 header
-    const modelId = requestPayload?.model || body?.model
-    const clientBetaHeader = this._getHeaderValueCaseInsensitive(clientHeaders, 'anthropic-beta')
-    headers['anthropic-beta'] = this._getBetaHeader(modelId, clientBetaHeader, requestPayload)
+    // anthropic-beta 已在上面按最终值算好，直接写 header
+    headers['anthropic-beta'] = finalBetaHeader
     this._applyClaudeCodeSessionHeaders(headers, requestPayload)
     this._logCacheDebugSummary(requestPayload, headers, {
       accountId,

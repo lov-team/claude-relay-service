@@ -32,6 +32,7 @@ const {
   handleAnthropicMessagesToGemini,
   handleAnthropicCountTokensToGemini
 } = require('../services/anthropicGeminiBridgeService')
+const { filterResponseHeaders } = require('../utils/responseHeaderFilter')
 const router = express.Router()
 
 function respondToNurtureSchedulerError(res, error) {
@@ -1264,12 +1265,11 @@ async function handleMessagesRequest(req, res) {
 
       res.status(response.statusCode)
 
-      // 设置响应头，避免 Content-Length 和 Transfer-Encoding 冲突
-      const skipHeaders = ['content-encoding', 'transfer-encoding', 'content-length']
-      Object.keys(response.headers).forEach((key) => {
-        if (!skipHeaders.includes(key.toLowerCase())) {
-          res.setHeader(key, response.headers[key])
-        }
+      // 设置响应头：白名单过滤上游头（防 cf-*/内部追踪头泄给客户端），
+      // content-encoding/length/transfer-encoding 由 HTTP 层处理
+      const filteredResponseHeaders = filterResponseHeaders(response.headers)
+      Object.keys(filteredResponseHeaders).forEach((key) => {
+        res.setHeader(key, filteredResponseHeaders[key])
       })
 
       let usageRecorded = false
@@ -1868,11 +1868,10 @@ router.post('/v1/messages/count_tokens', authenticateApiKey, async (req, res) =>
 
     res.status(response.statusCode)
 
-    const skipHeaders = ['content-encoding', 'transfer-encoding', 'content-length']
-    Object.keys(response.headers).forEach((key) => {
-      if (!skipHeaders.includes(key.toLowerCase())) {
-        res.setHeader(key, response.headers[key])
-      }
+    // 白名单过滤上游响应头（防 cf-*/内部追踪头泄给客户端）
+    const filteredCountTokenHeaders = filterResponseHeaders(response.headers)
+    Object.keys(filteredCountTokenHeaders).forEach((key) => {
+      res.setHeader(key, filteredCountTokenHeaders[key])
     })
 
     try {
