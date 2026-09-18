@@ -2047,7 +2047,11 @@ class ClaudeRelayService {
         processedBody.temperature = 1
       }
       if (processedBody.max_tokens === undefined) {
-        processedBody.max_tokens = 128000
+        // 真实 CLI 默认 128000，但部分模型上限只有 64000；
+        // 盲注会让缺省请求超模型上限 → 上游 400。按 pricing 表
+        // 的 max_output_tokens 兜底，查不到再用 128000。
+        const modelCap = this._getModelMaxOutputTokens(processedBody.model)
+        processedBody.max_tokens = modelCap || 128000
       }
       const thinkingType = processedBody.thinking && processedBody.thinking.type
       if (
@@ -2181,6 +2185,21 @@ class ClaudeRelayService {
     const next = syncBillingHeaderVersion(processedBody, targetVersion)
     if (next !== processedBody && next && Array.isArray(next.system)) {
       processedBody.system = next.system
+    }
+  }
+
+  // 🔢 查询模型的 max_output_tokens 上限（pricing 表），查不到返回 null
+  _getModelMaxOutputTokens(model) {
+    try {
+      const pricingFilePath = path.join(__dirname, '../../data/model_pricing.json')
+      const pricingData = getPricingData(pricingFilePath)
+      if (!pricingData) {
+        return null
+      }
+      const modelConfig = pricingData[model]
+      return modelConfig?.max_tokens || modelConfig?.max_output_tokens || null
+    } catch (error) {
+      return null
     }
   }
 
@@ -2785,6 +2804,17 @@ class ClaudeRelayService {
 
     // anthropic-beta 已在上面按最终值算好，直接写 header
     headers['anthropic-beta'] = finalBetaHeader
+    // 伪装路径补真实 CLI 每请求必带的 header：
+    // x-client-request-id（每次随机 UUID，缺失或重复都可能触发第三方
+    // 判定）与流式请求的 x-stainless-helper-method: stream。
+    if (!isRealClaudeCode) {
+      if (!this._getHeaderValueCaseInsensitive(headers, 'x-client-request-id')) {
+        headers['x-client-request-id'] = crypto.randomUUID()
+      }
+      if (isStream && !this._getHeaderValueCaseInsensitive(headers, 'x-stainless-helper-method')) {
+        headers['x-stainless-helper-method'] = 'stream'
+      }
+    }
     this._applyClaudeCodeSessionHeaders(headers, requestPayload)
     this._logCacheDebugSummary(requestPayload, headers, {
       accountId,
