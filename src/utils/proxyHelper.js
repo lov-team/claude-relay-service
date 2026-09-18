@@ -2,6 +2,7 @@ const { SocksProxyAgent } = require('socks-proxy-agent')
 const { HttpsProxyAgent } = require('https-proxy-agent')
 const logger = require('./logger')
 const config = require('../../config/config')
+const { getClaudeTlsOptions } = require('./claudeTlsAgent')
 
 /**
  * 统一的代理创建工具
@@ -38,7 +39,9 @@ class ProxyHelper {
 
       // 配置连接池与 Keep-Alive
       const proxySettings = config.proxy || {}
-      const agentCommonOptions = {}
+      // TLS 指纹对齐 Claude Code (Node 24)：透传进 agent-base 的
+      // tls.connect 选项（ciphers/sigalgs/ecdhCurve/ALPN/minVersion）。
+      const agentCommonOptions = getClaudeTlsOptions()
 
       if (typeof proxySettings.keepAlive === 'boolean') {
         agentCommonOptions.keepAlive = proxySettings.keepAlive
