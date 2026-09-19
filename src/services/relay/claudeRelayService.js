@@ -24,6 +24,7 @@ const { isStreamWritable } = require('../../utils/streamHelper')
 const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
 const metadataUserIdHelper = require('../../utils/metadataUserIdHelper')
 const { normalizeDateline } = require('../../utils/anthropicFingerprint')
+const { normalizeClaudeSseLine } = require('../../utils/claudeStreamSanitizer')
 const {
   buildBillingAttributionText,
   syncBillingHeaderVersion
@@ -4139,8 +4140,10 @@ class ClaudeRelayService {
 
             // 转发已处理的完整行到客户端
             if (lines.length > 0) {
+              const normalizedLines = lines.map(normalizeClaudeSseLine)
               if (isStreamWritable(responseStream)) {
-                const linesToForward = lines.join('\n') + (lines.length > 0 ? '\n' : '')
+                const linesToForward =
+                  normalizedLines.join('\n') + (normalizedLines.length > 0 ? '\n' : '')
                 // 如果有流转换器，应用转换
                 if (toolNameStreamTransformer) {
                   const transformed = toolNameStreamTransformer(linesToForward)
@@ -4261,13 +4264,14 @@ class ClaudeRelayService {
           try {
             // 处理缓冲区中剩余的数据
             if (buffer.trim() && isStreamWritable(responseStream)) {
+              const normalizedBuffer = normalizeClaudeSseLine(buffer)
               if (toolNameStreamTransformer) {
-                const transformed = toolNameStreamTransformer(buffer)
+                const transformed = toolNameStreamTransformer(normalizedBuffer)
                 if (transformed) {
                   responseStream.write(transformed)
                 }
               } else {
-                responseStream.write(buffer)
+                responseStream.write(normalizedBuffer)
               }
             }
 

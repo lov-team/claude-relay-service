@@ -73,6 +73,36 @@ const {
   filterResponseHeaders,
   isResponseHeaderAllowed
 } = require('../src/utils/responseHeaderFilter')
+const { normalizeClaudeSseLine } = require('../src/utils/claudeStreamSanitizer')
+
+describe('claudeStreamSanitizer', () => {
+  test('fills missing partial_json on tool input deltas', () => {
+    const line =
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta"}}'
+    expect(normalizeClaudeSseLine(line)).toBe(
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}'
+    )
+  })
+
+  test('fills null partial_json without changing valid events', () => {
+    expect(
+      normalizeClaudeSseLine(
+        'data: {"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":null}}'
+      )
+    ).toContain('"partial_json":""')
+    const valid =
+      'data: {"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{\\"x\\":"}}'
+    expect(normalizeClaudeSseLine(valid)).toBe(valid)
+  })
+
+  test('leaves non-data, malformed, and done lines untouched', () => {
+    expect(normalizeClaudeSseLine('event: content_block_delta')).toBe(
+      'event: content_block_delta'
+    )
+    expect(normalizeClaudeSseLine('data: {bad')).toBe('data: {bad')
+    expect(normalizeClaudeSseLine('data: [DONE]')).toBe('data: [DONE]')
+  })
+})
 
 describe('anthropicFingerprint dateline normalization', () => {
   test('rewrites steganographic apostrophe + slash separator to canonical ASCII', () => {
