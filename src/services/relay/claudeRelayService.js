@@ -391,7 +391,8 @@ class ClaudeRelayService {
     }
 
     const evaluation = await claudeAccountNurtureService.evaluate(accountId, {
-      incrementRpm: true
+      incrementRpm: true,
+      incrementInflight: true
     })
     if (evaluation.blocked) {
       await claudeAccountNurtureService.recordBlocked(accountId, evaluation)

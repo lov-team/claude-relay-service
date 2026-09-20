@@ -330,6 +330,107 @@ describe('claudeAccountNurtureService.evaluate', () => {
     )
   })
 
+  test('expired oauth five-hour snapshot still blocks from local request estimate', async () => {
+    const resetAt = new Date(FIXED_NOW - 2 * 60 * 60 * 1000).toISOString()
+    redis.getClaudeAccount.mockResolvedValue(
+      buildAccount({
+        claudeFiveHourUtilization: '0',
+        claudeFiveHourResetsAt: resetAt,
+        nurtureLocalRequestCount: '120',
+        nurtureLocalWindowResetAt: new Date(FIXED_NOW - 4 * 60 * 60 * 1000).toISOString(),
+        nurtureLocalWindowReleaseAt: new Date(FIXED_NOW + 60 * 60 * 1000).toISOString()
+      })
+    )
+
+    const result = await claudeAccountNurtureService.evaluate('acc-pro-1', {
+      skipUsageRefresh: true
+    })
+
+    expect(result.blocked).toBe(true)
+    expect(result.reason).toBe('five_hour_steady')
+    expect(result.actual.fiveHourUtil).toBeNull()
+    expect(result.actual.estimatedFiveHourUtil).toBeGreaterThanOrEqual(
+      cloneDefaultConfig().steadyCaps.pro.fiveHour
+    )
+  })
+
+  test('blocks five_hour_session when Anthropic session header is allowed_warning', async () => {
+    const sessionEnd = new Date(FIXED_NOW + 2 * 60 * 60 * 1000).toISOString()
+    redis.getClaudeAccount.mockResolvedValue(
+      buildAccount({
+        claudeFiveHourUtilization: '10',
+        sessionWindowStatus: 'allowed_warning',
+        sessionWindowStart: new Date(FIXED_NOW - 3 * 60 * 60 * 1000).toISOString(),
+        sessionWindowEnd: sessionEnd
+      })
+    )
+
+    const result = await claudeAccountNurtureService.evaluate('acc-pro-1', {
+      skipUsageRefresh: true
+    })
+
+    expect(result.blocked).toBe(true)
+    expect(result.reason).toBe('five_hour_session')
+    expect(Date.parse(result.blockExpiresAt)).toBeGreaterThanOrEqual(Date.parse(sessionEnd))
+  })
+
+  test('blocks five_hour_steady when extra local requests push the estimated 5h util over the cap', async () => {
+    redis.getClaudeAccount.mockResolvedValue(
+      buildAccount({
+        claudeFiveHourUtilization: '50',
+        nurtureFiveHourSnapshotLocalCount: '10',
+        nurtureLocalRequestCount: '70'
+      })
+    )
+
+    const result = await claudeAccountNurtureService.evaluate('acc-pro-1', {
+      skipUsageRefresh: true
+    })
+
+    expect(result.blocked).toBe(true)
+    expect(result.reason).toBe('five_hour_steady')
+    expect(result.actual.fiveHourUtil).toBe(50)
+    expect(result.actual.estimatedFiveHourUtil).toBe(50 + 60 * 0.8)
+  })
+
+  test('inflight requests count toward the estimated five-hour cap', async () => {
+    const client = {
+      zremrangebyscore: jest.fn().mockResolvedValue(0),
+      zcard: jest.fn().mockResolvedValue(0),
+      zadd: jest.fn().mockResolvedValue(1),
+      expire: jest.fn().mockResolvedValue(1),
+      get: jest.fn().mockImplementation((key) => {
+        if (String(key).startsWith('nurture:5h:inflight:')) {
+          return Promise.resolve('20')
+        }
+        return Promise.resolve(null)
+      }),
+      set: jest.fn().mockResolvedValue('OK'),
+      incr: jest.fn().mockResolvedValue(21),
+      decr: jest.fn().mockResolvedValue(19),
+      del: jest.fn().mockResolvedValue(1)
+    }
+    redis.getClientSafe.mockReturnValue(client)
+    redis.getClient.mockReturnValue(client)
+    redis.getClaudeAccount.mockResolvedValue(
+      buildAccount({
+        claudeFiveHourUtilization: '75',
+        nurtureFiveHourSnapshotLocalCount: '5',
+        nurtureLocalRequestCount: '5'
+      })
+    )
+
+    const result = await claudeAccountNurtureService.evaluate('acc-pro-1', {
+      skipUsageRefresh: true,
+      incrementInflight: true
+    })
+
+    expect(result.blocked).toBe(true)
+    expect(result.reason).toBe('five_hour_steady')
+    expect(result.actual.estimatedFiveHourUtil).toBe(75 + 20 * 0.8)
+    expect(client.incr).not.toHaveBeenCalled()
+  })
+
   test('steady pro blocks seven_day_steady before hitting 90%', async () => {
     const config = cloneDefaultConfig()
     redis.getClaudeAccount.mockResolvedValue(

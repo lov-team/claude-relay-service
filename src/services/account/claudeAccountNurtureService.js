@@ -17,10 +17,23 @@ const {
 
 const RPM_KEY_PREFIX = 'nurture:rpm:'
 const BASELINE_KEY_PREFIX = 'nurture:7d:baseline:'
+const INFLIGHT_KEY_PREFIX = 'nurture:5h:inflight:'
 const RPM_WINDOW_MS = 60000
 const FIVE_HOUR_WINDOW_MS = 5 * 60 * 60 * 1000
 const FIVE_HOUR_GUARD_JITTER_MS = 60 * 60 * 1000
-const FIVE_HOUR_BLOCK_REASONS = new Set(['five_hour_curve', 'five_hour_steady'])
+const FIVE_HOUR_NEAR_CAP_PERCENT = 40
+const FIVE_HOUR_NEAR_CAP_REFRESH_MS = 60 * 1000
+const FIVE_HOUR_INFLIGHT_TTL_SECONDS = 6 * 60 * 60
+const FIVE_HOUR_BLOCK_REASONS = new Set([
+  'five_hour_curve',
+  'five_hour_steady',
+  'five_hour_session'
+])
+const FIVE_HOUR_PERCENT_PER_REQUEST = {
+  pro: 0.8,
+  max: 0.45,
+  max20x: 0.25
+}
 
 function toNumberOrNull(value) {
   if (value === undefined || value === null || value === '') {
@@ -36,6 +49,45 @@ function isTruthyFlag(value) {
 
 function isFiveHourBlockReason(reason) {
   return FIVE_HOUR_BLOCK_REASONS.has(reason)
+}
+
+function isSessionFiveHourLimited(account) {
+  const status = account?.sessionWindowStatus
+  return (
+    status === 'allowed_warning' ||
+    status === 'rejected' ||
+    isTruthyFlag(account?.fiveHourAutoStopped)
+  )
+}
+
+function getFiveHourPercentPerRequest(tier) {
+  if (tier === 'max20x') {
+    return FIVE_HOUR_PERCENT_PER_REQUEST.max20x
+  }
+  if (tier === 'max' || tier === 'max5x') {
+    return FIVE_HOUR_PERCENT_PER_REQUEST.max
+  }
+  return FIVE_HOUR_PERCENT_PER_REQUEST.pro
+}
+
+function calcEstimatedFiveHourUtil({
+  fiveHourUtil,
+  fiveHourSnapshotExpired,
+  localCount,
+  inflightCount,
+  snapshotLocalCount,
+  tier
+}) {
+  const oauthUtil = fiveHourSnapshotExpired ? 0 : (fiveHourUtil ?? 0)
+  const parsedSnapshot = parseInt(snapshotLocalCount, 10)
+  const hasSnapshotCount = Number.isFinite(parsedSnapshot)
+  const baselineCount = fiveHourSnapshotExpired
+    ? 0
+    : hasSnapshotCount
+      ? Math.max(0, parsedSnapshot)
+      : Math.max(0, localCount)
+  const extraRequests = Math.max(0, localCount - baselineCount) + Math.max(0, inflightCount || 0)
+  return oauthUtil + extraRequests * getFiveHourPercentPerRequest(tier)
 }
 
 function calcFiveHourGuardReleaseAt(accountId, resetsAt) {
@@ -232,7 +284,7 @@ class ClaudeAccountNurtureService {
 
   async maybeRefreshUsageSnapshot(accountId, account, config, options = {}) {
     const updatedAt = account.claudeUsageUpdatedAt
-    const maxAge = config.usageSnapshotMaxAgeMs
+    const maxAge = options.maxAgeMs || config.usageSnapshotMaxAgeMs
     const stale =
       options.force === true || !updatedAt || Date.now() - new Date(updatedAt).getTime() > maxAge
 
@@ -244,7 +296,15 @@ class ClaudeAccountNurtureService {
       const usageData = await claudeAccountService.fetchOAuthUsage(accountId)
       if (usageData) {
         await claudeAccountService.updateClaudeUsageSnapshot(accountId, usageData)
-        return redis.getClaudeAccount(accountId)
+        const refreshed = await redis.getClaudeAccount(accountId)
+        if (!refreshed) {
+          return account
+        }
+        if (options.snapshotLocalCount !== undefined && options.snapshotLocalCount !== null) {
+          refreshed.nurtureFiveHourSnapshotLocalCount = String(options.snapshotLocalCount)
+          await redis.setClaudeAccount(accountId, refreshed)
+        }
+        return refreshed
       }
     } catch (error) {
       logger.debug(`Nurture usage refresh skipped for ${accountId}: ${error.message}`)
@@ -271,6 +331,33 @@ class ClaudeAccountNurtureService {
       active: Date.now() < releaseAtMs,
       expired: Date.now() >= releaseAtMs,
       reason,
+      releaseAt
+    }
+  }
+
+  resolveSessionFiveHourGuard(accountId, account) {
+    if (!isSessionFiveHourLimited(account)) {
+      return { active: false, expired: false, reason: null, releaseAt: null }
+    }
+
+    const releaseAt =
+      calcFiveHourGuardReleaseAt(accountId, account.sessionWindowEnd) ||
+      account.sessionWindowEnd ||
+      null
+    const releaseAtMs = Date.parse(releaseAt)
+    if (!Number.isFinite(releaseAtMs)) {
+      return {
+        active: true,
+        expired: false,
+        reason: 'five_hour_session',
+        releaseAt: null
+      }
+    }
+
+    return {
+      active: Date.now() < releaseAtMs,
+      expired: Date.now() >= releaseAtMs,
+      reason: 'five_hour_session',
       releaseAt
     }
   }
@@ -309,6 +396,20 @@ class ClaudeAccountNurtureService {
       return currentWindow
     }
 
+    const sessionEndMs = Date.parse(account?.sessionWindowEnd)
+    if (Number.isFinite(sessionEndMs) && sessionEndMs > Date.now()) {
+      const sessionReleaseAt =
+        calcFiveHourGuardReleaseAt(accountId, account.sessionWindowEnd) ||
+        new Date(sessionEndMs).toISOString()
+      if (Date.parse(sessionReleaseAt) > Date.now()) {
+        const sessionStartMs = Date.parse(account.sessionWindowStart)
+        const resetAt = Number.isFinite(sessionStartMs)
+          ? new Date(sessionStartMs).toISOString()
+          : new Date(sessionEndMs - FIVE_HOUR_WINDOW_MS).toISOString()
+        return { resetAt, releaseAt: sessionReleaseAt, expired: false }
+      }
+    }
+
     let resetAtMs = Date.parse(account?.claudeFiveHourResetsAt)
     if (!Number.isFinite(resetAtMs)) {
       resetAtMs = Date.parse(currentWindow.resetAt)
@@ -328,6 +429,83 @@ class ClaudeAccountNurtureService {
     return { resetAt, releaseAt, expired: false }
   }
 
+  async syncLocalWindow(accountId, account) {
+    const currentWindow = this.resolveLocalRequestWindow(accountId, account)
+    const storedCount = parseInt(account.nurtureLocalRequestCount || '0', 10)
+    const safeCount = Number.isFinite(storedCount) ? Math.max(0, storedCount) : 0
+    if (currentWindow.releaseAt && !currentWindow.expired) {
+      return { account, localWindow: currentWindow, localCount: safeCount }
+    }
+
+    const nextWindow = this.resolveNextLocalRequestWindow(accountId, account)
+    const legacyExpired =
+      !currentWindow.releaseAt && account.nurtureLocalCountDate !== getUtcDateKey()
+    if (currentWindow.expired || legacyExpired) {
+      account.nurtureLocalRequestCount = '0'
+      account.nurtureLocalCountDate = getUtcDateKey()
+    }
+
+    if (nextWindow.releaseAt && nextWindow.releaseAt !== currentWindow.releaseAt) {
+      account.nurtureLocalWindowResetAt = nextWindow.resetAt || ''
+      account.nurtureLocalWindowReleaseAt = nextWindow.releaseAt
+      try {
+        await redis.setClaudeAccount(accountId, account)
+        await this.resetFiveHourInflight(accountId)
+      } catch (error) {
+        logger.warn(`Failed to sync nurture local window for ${accountId}: ${error.message}`)
+      }
+    }
+
+    return {
+      account,
+      localWindow: nextWindow,
+      localCount: parseInt(account.nurtureLocalRequestCount || '0', 10) || 0
+    }
+  }
+
+  async getFiveHourInflight(accountId) {
+    const client = redis.getClient()
+    if (!client?.get) {
+      return 0
+    }
+    const raw = await client.get(`${INFLIGHT_KEY_PREFIX}${accountId}`)
+    const count = parseInt(raw || '0', 10)
+    return Number.isFinite(count) ? Math.max(0, count) : 0
+  }
+
+  async incrementFiveHourInflight(accountId) {
+    const client = redis.getClientSafe()
+    if (!client?.incr) {
+      return 0
+    }
+    const key = `${INFLIGHT_KEY_PREFIX}${accountId}`
+    const count = await client.incr(key)
+    if (typeof client.expire === 'function') {
+      await client.expire(key, FIVE_HOUR_INFLIGHT_TTL_SECONDS)
+    }
+    return count
+  }
+
+  async decrementFiveHourInflight(accountId) {
+    const client = redis.getClient()
+    if (!client?.decr) {
+      return
+    }
+    const key = `${INFLIGHT_KEY_PREFIX}${accountId}`
+    const next = await client.decr(key)
+    if (next <= 0 && typeof client.del === 'function') {
+      await client.del(key)
+    }
+  }
+
+  async resetFiveHourInflight(accountId) {
+    const client = redis.getClient()
+    if (!client?.del) {
+      return
+    }
+    await client.del(`${INFLIGHT_KEY_PREFIX}${accountId}`)
+  }
+
   async evaluate(accountId, options = {}) {
     const systemConfig = await accountNurtureConfigService.getConfig()
     if (!systemConfig.enabled) {
@@ -344,12 +522,29 @@ class ClaudeAccountNurtureService {
       return { blocked: false, active: false, reason: null }
     }
 
+    const {
+      account: windowedAccount,
+      localWindow,
+      localCount
+    } = await this.syncLocalWindow(accountId, account)
+    account = windowedAccount
+
     let fiveHourGuard = this.resolveFiveHourGuard(accountId, account)
     const expiredFiveHourSnapshot = this.isFiveHourSnapshotExpired(accountId, account)
+    const oauthFiveHour = toNumberOrNull(account.claudeFiveHourUtilization)
+    const nearFiveHourCap =
+      !expiredFiveHourSnapshot &&
+      oauthFiveHour !== null &&
+      oauthFiveHour >= FIVE_HOUR_NEAR_CAP_PERCENT
 
     if (!options.skipUsageRefresh && !fiveHourGuard.active) {
+      const refreshMaxAgeMs = nearFiveHourCap
+        ? FIVE_HOUR_NEAR_CAP_REFRESH_MS
+        : systemConfig.usageSnapshotMaxAgeMs
       account = await this.maybeRefreshUsageSnapshot(accountId, account, systemConfig, {
-        force: fiveHourGuard.expired || expiredFiveHourSnapshot
+        force: fiveHourGuard.expired || expiredFiveHourSnapshot,
+        maxAgeMs: refreshMaxAgeMs,
+        snapshotLocalCount: localCount
       })
       fiveHourGuard = this.resolveFiveHourGuard(accountId, account)
     }
@@ -363,13 +558,16 @@ class ClaudeAccountNurtureService {
       : toNumberOrNull(account.claudeFiveHourUtilization)
     const sevenDayUtil = toNumberOrNull(account.claudeSevenDayUtilization)
     const sevenDayOpusUtil = toNumberOrNull(account.claudeSevenDayOpusUtilization)
-    const localWindow = this.resolveLocalRequestWindow(accountId, account)
-    const legacyLocalWindowExpired =
-      !localWindow.releaseAt && account.nurtureLocalCountDate !== getUtcDateKey()
-    const localCount =
-      localWindow.expired || legacyLocalWindowExpired
-        ? 0
-        : parseInt(account.nurtureLocalRequestCount || '0', 10)
+    const inflightCount = options.incrementInflight ? await this.getFiveHourInflight(accountId) : 0
+    const estimatedFiveHourUtil = calcEstimatedFiveHourUtil({
+      fiveHourUtil,
+      fiveHourSnapshotExpired,
+      localCount,
+      inflightCount,
+      snapshotLocalCount: account.nurtureFiveHourSnapshotLocalCount,
+      tier
+    })
+    const sessionGuard = this.resolveSessionFiveHourGuard(accountId, account)
 
     const rpmResult = await this.checkRpm(accountId, limits.rpmLimit, {
       increment: options.incrementRpm === true
@@ -399,6 +597,7 @@ class ClaudeAccountNurtureService {
 
     const actual = {
       fiveHourUtil,
+      estimatedFiveHourUtil,
       sevenDayUtil,
       sevenDayOpusUtil,
       localCount,
@@ -419,11 +618,21 @@ class ClaudeAccountNurtureService {
       })
     }
 
-    if (fiveHourUtil !== null && fiveHourUtil >= limits.fiveHourLimit) {
+    if (sessionGuard.active) {
+      return this._buildResult(true, sessionGuard.reason, tier, limits, actual, {
+        blockExpiresAt: sessionGuard.releaseAt,
+        blockWindowResetAt: account.sessionWindowEnd || localWindow.resetAt || null
+      })
+    }
+
+    if (estimatedFiveHourUtil >= limits.fiveHourLimit) {
       const reason = limits.phase === 'steady' ? 'five_hour_steady' : 'five_hour_curve'
+      const resetAt = fiveHourSnapshotExpired
+        ? localWindow.releaseAt || account.sessionWindowEnd || account.claudeFiveHourResetsAt
+        : account.claudeFiveHourResetsAt
       return this._buildResult(true, reason, tier, limits, actual, {
-        blockExpiresAt: calcFiveHourGuardReleaseAt(accountId, account.claudeFiveHourResetsAt),
-        blockWindowResetAt: account.claudeFiveHourResetsAt || null
+        blockExpiresAt: calcFiveHourGuardReleaseAt(accountId, resetAt) || resetAt || null,
+        blockWindowResetAt: resetAt || null
       })
     }
 
@@ -454,6 +663,10 @@ class ClaudeAccountNurtureService {
         blockExpiresAt: localWindow.releaseAt,
         blockWindowResetAt: localWindow.resetAt
       })
+    }
+
+    if (options.incrementInflight) {
+      await this.incrementFiveHourInflight(accountId)
     }
 
     const result = this._buildResult(false, null, tier, limits, {
@@ -505,6 +718,8 @@ class ClaudeAccountNurtureService {
     if (!account || !isTruthyFlag(account.nurtureEnabled)) {
       return
     }
+
+    await this.decrementFiveHourInflight(accountId)
 
     const dateKey = getUtcDateKey()
     const localWindow = this.resolveLocalRequestWindow(accountId, account)
@@ -579,7 +794,8 @@ class ClaudeAccountNurtureService {
       nurtureLastBlockReason: '',
       nurtureLastEvaluatedAt: '',
       nurtureFiveHourGuardReleaseAt: '',
-      nurtureFiveHourGuardWindowResetAt: ''
+      nurtureFiveHourGuardWindowResetAt: '',
+      nurtureFiveHourSnapshotLocalCount: '0'
     }
   }
 
@@ -826,6 +1042,8 @@ module.exports.getNurtureTier = getNurtureTier
 module.exports.isProAccount = isProAccount
 module.exports.isMaxAccount = isMaxAccount
 module.exports.calcFiveHourGuardReleaseAt = calcFiveHourGuardReleaseAt
+module.exports.calcEstimatedFiveHourUtil = calcEstimatedFiveHourUtil
+module.exports.getFiveHourPercentPerRequest = getFiveHourPercentPerRequest
 module.exports.NURTURE_SCHEDULER_ERROR_CODES = NURTURE_SCHEDULER_ERROR_CODES
 module.exports.calcNurtureRetryAfterSeconds = calcNurtureRetryAfterSeconds
 module.exports.createNurtureSchedulerError = createNurtureSchedulerError

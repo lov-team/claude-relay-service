@@ -5069,8 +5069,11 @@ const formatNurtureBlockDetail = (account) => {
   }
 
   let detail = ''
-  if (['five_hour_curve', 'five_hour_steady'].includes(reason)) {
-    detail = percentDetail(actual?.fiveHourUtil, limits?.fiveHourLimit)
+  if (['five_hour_curve', 'five_hour_steady', 'five_hour_session'].includes(reason)) {
+    detail = percentDetail(
+      actual?.estimatedFiveHourUtil ?? actual?.fiveHourUtil,
+      limits?.fiveHourLimit
+    )
   } else if (['seven_day_curve', 'seven_day_pace', 'seven_day_steady'].includes(reason)) {
     detail = percentDetail(actual?.sevenDayUtil, limits?.sevenDayLimit)
   } else if (reason === 'seven_day_opus') {
