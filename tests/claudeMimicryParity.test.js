@@ -96,9 +96,7 @@ describe('claudeStreamSanitizer', () => {
   })
 
   test('leaves non-data, malformed, and done lines untouched', () => {
-    expect(normalizeClaudeSseLine('event: content_block_delta')).toBe(
-      'event: content_block_delta'
-    )
+    expect(normalizeClaudeSseLine('event: content_block_delta')).toBe('event: content_block_delta')
     expect(normalizeClaudeSseLine('data: {bad')).toBe('data: {bad')
     expect(normalizeClaudeSseLine('data: [DONE]')).toBe('data: [DONE]')
   })
@@ -231,7 +229,7 @@ describe('responseHeaderFilter', () => {
 })
 
 describe('claudeRelayService mimicry parity', () => {
-  test('non-CC request gets 3-block system with billing block', () => {
+  test('non-CC request gets identity blocks without a forged billing fingerprint', () => {
     const body = {
       model: 'claude-sonnet-4-5',
       max_tokens: 64,
@@ -240,12 +238,12 @@ describe('claudeRelayService mimicry parity', () => {
     }
     const processed = claudeRelayService._processRequestBody(body, null, false)
     expect(Array.isArray(processed.system)).toBe(true)
-    expect(processed.system.length).toBe(3)
-    expect(processed.system[0].text).toMatch(
-      /^x-anthropic-billing-header: cc_version=\d+\.\d+\.\d+\.[0-9a-f]{3}; cc_entrypoint=cli;$/
+    expect(processed.system.length).toBe(2)
+    expect(processed.system.map((item) => item.text).join('\n')).not.toContain(
+      'x-anthropic-billing-header'
     )
-    expect(processed.system[1].text).toContain('You are Claude Code')
-    expect(processed.system[2].cache_control).toEqual({ type: 'ephemeral', ttl: '5m' })
+    expect(processed.system[0].text).toContain('You are Claude Code')
+    expect(processed.system[1].cache_control).toEqual({ type: 'ephemeral', ttl: '5m' })
     // original system migrated into messages as user/assistant pair
     expect(processed.messages[0].role).toBe('user')
     expect(processed.messages[0].content[0].text).toContain('You are a helpful assistant.')
@@ -276,20 +274,21 @@ describe('claudeRelayService mimicry parity', () => {
     })
   })
 
-  test('real CC request keeps its own system and gets fp-aware billing sync', () => {
+  test('real CC request keeps the client billing header and fingerprint', () => {
+    const billing = 'x-anthropic-billing-header: cc_version=2.0.1.a1b; cc_entrypoint=cli;'
     const body = {
       model: 'claude-sonnet-4-5',
       system: [
         {
           type: 'text',
-          text: 'x-anthropic-billing-header: cc_version=2.0.1; cc_entrypoint=cli;'
+          text: billing
         },
         { type: 'text', text: 'You are Claude Code, Anthropic official CLI for Claude.' }
       ],
       messages: [{ role: 'user', content: 'Write a hello world function' }]
     }
     const processed = claudeRelayService._processRequestBody(body, null, true)
-    expect(processed.system[0].text).toMatch(/cc_version=2\.1\.255\.[0-9a-f]{3}/)
+    expect(processed.system[0].text).toBe(billing)
     expect(processed.system[1].text).toContain('You are Claude Code')
   })
 

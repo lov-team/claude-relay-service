@@ -1,13 +1,17 @@
 # 🎯 后端依赖阶段 (与前端构建并行)
-FROM node:18-alpine AS backend-deps
+# glibc image: tls-impersonate ships glibc prebuilds and needs Node >= 24.15
+# so the Claude CLI ClientHello can be reproduced.
+FROM node:24.15.0-bookworm-slim AS backend-deps
 
 # 📁 设置工作目录
 WORKDIR /app
 
 # 📦 复制 package 文件
 COPY package*.json ./
+COPY scripts/patch-tls-impersonate-ccm8.js scripts/patch-tls-impersonate-ccm8.js
 
 # 🔽 安装依赖 (生产环境) - 使用 BuildKit 缓存加速
+# postinstall 给 tls-impersonate 补上 Claude CLI 的 6 个 CCM8 套件名
 RUN --mount=type=cache,target=/root/.npm \
     npm ci --only=production
 
@@ -35,7 +39,7 @@ ENV VITE_APP_BASE_URL=$VITE_APP_BASE_URL
 RUN npm run build
 
 # 🐳 主应用阶段
-FROM node:18-alpine
+FROM node:24.15.0-bookworm-slim
 
 # 📋 设置标签
 LABEL maintainer="claude-relay-service@example.com"
@@ -43,11 +47,9 @@ LABEL description="Claude Code API Relay Service"
 LABEL version="1.0.0"
 
 # 🔧 安装系统依赖
-RUN apk add --no-cache \
-    curl \
-    dumb-init \
-    sed \
-    && rm -rf /var/cache/apk/*
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl dumb-init ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 # 📁 设置工作目录
 WORKDIR /app

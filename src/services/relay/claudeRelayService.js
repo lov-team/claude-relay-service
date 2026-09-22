@@ -26,10 +26,6 @@ const metadataUserIdHelper = require('../../utils/metadataUserIdHelper')
 const { normalizeDateline } = require('../../utils/anthropicFingerprint')
 const { normalizeClaudeSseLine } = require('../../utils/claudeStreamSanitizer')
 const {
-  buildBillingAttributionText,
-  syncBillingHeaderVersion
-} = require('../../utils/claudeBillingFingerprint')
-const {
   classifyClaudeOAuthError,
   extractClaudeOAuthError
 } = require('../../utils/claudeOAuthErrorClassifier')
@@ -540,28 +536,45 @@ class ClaudeRelayService {
     accountUA = '',
     accountUserAgentMode = ''
   ) {
+    let resolved
     if (accountUserAgentMode === 'pinned' && typeof accountUA === 'string' && accountUA.trim()) {
-      return userAgentPoolService.normalizeClaudeCodeUserAgent(accountUA)
+      resolved = userAgentPoolService.normalizeClaudeCodeUserAgent(accountUA)
+    } else if (unifiedUA) {
+      // 没有 pinned 身份的存量账号继续沿用原 unified UA 行为。
+      resolved = userAgentPoolService.normalizeClaudeCodeUserAgent(unifiedUA)
+    } else {
+      const userAgent = headers?.['user-agent'] || headers?.['User-Agent']
+      if (typeof userAgent === 'string' && /^claude-cli\/[^\s]+\s+\(/i.test(userAgent)) {
+        resolved = userAgentPoolService.normalizeClaudeCodeUserAgent(userAgent)
+      } else if (isRealClaudeCode) {
+        resolved = userAgentPoolService.normalizeClaudeCodeUserAgent(
+          this._extractClaudeCodeUserAgentFromBillingHeader(requestPayload) ||
+            LEGACY_CLAUDE_USER_AGENT_FALLBACK
+        )
+      } else {
+        resolved = userAgent || LEGACY_CLAUDE_USER_AGENT_FALLBACK
+      }
     }
 
-    // 没有 pinned 身份的存量账号继续沿用原 unified UA 行为。
-    if (unifiedUA) {
-      return userAgentPoolService.normalizeClaudeCodeUserAgent(unifiedUA)
-    }
-
-    const userAgent = headers?.['user-agent'] || headers?.['User-Agent']
-    if (typeof userAgent === 'string' && /^claude-cli\/[^\s]+\s+\(/i.test(userAgent)) {
-      return userAgentPoolService.normalizeClaudeCodeUserAgent(userAgent)
-    }
-
+    // 计费头里的 cc_version 和 3 位指纹是客户端自己算好的一对。
+    // UA 版本若被抬到别的号，上游对得上指纹却对不上版本。
     if (isRealClaudeCode) {
-      return userAgentPoolService.normalizeClaudeCodeUserAgent(
-        this._extractClaudeCodeUserAgentFromBillingHeader(requestPayload) ||
-          LEGACY_CLAUDE_USER_AGENT_FALLBACK
-      )
+      return this._alignUserAgentVersionToBilling(resolved, requestPayload)
     }
+    return resolved
+  }
 
-    return userAgent || LEGACY_CLAUDE_USER_AGENT_FALLBACK
+  _alignUserAgentVersionToBilling(userAgent, requestPayload) {
+    const billingUserAgent = this._extractClaudeCodeUserAgentFromBillingHeader(requestPayload)
+    const billingVersion = userAgentPoolService.extractClaudeCodeVersion(billingUserAgent)
+    if (!billingVersion || typeof userAgent !== 'string') {
+      return userAgent
+    }
+    const currentVersion = userAgentPoolService.extractClaudeCodeVersion(userAgent)
+    if (!currentVersion || currentVersion === billingVersion) {
+      return /^claude-cli\//i.test(userAgent) ? userAgent : billingUserAgent
+    }
+    return userAgent.replace(`claude-cli/${currentVersion}`, `claude-cli/${billingVersion}`)
   }
 
   _hasClaudeCodeIdentityHeaders(clientHeaders) {
@@ -1952,13 +1965,9 @@ class ClaudeRelayService {
       processedBody.messages = datelineResult.body.messages
     }
 
-    // 如果不是真实的 Claude Code 请求，需要处理 system prompt
-    // 策略：重建真实 Claude Code CLI 的 3-block system 形态
-    //   [0] billing attribution 块（cc_version=X.Y.Z.{fp}; cc_entrypoint=cli;）
-    //   [1] "You are Claude Code..." 身份前缀块
-    //   [2] 工具无关的通用提示词扩充块（带 cache_control 稳定断点）
-    // 原因：Anthropic 基于 system 参数内容检测第三方应用，缺 billing 块
-    //       是关键信号；原 system 迁移为 user/assistant 消息对保留功能。
+    // 非 Claude Code 请求只补身份前缀，不伪造计费指纹。
+    // 本地重算的 cc_version.{fp} 对不上上游校验时，本身就是第三方信号。
+    // 客户端自己带来的指纹在真实 CC 路径上原样保留。
     if (!isRealClaudeCode) {
       // 提取原始 system prompt 文本
       let originalSystemText = ''
@@ -1971,28 +1980,14 @@ class ClaudeRelayService {
           .join('\n\n')
       }
 
-      // 重建真实 CLI 的 3-block system 形态
-      const cliVersion =
-        userAgentPoolService.getConfiguredClaudeCodeVersion() ||
-        userAgentPoolService.MIN_CLAUDE_CODE_VERSION
-      let billingText = null
-      try {
-        // fp 必须在 messages 注入（unshift）之前用原始 body 计算
-        billingText = buildBillingAttributionText(processedBody, cliVersion)
-      } catch (billingError) {
-        logger.warn('Failed to build billing attribution block:', billingError)
-      }
-      const systemBlocks = []
-      if (billingText) {
-        systemBlocks.push({ type: 'text', text: billingText })
-      }
-      systemBlocks.push({ type: 'text', text: this.claudeCodeSystemPrompt })
-      systemBlocks.push({
-        type: 'text',
-        text: this.claudeCodeSystemPromptExpansion,
-        cache_control: { type: 'ephemeral', ttl: '5m' }
-      })
-      processedBody.system = systemBlocks
+      processedBody.system = [
+        { type: 'text', text: this.claudeCodeSystemPrompt },
+        {
+          type: 'text',
+          text: this.claudeCodeSystemPromptExpansion,
+          cache_control: { type: 'ephemeral', ttl: '5m' }
+        }
+      ]
 
       // 将原始 system prompt 作为 user/assistant 消息对注入到 messages 开头
       // 模型仍通过 messages 接收完整指令，保留客户端功能
@@ -2031,11 +2026,9 @@ class ClaudeRelayService {
       }
     }
 
-    // 真实 Claude Code 请求保留 billing 标识并同步版本+指纹；
-    // 伪装路径上面已生成新的 billing 块，无需再清理。
-    if (isRealClaudeCode) {
-      this._syncClaudeCodeBillingHeader(processedBody)
-    }
+    // 真实 Claude Code 的 billing 块（含 3 位指纹）原样保留。
+    // 改版本或重算指纹都会拆开客户端已经算好的一对。
+    // 非 CC 路径上面没有写入 billing 块；若原始 system 被整段替换，也不会带上。
 
     // CLI 形态补全（仅伪装路径）：真实 Claude Code 总是携带
     // tools 数组（可为空）、temperature（默认 1）、max_tokens
@@ -2138,56 +2131,6 @@ class ClaudeRelayService {
       accountUuid: accountUuid || parsed.accountUuid || ''
     })
     logger.info(`🔄 Replaced client ID with unified ID: ${body.metadata.user_id}`)
-  }
-
-  // 🧹 移除 billing header 系统提示元素
-  _removeBillingHeaderFromSystem(processedBody) {
-    if (!processedBody || !processedBody.system) {
-      return
-    }
-
-    if (typeof processedBody.system === 'string') {
-      if (/x-anthropic-billing-header\s*:/i.test(processedBody.system)) {
-        logger.debug('🧹 Removed billing header from string system prompt')
-        delete processedBody.system
-      }
-      return
-    }
-
-    if (Array.isArray(processedBody.system)) {
-      const originalLength = processedBody.system.length
-      processedBody.system = processedBody.system.filter(
-        (item) =>
-          !(
-            item &&
-            item.type === 'text' &&
-            typeof item.text === 'string' &&
-            /x-anthropic-billing-header\s*:/i.test(item.text)
-          )
-      )
-      if (processedBody.system.length < originalLength) {
-        logger.debug(
-          `🧹 Removed ${originalLength - processedBody.system.length} billing header element(s) from system array`
-        )
-      }
-    }
-  }
-
-  // Sync cc_version in real-CC billing blocks, recomputing the fp
-  // suffix. The previous implementation replaced the version and
-  // dropped {fp} -- real CLI always sends cc_version=X.Y.Z.{fp},
-  // a missing fp is a third-party signal.
-  _syncClaudeCodeBillingHeader(processedBody) {
-    if (!processedBody || !processedBody.system) {
-      return
-    }
-    const targetVersion =
-      userAgentPoolService.getConfiguredClaudeCodeVersion() ||
-      userAgentPoolService.MIN_CLAUDE_CODE_VERSION
-    const next = syncBillingHeaderVersion(processedBody, targetVersion)
-    if (next !== processedBody && next && Array.isArray(next.system)) {
-      processedBody.system = next.system
-    }
   }
 
   // 🔢 查询模型的 max_output_tokens 上限（pricing 表），查不到返回 null
@@ -2734,12 +2677,6 @@ class ClaudeRelayService {
 
     requestPayload = extensionResult.body
     finalHeaders = extensionResult.headers
-    // 最终序列化前再次同步 billing 标识（cc_version + fp），
-    // 覆盖直接传入原始请求体的入口。伪装路径的 billing 块由
-    // _processRequestBody 生成，无需清理。
-    if (isRealClaudeCode) {
-      this._syncClaudeCodeBillingHeader(requestPayload)
-    }
 
     let toolNameMap = null
     if (!isRealClaudeCode) {

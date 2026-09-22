@@ -2,7 +2,7 @@ const { SocksProxyAgent } = require('socks-proxy-agent')
 const { HttpsProxyAgent } = require('https-proxy-agent')
 const logger = require('./logger')
 const config = require('../../config/config')
-const { getClaudeTlsOptions } = require('./claudeTlsAgent')
+const { applyClaudeTlsToAgent } = require('./claudeTlsAgent')
 
 /**
  * 统一的代理创建工具
@@ -39,9 +39,7 @@ class ProxyHelper {
 
       // 配置连接池与 Keep-Alive
       const proxySettings = config.proxy || {}
-      // TLS 指纹对齐 Claude Code (Node 24)：透传进 agent-base 的
-      // tls.connect 选项（ciphers/sigalgs/ecdhCurve/ALPN/minVersion）。
-      const agentCommonOptions = getClaudeTlsOptions()
+      const agentCommonOptions = {}
 
       if (typeof proxySettings.keepAlive === 'boolean') {
         agentCommonOptions.keepAlive = proxySettings.keepAlive
@@ -103,7 +101,7 @@ class ProxyHelper {
           socksOptions.family = useIPv4 ? 4 : 6
         }
 
-        agent = new SocksProxyAgent(socksUrl, socksOptions)
+        agent = applyClaudeTlsToAgent(new SocksProxyAgent(socksUrl, socksOptions))
       } else if (proxy.type === 'http' || proxy.type === 'https') {
         const proxyUrl = `${proxy.type}://${auth}${proxy.host}:${proxy.port}`
         const httpOptions = { ...agentCommonOptions }
@@ -113,7 +111,7 @@ class ProxyHelper {
           httpOptions.family = useIPv4 ? 4 : 6
         }
 
-        agent = new HttpsProxyAgent(proxyUrl, httpOptions)
+        agent = applyClaudeTlsToAgent(new HttpsProxyAgent(proxyUrl, httpOptions))
       } else {
         logger.warn(`⚠️ Unsupported proxy type: ${proxy.type}`)
         return null

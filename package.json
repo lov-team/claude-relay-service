@@ -28,6 +28,7 @@
     "status": "bash scripts/status-unified.sh",
     "status:detail": "bash scripts/status-unified.sh --detail",
     "test": "jest",
+    "postinstall": "node scripts/patch-tls-impersonate-ccm8.js",
     "lint": "eslint src/**/*.js cli/**/*.js scripts/**/*.js --fix",
     "lint:check": "eslint src/**/*.js cli/**/*.js scripts/**/*.js",
     "format": "prettier --write \"src/**/*.js\" \"cli/**/*.js\" \"scripts/**/*.js\"",
@@ -73,6 +74,7 @@
     "socks-proxy-agent": "^8.0.2",
     "string-similarity": "^4.0.4",
     "table": "^6.8.1",
+    "tls-impersonate": "^0.2.0",
     "uuid": "^9.0.1",
     "winston": "^3.11.0",
     "winston-daily-rotate-file": "^4.7.1"
@@ -86,6 +88,7 @@
     "nodemon": "^3.0.1",
     "prettier": "^3.6.2",
     "prettier-plugin-tailwindcss": "^0.7.2",
+    "read-tls-client-hello": "^2.0.0",
     "supertest": "^6.3.3"
   },
   "engines": {

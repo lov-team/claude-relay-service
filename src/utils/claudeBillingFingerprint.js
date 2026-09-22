@@ -11,6 +11,12 @@
  * the CLI version. The salt and char indices below are captured from
  * real CLI traffic (via Parrot cc_mimicry.py); changing them makes
  * the fp diverge from real clients and trips third-party detection.
+ *
+ * The live relay does not apply these helpers. A client-supplied
+ * cc_version.{fp} pair is forwarded unchanged. Recomputing the suffix
+ * with a salt that does not match Anthropic's check is itself a
+ * third-party signal, and so is dropping the suffix while rewriting
+ * the version.
  */
 
 const crypto = require('crypto')
