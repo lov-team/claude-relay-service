@@ -19,10 +19,20 @@ describe('getRateLimitModelFamily', () => {
     expect(getRateLimitModelFamily('ccr,claude-sonnet-4-5')).toBe('sonnet')
   })
 
-  it('normalizes Fable aliases to the canonical upstream model id', () => {
+  it('strips the anthropic vendor prefix and rewrites dotted versions', () => {
     expect(normalizeClaudeModelAlias('claude-fable-5.1')).toBe('claude-fable-5-1')
     expect(normalizeClaudeModelAlias('anthropic/claude-fable-5.1')).toBe('claude-fable-5-1')
     expect(normalizeClaudeModelAlias(' CLAUDE-FABLE-5.1 ')).toBe('claude-fable-5-1')
+    expect(normalizeClaudeModelAlias('anthropic/claude-opus-5')).toBe('claude-opus-5')
+    expect(normalizeClaudeModelAlias('anthropic/claude-opus-5.5')).toBe('claude-opus-5-5')
+    expect(normalizeClaudeModelAlias('anthropic/claude-opus-4.8')).toBe('claude-opus-4-8')
+    expect(normalizeClaudeModelAlias('anthropic/claude-haiku-4.5-20251001')).toBe(
+      'claude-haiku-4-5-20251001'
+    )
+    expect(normalizeClaudeModelAlias('claude-opus-5')).toBe('claude-opus-5')
+    expect(normalizeClaudeModelAlias('us.anthropic.claude-sonnet-4-5')).toBe(
+      'us.anthropic.claude-sonnet-4-5'
+    )
   })
 
   it('returns null for unknown or invalid models', () => {

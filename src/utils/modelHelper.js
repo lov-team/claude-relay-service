@@ -9,21 +9,32 @@
 // Gemini/Antigravity 采用“路径分流”，避免在 model 字段里混入 vendor 前缀造成混乱
 const SUPPORTED_VENDOR_PREFIXES = ['ccr']
 
-// Claude model aliases accepted from clients but not understood consistently by
-// Anthropic/Claude Code. Keep one canonical spelling throughout scheduling,
-// upstream payloads, rate-limit buckets, and usage accounting.
-const CLAUDE_MODEL_ALIASES = new Map([
-  ['claude-fable-5.1', 'claude-fable-5-1'],
-  ['anthropic/claude-fable-5.1', 'claude-fable-5-1']
-])
-
+// 客户端会带 OpenRouter 风格的 anthropic/ 前缀，或把版本写成点号
+// （claude-opus-5.5、claude-fable-5.1）。官方接口只认 claude-* 且版本用横线。
 function normalizeClaudeModelAlias(modelName) {
   if (typeof modelName !== 'string') {
     return modelName
   }
 
   const trimmed = modelName.trim()
-  return CLAUDE_MODEL_ALIASES.get(trimmed.toLowerCase()) || trimmed
+  if (!trimmed) {
+    return trimmed
+  }
+
+  let normalized = trimmed
+  if (normalized.toLowerCase().startsWith('anthropic/')) {
+    normalized = normalized.slice('anthropic/'.length)
+  }
+
+  if (normalized.toLowerCase().startsWith('claude-') && normalized.includes('.')) {
+    normalized = normalized.replace(/\./g, '-')
+  }
+
+  if (normalized !== trimmed) {
+    return normalized.toLowerCase()
+  }
+
+  return trimmed
 }
 
 /**
