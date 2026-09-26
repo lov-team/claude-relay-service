@@ -3831,17 +3831,23 @@ class ClaudeRelayService {
           logger.error(
             `❌ Claude API returned error status: ${res.statusCode} | Account: ${account?.name || accountId}`
           )
-          let errorData = ''
+          const errorChunks = []
 
           res.on('data', (chunk) => {
-            errorData += chunk.toString()
+            errorChunks.push(chunk)
           })
 
           res.on('end', async () => {
-            logger.error(
-              `❌ Claude API error response (Account: ${account?.name || accountId}):`,
-              errorData
-            )
+            const rawBuffer = Buffer.concat(errorChunks)
+            const errorData = this._decodeUpstreamBody(rawBuffer, res.headers['content-encoding'])
+            logger.error(`❌ Claude API error response (Account: ${account?.name || accountId}):`, {
+              statusCode: res.statusCode,
+              encoding: res.headers['content-encoding'] || 'identity',
+              contentType: res.headers['content-type'] || '',
+              requestId: res.headers['request-id'] || '',
+              bytes: rawBuffer.length,
+              body: errorData || '(empty)'
+            })
 
             if (res.statusCode === 401) {
               const oauthError = await this._classifyClaudeOAuthError(res.statusCode, errorData)
@@ -5131,6 +5137,27 @@ class ClaudeRelayService {
       )
       return false
     }
+  }
+
+  // 解压上游错误体。Cloudflare 偶发会在没有 Content-Encoding 时仍返回 gzip。
+  _decodeUpstreamBody(rawBuffer, contentEncoding) {
+    const buffer = Buffer.isBuffer(rawBuffer) ? rawBuffer : Buffer.from(rawBuffer || '')
+    if (buffer.length === 0) {
+      return ''
+    }
+    const encoding = String(contentEncoding || '').toLowerCase()
+    const looksGzip = buffer[0] === 0x1f && buffer[1] === 0x8b
+    try {
+      if (encoding === 'gzip' || (!encoding && looksGzip)) {
+        return zlib.gunzipSync(buffer).toString('utf8')
+      }
+      if (encoding === 'deflate') {
+        return zlib.inflateSync(buffer).toString('utf8')
+      }
+    } catch (error) {
+      logger.error('❌ Failed to decompress upstream error body:', error.message)
+    }
+    return buffer.toString('utf8')
   }
 
   // ⏱️ 等待指定毫秒数
