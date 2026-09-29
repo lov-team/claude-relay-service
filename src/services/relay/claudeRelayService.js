@@ -307,6 +307,35 @@ class ClaudeRelayService {
     return retryableResponse
   }
 
+  _buildAllRateLimitedResponse(error) {
+    // 所有符合条件的账号都因可恢复限流被排除：回可重试 429，让上游换渠道，不要禁用渠道
+    logger.warn(
+      `🚦 All eligible Claude accounts temporarily limited (nurture=${error.nurtureBlockedCount || 0}, recoverable=${error.nonNurtureExcludedCount || 0}), returning retryable 429`
+    )
+    const retryAfter = String(error.retryAfterSeconds || 30)
+    return {
+      statusCode: 429,
+      headers: {
+        'Content-Type': 'application/json',
+        'Retry-After': retryAfter,
+        'retry-after': retryAfter
+      },
+      body: JSON.stringify({
+        error: {
+          type: 'rate_limit_error',
+          code: 'crs_rate_limited',
+          message: 'CRS account pool is temporarily rate limited; retry another upstream channel.',
+          metadata: {
+            source: 'claude-relay-service',
+            retryable: true,
+            disable_channel: false,
+            limit_kind: 'rate_limit'
+          }
+        }
+      })
+    }
+  }
+
   _buildRetryableSharedPoolRateLimitResponse(accountId, limitKind = 'shared_pool') {
     logger.warn(
       `All shared Claude accounts tried for this request are temporarily rate limited; returning retryable 429`
@@ -1057,6 +1086,9 @@ class ClaudeRelayService {
         }
         if (claudeAccountNurtureService.isNurtureSchedulerError(error)) {
           return this._buildNurtureLimitedResponse(error.accountId, error.nurtureReason)
+        }
+        if (error.code === 'CLAUDE_ALL_RATE_LIMITED') {
+          return this._buildAllRateLimitedResponse(error)
         }
         if (error.code === 'CLAUDE_ALL_TEMPORARILY_UNAVAILABLE') {
           return upstreamErrorHelper.buildTempUnavailableHttpResponse(error)
@@ -3037,6 +3069,18 @@ class ClaudeRelayService {
             })
           }
           responseStream.write(nurtureResponse.body)
+          responseStream.end()
+          return
+        }
+        if (error.code === 'CLAUDE_ALL_RATE_LIMITED') {
+          const response = this._buildAllRateLimitedResponse(error)
+          if (!responseStream.headersSent) {
+            responseStream.status(response.statusCode)
+            Object.entries(response.headers).forEach(([key, value]) => {
+              responseStream.setHeader(key, value)
+            })
+          }
+          responseStream.write(response.body)
           responseStream.end()
           return
         }

@@ -87,6 +87,7 @@ jest.mock('../src/services/account/claudeAccountNurtureService', () => ({
 }))
 
 const redis = require('../src/models/redis')
+const claudeAccountService = require('../src/services/account/claudeAccountService')
 const claudeAccountNurtureService = require('../src/services/account/claudeAccountNurtureService')
 const accountGroupService = require('../src/services/accountGroupService')
 const upstreamErrorHelper = require('../src/utils/upstreamErrorHelper')
@@ -260,6 +261,53 @@ describe('UnifiedClaudeScheduler nurture handling for auto-stopped accounts', ()
       retryAfterSeconds: 15,
       temporaryUnavailableUntil: '2026-09-01T00:00:15.000Z'
     })
+  })
+
+  test('returns retryable 429 instead of nurture 403 when other accounts are excluded by model-family limits', async () => {
+    const nurtureBlocked = buildOfficialAccount('nurture-blocked')
+    const modelLimited = buildOfficialAccount('model-limited')
+    redis.getAllClaudeAccounts.mockResolvedValue([nurtureBlocked, modelLimited])
+    upstreamErrorHelper.getTempUnavailableInfo.mockResolvedValue(null)
+    claudeAccountNurtureService.evaluate.mockImplementation(async (accountId) =>
+      accountId === 'nurture-blocked' ? blockedEvaluation : allowedEvaluation
+    )
+    claudeAccountService.isAccountModelRateLimited.mockImplementation(
+      async (accountId) => accountId === 'model-limited'
+    )
+
+    await expect(
+      unifiedClaudeScheduler.selectAccountForApiKey({}, null, 'claude-sonnet-4-6')
+    ).rejects.toMatchObject({ code: 'CLAUDE_ALL_RATE_LIMITED', statusCode: 429 })
+  })
+
+  test('returns retryable 429 instead of nurture 403 when other accounts are upstream rate limited', async () => {
+    const nurtureBlocked = buildOfficialAccount('nurture-blocked')
+    const rateLimited = buildOfficialAccount('rate-limited')
+    redis.getAllClaudeAccounts.mockResolvedValue([nurtureBlocked, rateLimited])
+    upstreamErrorHelper.getTempUnavailableInfo.mockResolvedValue(null)
+    claudeAccountNurtureService.evaluate.mockImplementation(async (accountId) =>
+      accountId === 'nurture-blocked' ? blockedEvaluation : allowedEvaluation
+    )
+    claudeAccountService.isAccountRateLimited.mockImplementation(
+      async (accountId) => accountId === 'rate-limited'
+    )
+
+    await expect(
+      unifiedClaudeScheduler.selectAccountForApiKey({}, null, 'claude-sonnet-4-6')
+    ).rejects.toMatchObject({ code: 'CLAUDE_ALL_RATE_LIMITED', statusCode: 429 })
+  })
+
+  test('keeps the all-nurture 403 when every eligible account is nurture blocked', async () => {
+    redis.getAllClaudeAccounts.mockResolvedValue([
+      buildOfficialAccount('nurture-a'),
+      buildOfficialAccount('nurture-b')
+    ])
+    upstreamErrorHelper.getTempUnavailableInfo.mockResolvedValue(null)
+    claudeAccountNurtureService.evaluate.mockResolvedValue(blockedEvaluation)
+
+    await expect(
+      unifiedClaudeScheduler.selectAccountForApiKey({}, null, 'claude-sonnet-4-6')
+    ).rejects.toMatchObject({ code: 'CLAUDE_ALL_NURTURE_LIMITED', statusCode: 403 })
   })
 
   test('prefers a temporary cooldown over a nurture-only block when no account is available', async () => {

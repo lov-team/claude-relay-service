@@ -38,6 +38,30 @@ function respondToNurtureSchedulerError(res, error) {
   return res.status(response.statusCode).type('application/json').send(response.body)
 }
 
+function respondToAllRateLimitedSchedulerError(res, error) {
+  const retryAfter = String(error.retryAfterSeconds || 30)
+  res.set('Retry-After', retryAfter)
+  res.set('retry-after', retryAfter)
+  return res
+    .status(429)
+    .type('application/json')
+    .send(
+      JSON.stringify({
+        error: {
+          type: 'rate_limit_error',
+          code: 'crs_rate_limited',
+          message: 'CRS account pool is temporarily rate limited; retry another upstream channel.',
+          metadata: {
+            source: 'claude-relay-service',
+            retryable: true,
+            disable_channel: false,
+            limit_kind: 'rate_limit'
+          }
+        }
+      })
+    )
+}
+
 function respondToTemporaryUnavailableSchedulerError(res, error) {
   if (
     typeof upstreamErrorHelper.isTempUnavailableSchedulerError !== 'function' ||
@@ -271,6 +295,9 @@ async function handleChatCompletion(req, res, apiKeyData) {
           error: 'upstream_rate_limited',
           message: limitMessage
         })
+      }
+      if (error.code === 'CLAUDE_ALL_RATE_LIMITED') {
+        return respondToAllRateLimitedSchedulerError(res, error)
       }
       if (claudeAccountNurtureService.isNurtureSchedulerError(error)) {
         return respondToNurtureSchedulerError(res, error)

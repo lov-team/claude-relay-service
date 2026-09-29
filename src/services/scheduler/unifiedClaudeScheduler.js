@@ -97,6 +97,18 @@ class UnifiedClaudeScheduler {
     throw error
   }
 
+  _throwAllRateLimitedError({ nurtureBlockedCount = 0, nonNurtureExcludedCount = 0 } = {}) {
+    const error = new Error(
+      'All eligible Claude accounts are temporarily rate limited or waiting to recover'
+    )
+    error.code = 'CLAUDE_ALL_RATE_LIMITED'
+    error.statusCode = 429
+    error.retryAfterSeconds = 30
+    error.nurtureBlockedCount = nurtureBlockedCount
+    error.nonNurtureExcludedCount = nonNurtureExcludedCount
+    throw error
+  }
+
   _shouldEvaluateAutoStoppedNurtureAccount(account, accountType = 'claude-official') {
     return (
       accountType === 'claude-official' &&
@@ -611,6 +623,9 @@ class UnifiedClaudeScheduler {
     const availableAccounts = []
     let nurtureBlockedCount = 0
     let lastNurtureEvaluation = null
+    // 因其他可恢复原因（上游限流/模型家族限流/自动停调度待恢复）被排除的账号数。
+    // 只要存在这类账号，就不能把整体失败归因到养号护栏上。
+    let nonNurtureExcludedCount = 0
     let minTemporaryUnavailableSeconds = null
     let minTemporaryUnavailableUntil = null
     // 请求模型所属的限流家族（opus/sonnet/haiku/fable）
@@ -799,6 +814,17 @@ class UnifiedClaudeScheduler {
         const shouldEvaluateAutoStoppedNurture =
           this._shouldEvaluateAutoStoppedNurtureAccount(account)
         if (!isSchedulable(account.schedulable) && !shouldEvaluateAutoStoppedNurture) {
+          if (account.rateLimitAutoStopped === 'true' || account.rateLimitAutoStopped === true) {
+            // auto-stopped by upstream rate limit: recoverable, not a nurture block
+            nonNurtureExcludedCount += 1
+            logger.debug(
+              'auto-stopped by rate limit, waiting for reset: ' +
+                account.name +
+                ' (' +
+                account.id +
+                ')'
+            )
+          }
           continue
         }
 
@@ -828,6 +854,7 @@ class UnifiedClaudeScheduler {
         // 检查是否被限流
         const isRateLimited = await claudeAccountService.isAccountRateLimited(account.id)
         if (isRateLimited) {
+          nonNurtureExcludedCount += 1
           continue
         }
 
@@ -844,6 +871,9 @@ class UnifiedClaudeScheduler {
         // 仅允许 5 小时自动保护停调度的账号越过预过滤完成养号判定。
         // 若当前并未命中养号护栏，仍保持不可调度，避免意外恢复流量。
         if (!isSchedulable(account.schedulable)) {
+          // nurture evaluation already passed but the account is still auto-stopped;
+          // it is recoverable, so it must not be attributed to the nurture guard
+          nonNurtureExcludedCount += 1
           continue
         }
 
@@ -853,6 +883,7 @@ class UnifiedClaudeScheduler {
             requestedModelFamily
           )
           if (isModelRateLimited) {
+            nonNurtureExcludedCount += 1
             logger.info(
               `🚫 Skipping account ${account.name} (${account.id}) due to active ${requestedModelFamily} limit`
             )
@@ -1000,6 +1031,7 @@ class UnifiedClaudeScheduler {
             )
           }
         } else {
+          nonNurtureExcludedCount += 1
           if (isRateLimited) {
             logger.warn(`⚠️ Claude Console account ${currentAccount.name} is rate limited`)
           }
@@ -1175,6 +1207,7 @@ class UnifiedClaudeScheduler {
               `✅ Added CCR account to available pool: ${account.name} (priority: ${account.priority})`
             )
           } else {
+            nonNurtureExcludedCount += 1
             if (isRateLimited) {
               logger.warn(`⚠️ CCR account ${account.name} is rate limited`)
             }
@@ -1215,6 +1248,15 @@ class UnifiedClaudeScheduler {
         )
         error.code = 'CONSOLE_ACCOUNT_CONCURRENCY_FULL'
         throw error
+      }
+      if (nonNurtureExcludedCount > 0) {
+        // 仍有账号因为可恢复原因（上游限流/模型家族限流/自动停调度待恢复）被排除，
+        // 不能向渠道返回 nurture_limit_reached(403, disable_channel)，
+        // 否则上游会误以为所有账号都被养号护栏挡住并禁用整个渠道。
+        logger.error(
+          `❌ No Claude account available: ${nurtureBlockedCount} nurture-blocked, ${nonNurtureExcludedCount} excluded by recoverable limits`
+        )
+        this._throwAllRateLimitedError({ nurtureBlockedCount, nonNurtureExcludedCount })
       }
       if (nurtureBlockedCount > 0) {
         logger.error(
@@ -1785,6 +1827,8 @@ class UnifiedClaudeScheduler {
       const availableAccounts = []
       let nurtureBlockedCount = 0
       let lastNurtureEvaluation = null
+      // 因其他可恢复原因（上游限流/模型家族限流/并发满额/自动停调度待恢复）被排除的账号数
+      let nonNurtureExcludedCount = 0
       let minTemporaryUnavailableSeconds = null
       let minTemporaryUnavailableUntil = null
       // 请求模型所属的限流家族（opus/sonnet/haiku/fable）
@@ -1854,6 +1898,10 @@ class UnifiedClaudeScheduler {
             accountType
           )
           if (!isSchedulable(account.schedulable) && !shouldEvaluateAutoStoppedNurture) {
+            if (account.rateLimitAutoStopped === 'true' || account.rateLimitAutoStopped === true) {
+              // auto-stopped by upstream rate limit: recoverable, not a nurture block
+              nonNurtureExcludedCount += 1
+            }
             continue
           }
 
@@ -1880,6 +1928,7 @@ class UnifiedClaudeScheduler {
           // 检查是否被限流
           const isRateLimited = await this.isAccountRateLimited(account.id, accountType)
           if (isRateLimited) {
+            nonNurtureExcludedCount += 1
             continue
           }
 
@@ -1896,6 +1945,8 @@ class UnifiedClaudeScheduler {
           }
 
           if (!isSchedulable(account.schedulable)) {
+            // nurture evaluation already passed but still auto-stopped: recoverable
+            nonNurtureExcludedCount += 1
             continue
           }
 
@@ -1905,6 +1956,7 @@ class UnifiedClaudeScheduler {
               requestedModelFamily
             )
             if (isModelRateLimited) {
+              nonNurtureExcludedCount += 1
               logger.info(
                 `🚫 Skipping group member ${account.name} (${account.id}) due to active ${requestedModelFamily} limit`
               )
@@ -1916,6 +1968,7 @@ class UnifiedClaudeScheduler {
           if (accountType === 'claude-console' && account.maxConcurrentTasks > 0) {
             const currentConcurrency = await redis.getConsoleAccountConcurrency(account.id)
             if (currentConcurrency >= account.maxConcurrentTasks) {
+              nonNurtureExcludedCount += 1
               logger.info(
                 `🚫 Skipping group member ${account.name} (${account.id}) due to concurrency limit: ${currentConcurrency}/${account.maxConcurrentTasks}`
               )
@@ -1939,6 +1992,13 @@ class UnifiedClaudeScheduler {
             minTemporaryUnavailableSeconds,
             minTemporaryUnavailableUntil
           )
+        }
+        if (nonNurtureExcludedCount > 0) {
+          // 仍有账号因为可恢复原因被排除：不能返回 nurture_limit_reached(403, disable_channel)
+          logger.error(
+            `❌ No available member in group ${group.name}: ${nurtureBlockedCount} nurture-blocked, ${nonNurtureExcludedCount} excluded by recoverable limits`
+          )
+          this._throwAllRateLimitedError({ nurtureBlockedCount, nonNurtureExcludedCount })
         }
         if (nurtureBlockedCount > 0) {
           logger.error(
