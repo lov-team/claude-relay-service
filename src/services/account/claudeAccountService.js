@@ -3630,7 +3630,29 @@ class ClaudeAccountService {
             let newWindowStart = null
             let newWindowEnd = null
 
-            if (latestAccount.sessionWindowEnd) {
+            // 优先使用上游返回的5小时限额重置时间：额度一旦重置即可恢复，
+            // 不必等本地 sessionWindowEnd（窗口可能比实际重置时间晚数小时）。
+            const upstreamResetMs = Date.parse(latestAccount.claudeFiveHourResetsAt || '')
+            const upstreamResetExpired =
+              Number.isFinite(upstreamResetMs) && now.getTime() > upstreamResetMs + 60000
+
+            if (upstreamResetExpired) {
+              shouldRecover = true
+              const resetTime = new Date(upstreamResetMs)
+              newWindowStart = new Date(resetTime.getTime() + 1)
+              newWindowEnd = new Date(newWindowStart.getTime() + 5 * 60 * 60 * 1000)
+              // 若旧 sessionWindowEnd 比上游 reset 还早，保留旧窗口的连续性
+              const oldEndMs = Date.parse(latestAccount.sessionWindowEnd || '')
+              if (Number.isFinite(oldEndMs) && oldEndMs < upstreamResetMs) {
+                newWindowStart = new Date(oldEndMs + 1)
+                newWindowEnd = new Date(newWindowStart.getTime() + 5 * 60 * 60 * 1000)
+              }
+              logger.info(
+                `🔄 Account ${latestAccount.name} (${latestAccount.id}) upstream 5h limit reset at ${resetTime.toISOString()}, recovering early. ` +
+                  `Old window end: ${latestAccount.sessionWindowEnd || 'none'}, ` +
+                  `New window: ${newWindowStart.toISOString()} - ${newWindowEnd.toISOString()}`
+              )
+            } else if (latestAccount.sessionWindowEnd) {
               const windowEnd = new Date(latestAccount.sessionWindowEnd)
 
               // 使用严格的时间比较，添加1分钟缓冲避免边界问题
