@@ -62,6 +62,35 @@ function respondToAllRateLimitedSchedulerError(res, error) {
     )
 }
 
+function respondToNoAccountsSchedulerError(res, error) {
+  // 账号池已空（全部封禁/未授权/停用，非临时限流或养号，不可自愈）：
+  // 回 429 + disable_channel:true，让上游 new-api 判定渠道失效并自动禁用，
+  // 避免兜底 500 使渠道保持启用、持续打到一个死池子。
+  const retryAfter = String(error.retryAfterSeconds || 30)
+  res.set('Retry-After', retryAfter)
+  res.set('retry-after', retryAfter)
+  return res
+    .status(429)
+    .type('application/json')
+    .send(
+      JSON.stringify({
+        error: {
+          type: 'rate_limit_error',
+          code: 'crs_no_available_accounts',
+          message:
+            error.message ||
+            'No Claude accounts available in pool; retry another upstream channel.',
+          metadata: {
+            source: 'claude-relay-service',
+            retryable: false,
+            disable_channel: true,
+            limit_kind: 'no_available_accounts'
+          }
+        }
+      })
+    )
+}
+
 function respondToTemporaryUnavailableSchedulerError(res, error) {
   if (
     typeof upstreamErrorHelper.isTempUnavailableSchedulerError !== 'function' ||
@@ -298,6 +327,9 @@ async function handleChatCompletion(req, res, apiKeyData) {
       }
       if (error.code === 'CLAUDE_ALL_RATE_LIMITED') {
         return respondToAllRateLimitedSchedulerError(res, error)
+      }
+      if (error.code === 'CLAUDE_NO_ACCOUNTS_AVAILABLE') {
+        return respondToNoAccountsSchedulerError(res, error)
       }
       if (claudeAccountNurtureService.isNurtureSchedulerError(error)) {
         return respondToNurtureSchedulerError(res, error)

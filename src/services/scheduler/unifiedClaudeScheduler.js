@@ -109,6 +109,17 @@ class UnifiedClaudeScheduler {
     throw error
   }
 
+  _throwNoAvailableAccountsError(detail = '') {
+    // 账号池已无任何可调度账号（被封禁/未授权/停用），且不属于临时不可用、
+    // 限流或养号护栏场景：回可重试 429，让上游 new-api 判定渠道失效并自动禁用，
+    // 避免落到兜底 500「Relay service error」导致渠道保持启用并持续失败。
+    const error = new Error(`No Claude accounts available in pool${detail ? `: ${detail}` : ''}`)
+    error.code = 'CLAUDE_NO_ACCOUNTS_AVAILABLE'
+    error.statusCode = 429
+    error.retryAfterSeconds = 30
+    throw error
+  }
+
   _shouldEvaluateAutoStoppedNurtureAccount(account, accountType = 'claude-official') {
     return (
       accountType === 'claude-official' &&
@@ -570,13 +581,14 @@ class UnifiedClaudeScheduler {
       )
 
       if (availableAccounts.length === 0) {
-        // 提供更详细的错误信息
+        // _getAllAvailableAccounts 空池时本已抛专用错误码；此处为兜底，
+        // 同样回 429（CLAUDE_NO_ACCOUNTS_AVAILABLE）而不是普通 Error 导致的 500。
         if (effectiveModel) {
-          throw new Error(
-            `No available Claude accounts support the requested model: ${effectiveModel}`
+          this._throwNoAvailableAccountsError(
+            `no account supports the requested model: ${effectiveModel}`
           )
         } else {
-          throw new Error('No available Claude accounts (neither official nor console)')
+          this._throwNoAvailableAccountsError('neither official nor console account available')
         }
       }
 
@@ -1264,7 +1276,12 @@ class UnifiedClaudeScheduler {
         )
         this._throwAllNurtureLimitedError(lastNurtureEvaluation)
       }
-      // 否则走通用的"无可用账户"错误处理（由上层 selectAccountForApiKey 捕获）
+      // 池内账号全部因封禁/未授权/停用等状态不可调度（无可恢复账号）：
+      // 抛出专用错误码，由上层回 429 让渠道自动禁用，而不是兜底 500。
+      logger.error(
+        '❌ No Claude account available in pool (all excluded by account status, e.g. unauthorized/blocked/disabled)'
+      )
+      this._throwNoAvailableAccountsError()
     }
 
     return availableAccounts
@@ -2006,7 +2023,7 @@ class UnifiedClaudeScheduler {
           )
           this._throwAllNurtureLimitedError(lastNurtureEvaluation)
         }
-        throw new Error(`No available accounts in group ${group.name}`)
+        this._throwNoAvailableAccountsError(`no schedulable member in group ${group.name}`)
       }
 
       // 使用现有的优先级排序逻辑
@@ -2075,8 +2092,8 @@ class UnifiedClaudeScheduler {
       const availableCcrAccounts = await this._getAvailableCcrAccounts(effectiveModel)
 
       if (availableCcrAccounts.length === 0) {
-        throw new Error(
-          `No available CCR accounts support the requested model: ${effectiveModel || 'unspecified'}`
+        this._throwNoAvailableAccountsError(
+          `no CCR account supports the requested model: ${effectiveModel || 'unspecified'}`
         )
       }
 

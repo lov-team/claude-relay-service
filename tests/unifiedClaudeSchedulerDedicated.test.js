@@ -163,7 +163,10 @@ describe('dedicated (bound) Claude account never silently falls back to the shar
 
     await expect(
       scheduler.selectAccountForApiKey(apiKeyData, null, 'claude-opus-4-8')
-    ).rejects.toThrow(/No available Claude accounts/)
+    ).rejects.toMatchObject({
+      code: 'CLAUDE_NO_ACCOUNTS_AVAILABLE',
+      statusCode: 429
+    })
     expect(poolSpy).toHaveBeenCalled()
 
     poolSpy.mockRestore()

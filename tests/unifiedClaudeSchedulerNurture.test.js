@@ -170,7 +170,10 @@ describe('UnifiedClaudeScheduler nurture handling for auto-stopped accounts', ()
 
     await expect(
       unifiedClaudeScheduler.selectAccountForApiKey({}, null, 'claude-sonnet-4-6')
-    ).rejects.toThrow('No available Claude accounts support the requested model')
+    ).rejects.toMatchObject({
+      code: 'CLAUDE_NO_ACCOUNTS_AVAILABLE',
+      statusCode: 429
+    })
     expect(claudeAccountNurtureService.evaluate).not.toHaveBeenCalled()
   })
 

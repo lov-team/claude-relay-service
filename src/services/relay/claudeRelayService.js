@@ -336,6 +336,39 @@ class ClaudeRelayService {
     }
   }
 
+  _buildNoAvailableAccountsResponse(error) {
+    // 账号池已无任何可调度账号（封禁/未授权/停用，非限流或养号，不可自愈）：
+    // 回 429 + disable_channel:true，让上游 new-api 判定渠道失效并自动禁用，
+    // 避免落到兜底 500 使渠道保持启用、持续打到一个死池子。
+    logger.warn(
+      `🚫 No Claude accounts available in pool (${error?.message || 'unknown'}), returning retryable 429`
+    )
+    const retryAfter = String(error?.retryAfterSeconds || 30)
+    return {
+      statusCode: 429,
+      headers: {
+        'Content-Type': 'application/json',
+        'Retry-After': retryAfter,
+        'retry-after': retryAfter
+      },
+      body: JSON.stringify({
+        error: {
+          type: 'rate_limit_error',
+          code: 'crs_no_available_accounts',
+          message:
+            error?.message ||
+            'No Claude accounts available in pool; retry another upstream channel.',
+          metadata: {
+            source: 'claude-relay-service',
+            retryable: false,
+            disable_channel: true,
+            limit_kind: 'no_available_accounts'
+          }
+        }
+      })
+    }
+  }
+
   _buildRetryableSharedPoolRateLimitResponse(accountId, limitKind = 'shared_pool') {
     logger.warn(
       `All shared Claude accounts tried for this request are temporarily rate limited; returning retryable 429`
@@ -1089,6 +1122,9 @@ class ClaudeRelayService {
         }
         if (error.code === 'CLAUDE_ALL_RATE_LIMITED') {
           return this._buildAllRateLimitedResponse(error)
+        }
+        if (error.code === 'CLAUDE_NO_ACCOUNTS_AVAILABLE') {
+          return this._buildNoAvailableAccountsResponse(error)
         }
         if (error.code === 'CLAUDE_ALL_TEMPORARILY_UNAVAILABLE') {
           return upstreamErrorHelper.buildTempUnavailableHttpResponse(error)
@@ -3074,6 +3110,18 @@ class ClaudeRelayService {
         }
         if (error.code === 'CLAUDE_ALL_RATE_LIMITED') {
           const response = this._buildAllRateLimitedResponse(error)
+          if (!responseStream.headersSent) {
+            responseStream.status(response.statusCode)
+            Object.entries(response.headers).forEach(([key, value]) => {
+              responseStream.setHeader(key, value)
+            })
+          }
+          responseStream.write(response.body)
+          responseStream.end()
+          return
+        }
+        if (error.code === 'CLAUDE_NO_ACCOUNTS_AVAILABLE') {
+          const response = this._buildNoAvailableAccountsResponse(error)
           if (!responseStream.headersSent) {
             responseStream.status(response.statusCode)
             Object.entries(response.headers).forEach(([key, value]) => {
