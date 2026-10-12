@@ -24,6 +24,7 @@ const { isStreamWritable } = require('../../utils/streamHelper')
 const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
 const metadataUserIdHelper = require('../../utils/metadataUserIdHelper')
 const { normalizeDateline } = require('../../utils/anthropicFingerprint')
+const { syncBillingHeaderVersion } = require('../../utils/claudeBillingFingerprint')
 const { normalizeClaudeSseLine } = require('../../utils/claudeStreamSanitizer')
 const {
   classifyClaudeOAuthError,
@@ -2168,6 +2169,28 @@ class ClaudeRelayService {
     // Claude API只允许temperature或top_p其中之一，优先使用temperature
     if (processedBody.top_p !== undefined && processedBody.top_p !== null) {
       delete processedBody.top_p
+    }
+
+    // 🔄 真实 Claude Code 请求且账号配置了 pinned UA 时，
+    // 把计费头里的 cc_version 抬到 pinned UA 版本并重算指纹，
+    // 避免下游对齐逻辑把 UA 降回旧版本触发上游 version_too_old。
+    // 指纹用真机同款盐值/算法重算，保证 cc_version.{fp} 仍然是一对。
+    if (isRealClaudeCode && account?.userAgentMode === 'pinned') {
+      const pinnedVersion = userAgentPoolService.extractClaudeCodeVersion(account.userAgent)
+      const billingVersion = userAgentPoolService.extractClaudeCodeVersion(
+        this._extractClaudeCodeUserAgentFromBillingHeader(processedBody)
+      )
+      if (
+        pinnedVersion &&
+        billingVersion &&
+        userAgentPoolService.compareClaudeCodeVersions(billingVersion, pinnedVersion) < 0
+      ) {
+        const before = this._extractClaudeCodeUserAgentFromBillingHeader(processedBody)
+        processedBody.system = syncBillingHeaderVersion(processedBody, pinnedVersion).system
+        logger.info(
+          `🔄 [Billing] Raised cc_version ${billingVersion} -> ${pinnedVersion} to match pinned UA (was: ${before})`
+        )
+      }
     }
 
     // 处理统一的客户端标识
