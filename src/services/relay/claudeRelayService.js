@@ -3924,6 +3924,7 @@ class ClaudeRelayService {
             `❌ Claude API returned error status: ${res.statusCode} | Account: ${account?.name || accountId}`
           )
           const errorChunks = []
+          let errorData = ''
 
           res.on('data', (chunk) => {
             errorChunks.push(chunk)
@@ -3931,7 +3932,7 @@ class ClaudeRelayService {
 
           res.on('end', async () => {
             const rawBuffer = Buffer.concat(errorChunks)
-            const errorData = this._decodeUpstreamBody(rawBuffer, res.headers['content-encoding'])
+            errorData = this._decodeUpstreamBody(rawBuffer, res.headers['content-encoding'])
             logger.error(`❌ Claude API error response (Account: ${account?.name || accountId}):`, {
               statusCode: res.statusCode,
               encoding: res.headers['content-encoding'] || 'identity',
