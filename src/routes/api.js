@@ -1532,9 +1532,18 @@ async function handleMessagesRequest(req, res) {
       }
     }
 
-    logger.error('❌ Claude relay error:', handledError.message, {
-      code: handledError.code,
-      stack: handledError.stack
+    // 兜底归一化：handledError 可能是非 Error 值（字符串、undefined 等），
+    // 直接用其 .message/.includes 会打空白日志甚至二次崩溃
+    const handledErrorMessage =
+      handledError instanceof Error
+        ? handledError.message
+        : typeof handledError === 'string'
+          ? handledError
+          : handledError?.message || JSON.stringify(handledError) || 'Unknown relay error'
+
+    logger.error('❌ Claude relay error:', handledErrorMessage, {
+      code: handledError?.code,
+      stack: handledError?.stack
     })
 
     // 确保在任何情况下都能返回有效的JSON响应
@@ -1544,20 +1553,20 @@ async function handleMessagesRequest(req, res) {
       let errorType = 'Relay service error'
 
       if (
-        handledError.message.includes('Connection reset') ||
-        handledError.message.includes('socket hang up')
+        handledErrorMessage.includes('Connection reset') ||
+        handledErrorMessage.includes('socket hang up')
       ) {
         statusCode = 502
         errorType = 'Upstream connection error'
-      } else if (handledError.message.includes('Connection refused')) {
+      } else if (handledErrorMessage.includes('Connection refused')) {
         statusCode = 502
         errorType = 'Upstream service unavailable'
-      } else if (handledError.message.includes('timeout')) {
+      } else if (handledErrorMessage.includes('timeout')) {
         statusCode = 504
         errorType = 'Upstream timeout'
       } else if (
-        handledError.message.includes('resolve') ||
-        handledError.message.includes('ENOTFOUND')
+        handledErrorMessage.includes('resolve') ||
+        handledErrorMessage.includes('ENOTFOUND')
       ) {
         statusCode = 502
         errorType = 'Upstream hostname resolution failed'
@@ -1565,7 +1574,7 @@ async function handleMessagesRequest(req, res) {
 
       return res.status(statusCode).json({
         error: errorType,
-        message: handledError.message || 'An unexpected error occurred',
+        message: handledErrorMessage || 'An unexpected error occurred',
         timestamp: new Date().toISOString()
       })
     } else {
