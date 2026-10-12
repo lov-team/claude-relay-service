@@ -932,6 +932,31 @@ router.post('/claude-accounts/:accountId/refresh', authenticateAdmin, async (req
   }
 })
 
+// 手动刷新Claude账户上游 Usage 状态（拉取 OAuth usage 并更新缓存快照）
+router.post('/claude-accounts/:accountId/refresh-usage', authenticateAdmin, async (req, res) => {
+  try {
+    const { accountId } = req.params
+
+    const usageData = await claudeAccountService.fetchOAuthUsage(accountId)
+    if (!usageData) {
+      return res.status(502).json({
+        error: 'Failed to refresh usage',
+        message: 'Upstream usage fetch returned no data (account may use Setup Token or OAuth is unauthorized)'
+      })
+    }
+
+    await claudeAccountService.updateClaudeUsageSnapshot(accountId, usageData)
+    const updatedAccount = await redis.getClaudeAccount(accountId)
+    const claudeUsage = claudeAccountService.buildClaudeUsageSnapshot(updatedAccount)
+
+    logger.success(`🔄 Admin refreshed usage for Claude account: ${accountId}`)
+    return res.json({ success: true, data: { accountId, claudeUsage, usage: usageData } })
+  } catch (error) {
+    logger.error('❌ Failed to refresh Claude account usage:', error)
+    return res.status(500).json({ error: 'Failed to refresh usage', message: error.message })
+  }
+})
+
 // 重置Claude账户状态（清除所有异常状态）
 router.post('/claude-accounts/:accountId/reset-status', authenticateAdmin, async (req, res) => {
   try {

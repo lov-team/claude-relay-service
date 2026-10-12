@@ -1387,6 +1387,30 @@
                       <span class="ml-1">重置状态</span>
                     </button>
                     <button
+                      v-if="showRefreshUsageButton(account)"
+                      :class="[
+                        'rounded px-2.5 py-1 text-xs font-medium transition-colors',
+                        account.isRefreshingUsage
+                          ? 'cursor-not-allowed bg-gray-100 text-gray-400'
+                          : 'bg-teal-100 text-teal-700 hover:bg-teal-200 dark:bg-teal-900/40 dark:text-teal-300 dark:hover:bg-teal-800/50'
+                      ]"
+                      :disabled="account.isRefreshingUsage"
+                      :title="
+                        account.isRefreshingUsage
+                          ? '刷新中...'
+                          : '从上游重新拉取用量状态（重置卡生效后使用）'
+                      "
+                      @click="refreshAccountUsage(account)"
+                    >
+                      <i
+                        :class="[
+                          'fas fa-sync-alt',
+                          account.isRefreshingUsage ? 'animate-spin' : ''
+                        ]"
+                      />
+                      <span class="ml-1">刷新状态</span>
+                    </button>
+                    <button
                       :class="[
                         'rounded px-2.5 py-1 text-xs font-medium transition-colors',
                         account.isTogglingSchedulable
@@ -1955,6 +1979,15 @@
             >
               <i :class="['fas fa-redo', account.isResetting ? 'animate-spin' : '']" />
               重置
+            </button>
+            <button
+              v-if="showRefreshUsageButton(account)"
+              class="flex flex-1 items-center justify-center gap-1 rounded-lg bg-teal-50 px-3 py-2 text-xs text-teal-700 transition-colors hover:bg-teal-100 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-teal-900/40 dark:text-teal-300 dark:hover:bg-teal-800/50"
+              :disabled="account.isRefreshingUsage"
+              @click="refreshAccountUsage(account)"
+            >
+              <i :class="['fas fa-sync-alt', account.isRefreshingUsage ? 'animate-spin' : '']" />
+              刷新状态
             </button>
             <button
               class="flex flex-1 items-center justify-center gap-1 rounded-lg px-3 py-2 text-xs transition-colors"
@@ -2748,6 +2781,9 @@ const showResetButton = (account) => {
   )
 }
 
+// 判断是否显示刷新状态按钮（目前仅 Claude OAuth 账户支持）
+const showRefreshUsageButton = (account) => account && account.platform === 'claude'
+
 // 获取账户操作菜单项（用于小屏下拉菜单）
 const getAccountActions = (account) => {
   const actions = []
@@ -2760,6 +2796,17 @@ const getAccountActions = (account) => {
       icon: 'fa-redo',
       color: 'orange',
       handler: () => resetAccountStatus(account)
+    })
+  }
+
+  // 刷新状态（拉取上游用量快照）
+  if (showRefreshUsageButton(account)) {
+    actions.push({
+      key: 'refresh-usage',
+      label: '刷新状态',
+      icon: 'fa-sync-alt',
+      color: 'teal',
+      handler: () => refreshAccountUsage(account)
     })
   }
 
@@ -4305,6 +4352,32 @@ const resetAccountStatus = async (account) => {
   } catch (error) {
     showToast(error.message || '状态重置失败', 'error')
     account.isResetting = false
+  }
+}
+
+// 刷新账户状态（从上游重新拉取用量快照，如重置卡生效后使用）
+const refreshAccountUsage = async (account) => {
+  if (account.isRefreshingUsage) return
+
+  try {
+    account.isRefreshingUsage = true
+    const data = await httpApis.refreshClaudeAccountUsageApi(account.id)
+    if (data.success) {
+      const sevenDay = data.data?.claudeUsage?.sevenDay?.utilization
+      const fiveHour = data.data?.claudeUsage?.fiveHour?.utilization
+      const detail =
+        sevenDay !== null && sevenDay !== undefined
+          ? `5h=${fiveHour ?? '-'}% / 7d=${sevenDay}%`
+          : ''
+      showToast(`状态已刷新${detail ? `（${detail}）` : ''}`, 'success')
+      loadAccounts(true)
+    } else {
+      showToast(data.message || '状态刷新失败', 'error')
+    }
+    account.isRefreshingUsage = false
+  } catch (error) {
+    showToast(error.message || '状态刷新失败', 'error')
+    account.isRefreshingUsage = false
   }
 }
 
