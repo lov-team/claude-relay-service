@@ -4,12 +4,14 @@
 // which made it nearly impossible to diagnose in production.
 
 const mockSetex = jest.fn(async () => 'OK')
+const mockSetClaudeAccount = jest.fn(async () => ({}))
 const mockDel = jest.fn(async () => 1)
 const mockHgetall = jest.fn(async () => ({}))
 const mockGet = jest.fn(async () => null)
 const mockTtl = jest.fn(async () => -2)
 
 jest.mock('../src/models/redis', () => ({
+  setClaudeAccount: (...args) => mockSetClaudeAccount(...args),
   getClientSafe: () => ({
     setex: mockSetex,
     del: mockDel,
@@ -40,14 +42,10 @@ describe('markTempUnavailable clamps upstream retry-after', () => {
     jest.clearAllMocks()
   })
 
-  it('clamps a weekly-scale retry-after (5.1 days) to the 30 minute cap', async () => {
+  it('clamps a weekly-scale retry-after (5.1 days) to the 30 minute cap when the account is unknown', async () => {
+    // 拿不到账户哈希时无法写 fiveHourAutoStopped，退回钳制后的 temp_unavailable
     await upstreamErrorHelper.markTempUnavailable(ACCOUNT, TYPE, 429, 443300)
     expect(mockSetex).toHaveBeenCalledTimes(1)
-    expect(ttlPassedToSetex()).toBe(1800)
-  })
-
-  it('clamps the other observed value (4.2 days) too', async () => {
-    await upstreamErrorHelper.markTempUnavailable(ACCOUNT, TYPE, 429, 360117)
     expect(ttlPassedToSetex()).toBe(1800)
   })
 
@@ -87,6 +85,78 @@ describe('markTempUnavailable clamps upstream retry-after', () => {
         retry_at: '2026-09-01T00:00:07.000Z'
       })
     )
+  })
+})
+
+describe('long upstream cooldown (>1h) marks account unschedulable', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockHgetall.mockResolvedValue({ name: 'acct-1', schedulable: 'true' })
+  })
+  afterEach(() => {
+    mockHgetall.mockResolvedValue({})
+  })
+
+  it('stops scheduling instead of writing a temp_unavailable key', async () => {
+    const result = await upstreamErrorHelper.markTempUnavailable(ACCOUNT, TYPE, 429, 360117)
+    expect(result).toEqual(
+      expect.objectContaining({ success: true, skipped: true, reason: 'long_cooldown_unschedulable' })
+    )
+    const update = mockSetClaudeAccount.mock.calls[0][1]
+    expect(update).toEqual(
+      expect.objectContaining({
+        schedulable: 'false',
+        fiveHourAutoStopped: 'true',
+        stoppedReason: '5小时使用量接近限制，已自动停止调度'
+      })
+    )
+    // 精准恢复：窗口结束被推进到冷却结束时刻，恢复任务据此到期拉起
+    expect(Date.parse(update.sessionWindowEnd)).toBeGreaterThanOrEqual(
+      Date.now() + 360117 * 1000 - 5000
+    )
+    expect(mockSetex).not.toHaveBeenCalled()
+  })
+
+  it('keeps a later existing window end and never moves it backwards', async () => {
+    const futureEnd = new Date(Date.now() + 200 * 3600 * 1000).toISOString() // 比 360117s(~100h) 更晚
+    mockHgetall.mockResolvedValue({
+      name: 'acct-1',
+      schedulable: 'true',
+      sessionWindowStart: '2026-09-01T00:00:00.000Z',
+      sessionWindowEnd: futureEnd
+    })
+    await upstreamErrorHelper.markTempUnavailable(ACCOUNT, TYPE, 429, 360117)
+    const update = mockSetClaudeAccount.mock.calls[0][1]
+    expect(update.sessionWindowEnd).toBeUndefined()
+    expect(update.schedulable).toBe('false')
+  })
+
+  it('respects the account-level auto-protection opt-out', async () => {
+    mockHgetall.mockResolvedValue({ name: 'acct-1', disableAutoProtection: 'true' })
+    const result = await upstreamErrorHelper.markTempUnavailable(ACCOUNT, TYPE, 429, 360117)
+    expect(result.ttlSeconds).toBe(1800)
+    expect(mockSetClaudeAccount).not.toHaveBeenCalled()
+    expect(mockSetex).toHaveBeenCalledTimes(1)
+  })
+
+  it('leaves non-claude account types on the clamped cooldown path', async () => {
+    await upstreamErrorHelper.markTempUnavailable(ACCOUNT, 'azure-openai', 429, 360117)
+    expect(mockSetClaudeAccount).not.toHaveBeenCalled()
+    expect(ttlPassedToSetex()).toBe(1800)
+  })
+
+  it('keeps a retry-after just under the threshold on the cooldown path', async () => {
+    await upstreamErrorHelper.markTempUnavailable(ACCOUNT, TYPE, 429, 3599)
+    expect(mockSetClaudeAccount).not.toHaveBeenCalled()
+    expect(ttlPassedToSetex()).toBe(1800)
+  })
+
+  it('is a no-op for an already auto-stopped account', async () => {
+    mockHgetall.mockResolvedValue({ name: 'acct-1', schedulable: 'false', fiveHourAutoStopped: 'true' })
+    const result = await upstreamErrorHelper.markTempUnavailable(ACCOUNT, TYPE, 429, 360117)
+    expect(result.reason).toBe('long_cooldown_unschedulable')
+    expect(mockSetClaudeAccount).not.toHaveBeenCalled()
+    expect(mockSetex).not.toHaveBeenCalled()
   })
 })
 
@@ -136,9 +206,13 @@ describe('nurture-aware upstream 429 temporary cooldown', () => {
     expect(
       (await upstreamErrorHelper.markTempUnavailable(ACCOUNT, TYPE, 429, 600)).ttlSeconds
     ).toBe(600)
-    expect(
-      (await upstreamErrorHelper.markTempUnavailable(ACCOUNT, TYPE, 429, 443300)).ttlSeconds
-    ).toBe(1800)
+    // 周级冷却（>1h）不再落在 temp_unavailable：账号直接转为不可调度
+    const longCooldown = await upstreamErrorHelper.markTempUnavailable(ACCOUNT, TYPE, 429, 443300)
+    expect(longCooldown.reason).toBe('long_cooldown_unschedulable')
+    expect(mockSetClaudeAccount).toHaveBeenCalledWith(
+      ACCOUNT,
+      expect.objectContaining({ schedulable: 'false', fiveHourAutoStopped: 'true' })
+    )
   })
 
   test('uses the configured Pro early-day cooldown', async () => {

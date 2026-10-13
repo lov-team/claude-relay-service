@@ -63,7 +63,9 @@ function respondToAllRateLimitedSchedulerError(res, error) {
             source: 'claude-relay-service',
             retryable: true,
             disable_channel: false,
-            limit_kind: 'rate_limit'
+            limit_kind: 'rate_limit',
+            retry_after_seconds: error.retryAfterSeconds || 30,
+            retry_at: error.retryAt || null
           }
         }
       })

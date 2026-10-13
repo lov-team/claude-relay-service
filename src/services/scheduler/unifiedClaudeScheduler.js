@@ -97,16 +97,51 @@ class UnifiedClaudeScheduler {
     throw error
   }
 
-  _throwAllRateLimitedError({ nurtureBlockedCount = 0, nonNurtureExcludedCount = 0 } = {}) {
+  _throwAllRateLimitedError({
+    nurtureBlockedCount = 0,
+    nonNurtureExcludedCount = 0,
+    earliestRecoveryAtMs = null
+  } = {}) {
     const error = new Error(
       'All eligible Claude accounts are temporarily rate limited or waiting to recover'
     )
     error.code = 'CLAUDE_ALL_RATE_LIMITED'
     error.statusCode = 429
-    error.retryAfterSeconds = 30
+    // 精准恢复：Retry-After 取「最快恢复的账号」的剩余冷却，让上游 new-api
+    // 按真实到期时间冷却渠道，而不是固定猜一个窗口。
+    if (Number.isFinite(earliestRecoveryAtMs) && earliestRecoveryAtMs > Date.now()) {
+      error.retryAfterSeconds = Math.ceil((earliestRecoveryAtMs - Date.now()) / 1000)
+      error.retryAt = new Date(earliestRecoveryAtMs).toISOString()
+    } else {
+      error.retryAfterSeconds = 30
+      error.retryAt = null
+    }
     error.nurtureBlockedCount = nurtureBlockedCount
     error.nonNurtureExcludedCount = nonNurtureExcludedCount
     throw error
+  }
+
+  // 账号可恢复原因对应的恢复时刻（毫秒）。用于向 429 响应提供
+  // 「最快恢复的账号」的精准 Retry-After。
+  _accountRecoverableUntilMs(account, { family = null } = {}) {
+    if (!account) {
+      return null
+    }
+    const candidates = []
+    if (account.rateLimitAutoStopped === 'true' || account.rateLimitAutoStopped === true) {
+      candidates.push(Date.parse(account.rateLimitEndAt || ''))
+    }
+    if (account.fiveHourAutoStopped === 'true' || account.fiveHourAutoStopped === true) {
+      candidates.push(Date.parse(account.sessionWindowEnd || ''))
+    }
+    if (family) {
+      candidates.push(Date.parse(account[`${family}RateLimitEndAt`] || ''))
+    } else {
+      candidates.push(Date.parse(account.rateLimitEndAt || ''))
+    }
+    const now = Date.now()
+    const valid = candidates.filter((ms) => Number.isFinite(ms) && ms > now)
+    return valid.length ? Math.min(...valid) : null
   }
 
   _throwNoAvailableAccountsError(detail = '') {
@@ -640,6 +675,13 @@ class UnifiedClaudeScheduler {
     let nonNurtureExcludedCount = 0
     let minTemporaryUnavailableSeconds = null
     let minTemporaryUnavailableUntil = null
+    // 「最快恢复的账号」的恢复时刻（毫秒），用于向 429 提供精准 Retry-After
+    let earliestRecoveryAtMs = null
+    const trackRecoverableUntil = (untilMs) => {
+      if (Number.isFinite(untilMs) && (earliestRecoveryAtMs === null || untilMs < earliestRecoveryAtMs)) {
+        earliestRecoveryAtMs = untilMs
+      }
+    }
     // 请求模型所属的限流家族（opus/sonnet/haiku/fable）
     const requestedModelFamily = getRateLimitModelFamily(requestedModel)
 
@@ -829,6 +871,7 @@ class UnifiedClaudeScheduler {
           if (account.rateLimitAutoStopped === 'true' || account.rateLimitAutoStopped === true) {
             // auto-stopped by upstream rate limit: recoverable, not a nurture block
             nonNurtureExcludedCount += 1
+            trackRecoverableUntil(this._accountRecoverableUntilMs(account))
             logger.debug(
               'auto-stopped by rate limit, waiting for reset: ' +
                 account.name +
@@ -836,6 +879,9 @@ class UnifiedClaudeScheduler {
                 account.id +
                 ')'
             )
+          } else if (account.fiveHourAutoStopped === 'true' || account.fiveHourAutoStopped === true) {
+            // auto-stopped by 5h/long-cooldown guard: recoverable at sessionWindowEnd
+            trackRecoverableUntil(this._accountRecoverableUntilMs(account))
           }
           continue
         }
@@ -867,6 +913,7 @@ class UnifiedClaudeScheduler {
         const isRateLimited = await claudeAccountService.isAccountRateLimited(account.id)
         if (isRateLimited) {
           nonNurtureExcludedCount += 1
+          trackRecoverableUntil(this._accountRecoverableUntilMs(account))
           continue
         }
 
@@ -886,6 +933,7 @@ class UnifiedClaudeScheduler {
           // nurture evaluation already passed but the account is still auto-stopped;
           // it is recoverable, so it must not be attributed to the nurture guard
           nonNurtureExcludedCount += 1
+          trackRecoverableUntil(this._accountRecoverableUntilMs(account))
           continue
         }
 
@@ -896,6 +944,7 @@ class UnifiedClaudeScheduler {
           )
           if (isModelRateLimited) {
             nonNurtureExcludedCount += 1
+            trackRecoverableUntil(this._accountRecoverableUntilMs(account, { family: requestedModelFamily }))
             logger.info(
               `🚫 Skipping account ${account.name} (${account.id}) due to active ${requestedModelFamily} limit`
             )
@@ -1268,7 +1317,7 @@ class UnifiedClaudeScheduler {
         logger.error(
           `❌ No Claude account available: ${nurtureBlockedCount} nurture-blocked, ${nonNurtureExcludedCount} excluded by recoverable limits`
         )
-        this._throwAllRateLimitedError({ nurtureBlockedCount, nonNurtureExcludedCount })
+        this._throwAllRateLimitedError({ nurtureBlockedCount, nonNurtureExcludedCount, earliestRecoveryAtMs })
       }
       if (nurtureBlockedCount > 0) {
         logger.error(
@@ -1848,6 +1897,13 @@ class UnifiedClaudeScheduler {
       let nonNurtureExcludedCount = 0
       let minTemporaryUnavailableSeconds = null
       let minTemporaryUnavailableUntil = null
+      // 「最快恢复的账号」的恢复时刻（毫秒），用于向 429 提供精准 Retry-After
+      let earliestRecoveryAtMs = null
+      const trackRecoverableUntil = (untilMs) => {
+        if (Number.isFinite(untilMs) && (earliestRecoveryAtMs === null || untilMs < earliestRecoveryAtMs)) {
+          earliestRecoveryAtMs = untilMs
+        }
+      }
       // 请求模型所属的限流家族（opus/sonnet/haiku/fable）
       const requestedModelFamily = getRateLimitModelFamily(requestedModel)
 
@@ -1918,6 +1974,9 @@ class UnifiedClaudeScheduler {
             if (account.rateLimitAutoStopped === 'true' || account.rateLimitAutoStopped === true) {
               // auto-stopped by upstream rate limit: recoverable, not a nurture block
               nonNurtureExcludedCount += 1
+              trackRecoverableUntil(this._accountRecoverableUntilMs(account))
+            } else if (account.fiveHourAutoStopped === 'true' || account.fiveHourAutoStopped === true) {
+              trackRecoverableUntil(this._accountRecoverableUntilMs(account))
             }
             continue
           }
@@ -1946,6 +2005,7 @@ class UnifiedClaudeScheduler {
           const isRateLimited = await this.isAccountRateLimited(account.id, accountType)
           if (isRateLimited) {
             nonNurtureExcludedCount += 1
+            trackRecoverableUntil(this._accountRecoverableUntilMs(account))
             continue
           }
 
@@ -1964,6 +2024,7 @@ class UnifiedClaudeScheduler {
           if (!isSchedulable(account.schedulable)) {
             // nurture evaluation already passed but still auto-stopped: recoverable
             nonNurtureExcludedCount += 1
+            trackRecoverableUntil(this._accountRecoverableUntilMs(account))
             continue
           }
 
@@ -1974,6 +2035,7 @@ class UnifiedClaudeScheduler {
             )
             if (isModelRateLimited) {
               nonNurtureExcludedCount += 1
+              trackRecoverableUntil(this._accountRecoverableUntilMs(account, { family: requestedModelFamily }))
               logger.info(
                 `🚫 Skipping group member ${account.name} (${account.id}) due to active ${requestedModelFamily} limit`
               )
@@ -2015,7 +2077,7 @@ class UnifiedClaudeScheduler {
           logger.error(
             `❌ No available member in group ${group.name}: ${nurtureBlockedCount} nurture-blocked, ${nonNurtureExcludedCount} excluded by recoverable limits`
           )
-          this._throwAllRateLimitedError({ nurtureBlockedCount, nonNurtureExcludedCount })
+          this._throwAllRateLimitedError({ nurtureBlockedCount, nonNurtureExcludedCount, earliestRecoveryAtMs })
         }
         if (nurtureBlockedCount > 0) {
           logger.error(

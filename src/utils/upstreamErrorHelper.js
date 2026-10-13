@@ -6,6 +6,13 @@ const ERROR_HISTORY_PREFIX = 'error_history'
 const ERROR_HISTORY_MAX = 5000
 const ERROR_HISTORY_TTL = 3 * 24 * 60 * 60 // 3天
 
+// 上游冷却超过该时长（秒）时，账号不再走 temp_unavailable 短冷却，
+// 直接落到「不可调度」状态（复用 fiveHourAutoStopped 路径，与
+// 「5小时使用量接近限制，已自动停止调度」一致）。
+// sessionWindowEnd 被推进到冷却结束时刻，后台恢复任务据此在冷却结束后
+// 自动拉起账号（+1 分钟缓冲），实现按上游承诺时间的精准恢复。
+const LONG_COOLDOWN_UNSCHEDULABLE_SECONDS = 3600
+
 // 默认 TTL（秒）
 const DEFAULT_TTL = {
   server_error: 300, // 5xx: 5分钟
@@ -328,10 +335,10 @@ const markTempUnavailable = async (
 
     const ttlConfig = getTtlConfig()
     const parsedCustomTtl = Number(customTtl)
+    const requestedTtl = Number.isFinite(parsedCustomTtl) && parsedCustomTtl > 0 ? Math.ceil(parsedCustomTtl) : 0
     let ttlSeconds
-    if (Number.isFinite(parsedCustomTtl) && parsedCustomTtl > 0) {
+    if (requestedTtl > 0) {
       // 上游 retry-after 可能是周级限额（数天），必须钳制，否则账号会被长时间下线
-      const requestedTtl = Math.ceil(parsedCustomTtl)
       ttlSeconds = Math.min(requestedTtl, ttlConfig.max_custom)
       if (ttlSeconds < requestedTtl) {
         logger.warn(
@@ -340,6 +347,27 @@ const markTempUnavailable = async (
       }
     } else {
       ttlSeconds = ttlConfig[errorType]
+    }
+
+    // 上游要求的长冷却（>1小时）不适合 temp_unavailable：key 钳到 30 分钟后
+    // 账号会提前回到流量池继续打满额账号。直接把账号打为不可调度，复用
+    // fiveHourAutoStopped 的既有展示/恢复路径（5小时使用量接近限制，已自动停止调度）。
+    if (requestedTtl > LONG_COOLDOWN_UNSCHEDULABLE_SECONDS) {
+      const stopped = await markAccountUnschedulableForLongCooldown(
+        accountId,
+        accountType,
+        statusCode,
+        requestedTtl,
+        policy.accountData
+      )
+      if (stopped) {
+        return {
+          success: true,
+          skipped: true,
+          reason: 'long_cooldown_unschedulable',
+          requestedTtl
+        }
+      }
     }
     if (
       Number.isFinite(policyDecision.ttlOverrideSeconds) &&
@@ -398,6 +426,85 @@ const markTempUnavailable = async (
       error
     )
     return { success: false }
+  }
+}
+
+// 将长冷却账号标记为不可调度（复用 fiveHourAutoStopped 路径）。
+// 仅支持 claude 账户哈希；其他账号类型没有该字段约定，跳过并走钳制冷却。
+const markAccountUnschedulableForLongCooldown = async (
+  accountId,
+  accountType,
+  statusCode,
+  requestedTtl,
+  accountData
+) => {
+  if (accountType !== 'claude-official' && accountType !== 'claude') {
+    return false
+  }
+  if (!accountData || Object.keys(accountData).length === 0) {
+    return false
+  }
+  if (
+    accountData.disableAutoProtection === true ||
+    accountData.disableAutoProtection === 'true'
+  ) {
+    logger.info(
+      `🛡️ [UpstreamError] Account ${accountData.name || accountId} (${accountId}) has auto-protection disabled, skipping long-cooldown unschedulable`
+    )
+    return false
+  }
+  if (accountData.schedulable === 'false' && accountData.fiveHourAutoStopped === 'true') {
+    logger.debug(
+      `⏭️ [UpstreamError] Account ${accountId} already auto-stopped, skipping long-cooldown unschedulable`
+    )
+    return true
+  }
+  try {
+    const redis = getRedis()
+    const until = new Date(Date.now() + requestedTtl * 1000)
+    const untilIso = until.toISOString()
+    const update = {
+      schedulable: 'false',
+      fiveHourAutoStopped: 'true',
+      fiveHourStoppedAt: new Date().toISOString(),
+      stoppedReason: '5小时使用量接近限制，已自动停止调度'
+    }
+    // 精准恢复：把会话窗口结束时间推进到上游冷却结束时刻。
+    // checkAndRecoverFiveHourStoppedAccounts 只认 sessionWindowEnd（+60s 缓冲）
+    // 作为到期信号；旧窗口结束时间若晚于冷却结束，保留旧值不动。
+    const oldEndMs = Date.parse(accountData.sessionWindowEnd || '')
+    if (!Number.isFinite(oldEndMs) || oldEndMs < until.getTime()) {
+      update.sessionWindowEnd = untilIso
+      if (!accountData.sessionWindowStart) {
+        update.sessionWindowStart = new Date(until.getTime() - 5 * 60 * 60 * 1000).toISOString()
+      }
+    }
+    const stoppedReason = update.stoppedReason
+    await redis.setClaudeAccount(accountId, update)
+    logger.warn(
+      `🚫 [UpstreamError] Account ${accountData.name || accountId} (${accountId}) unschedulable: upstream cooldown ${requestedTtl}s (${statusCode}) exceeds ${LONG_COOLDOWN_UNSCHEDULABLE_SECONDS}s, recovers at ${untilIso}`
+    )
+    try {
+      const webhookNotifier = require('./webhookNotifier')
+      await webhookNotifier.sendAccountAnomalyNotification({
+        accountId,
+        accountName: accountData.name || 'Claude Account',
+        platform: 'claude',
+        status: 'warning',
+        errorCode: 'CLAUDE_LONG_COOLDOWN_STOPPED',
+        reason: stoppedReason,
+        timestamp: new Date().toISOString()
+      })
+    } catch (webhookError) {
+      logger.error('Failed to send long-cooldown webhook notification:', webhookError)
+    }
+    return true
+  } catch (error) {
+    logger.error(
+      `❌ [UpstreamError] Failed to mark account ${accountId} unschedulable for long cooldown:`,
+      error
+    )
+    return false
   }
 }
 
