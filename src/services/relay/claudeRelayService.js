@@ -862,6 +862,92 @@ class ClaudeRelayService {
     return { success: true }
   }
 
+  // 「非用量窗口」429 的兜底确认：上游 429 时经常缺 5h/7d-status 头，
+  // 且 unified-reset 偶发返回账单/日历边界（如 2026-11-01），
+  // _shouldSkipLongCapRateLimit 会把真实的额度耗尽 429 误判成非限流，
+  // 只给短冷却，导致打满额账号反复回池被继续打。
+  // 这里对 claude-official 调一次权威的 OAuth usage 接口：
+  //   - 5h 用量 ≥99% 且有未来 resets_at → 返回其秒级时间戳（按 5h 停调度）
+  //   - 否则 7d 用量 ≥99% 且有未来 resets_at → 返回其秒级时间戳（按 7d 停调度）
+  //   - 都不是（extra usage / overage 等）→ 返回 null，由调用方回退短冷却
+  async _resolveUsageCapResetTimestamp(accountId, accountType) {
+    if (accountType !== 'claude-official') {
+      return null
+    }
+    try {
+      const usageData = await claudeAccountService.fetchOAuthUsage(accountId)
+      if (usageData) {
+        await claudeAccountService.updateClaudeUsageSnapshot(accountId, usageData)
+      }
+      if (!usageData) {
+        return null
+      }
+      const candidates = [
+        { label: '5h', window: usageData.five_hour },
+        { label: '7d', window: usageData.seven_day }
+      ]
+      for (const { label, window } of candidates) {
+        const utilization = Number(window?.utilization)
+        if (!Number.isFinite(utilization) || utilization < 99) {
+          continue
+        }
+        const resetMs = Date.parse(window?.resets_at || '')
+        if (Number.isFinite(resetMs) && resetMs > Date.now()) {
+          logger.warn(
+            `🚫 Account ${accountId} 429 confirmed by OAuth usage: ${label} utilization=${utilization}%, resets at ${new Date(resetMs).toISOString()}`
+          )
+          return Math.floor(resetMs / 1000)
+        }
+        logger.warn(
+          `⚠️ Account ${accountId} ${label} utilization=${utilization}% but no future resets_at; skipping usage-cap fallback`
+        )
+      }
+    } catch (error) {
+      logger.warn(
+        `Failed to confirm usage cap for account ${accountId}: ${error.message}; falling back to short cooldown`
+      )
+    }
+    return null
+  }
+
+  // 「非用量窗口」429 的统一入口：先用 OAuth usage 权威确认是否额度耗尽，
+  // 耗尽 → 按真实 resets_at 停调度（自动恢复）；否则走原有的短冷却。
+  async _applyNonQuotaRateLimitCooldown(
+    accountId,
+    accountType,
+    sessionHash,
+    context = '',
+    headers = null
+  ) {
+    const usageResetTimestamp = await this._resolveUsageCapResetTimestamp(
+      accountId,
+      accountType
+    )
+    if (usageResetTimestamp) {
+      await unifiedClaudeScheduler.markAccountRateLimited(
+        accountId,
+        accountType,
+        sessionHash,
+        usageResetTimestamp
+      )
+      await upstreamErrorHelper
+        .markTempUnavailable(
+          accountId,
+          accountType,
+          429,
+          upstreamErrorHelper.parseRetryAfter(headers)
+        )
+        .catch(() => {})
+      return { success: true, usageCapConfirmed: true }
+    }
+    return await this._applyNoResetRateLimitCooldown(
+      accountId,
+      accountType,
+      sessionHash,
+      context
+    )
+  }
+
   _toPascalCaseToolName(name) {
     const parts = name.split(/[_-]/).filter(Boolean)
     if (parts.length === 0) {
@@ -1581,13 +1667,14 @@ class ClaudeRelayService {
             const parsedResetTimestamp = resetHeader ? parseInt(resetHeader, 10) : NaN
             if (this._shouldSkipLongCapRateLimit(response.headers, parsedResetTimestamp)) {
               logger.warn(
-                `⚠️ [Non-Stream] 429 for account ${accountId} is not a usage-window cap (5h=${this._getUnifiedRateLimitStatus(response.headers, '5h') || 'missing'}, 7d=${this._getUnifiedRateLimitStatus(response.headers, '7d') || 'missing'}, reset=${Number.isNaN(parsedResetTimestamp) ? 'missing' : new Date(parsedResetTimestamp * 1000).toISOString()}); applying short cooldown`
+                `⚠️ [Non-Stream] 429 for account ${accountId} is not a usage-window cap (5h=${this._getUnifiedRateLimitStatus(response.headers, '5h') || 'missing'}, 7d=${this._getUnifiedRateLimitStatus(response.headers, '7d') || 'missing'}, reset=${Number.isNaN(parsedResetTimestamp) ? 'missing' : new Date(parsedResetTimestamp * 1000).toISOString()}); checking OAuth usage before cooldown`
               )
-              await this._applyNoResetRateLimitCooldown(
+              await this._applyNonQuotaRateLimitCooldown(
                 accountId,
                 accountType,
                 sessionHash,
-                'Non-quota 429'
+                'Non-quota 429',
+                response.headers
               )
             } else if (
               requestModelFamily &&
@@ -3582,13 +3669,14 @@ class ClaudeRelayService {
 
             if (this._shouldSkipLongCapRateLimit(res.headers, parsedResetTimestamp)) {
               logger.warn(
-                `⚠️ [Stream] 429 for account ${accountId} is not a usage-window cap (5h=${this._getUnifiedRateLimitStatus(res.headers, '5h') || 'missing'}, 7d=${this._getUnifiedRateLimitStatus(res.headers, '7d') || 'missing'}, reset=${Number.isNaN(parsedResetTimestamp) ? 'missing' : new Date(parsedResetTimestamp * 1000).toISOString()}); applying short cooldown`
+                `⚠️ [Stream] 429 for account ${accountId} is not a usage-window cap (5h=${this._getUnifiedRateLimitStatus(res.headers, '5h') || 'missing'}, 7d=${this._getUnifiedRateLimitStatus(res.headers, '7d') || 'missing'}, reset=${Number.isNaN(parsedResetTimestamp) ? 'missing' : new Date(parsedResetTimestamp * 1000).toISOString()}); checking OAuth usage before cooldown`
               )
-              await this._applyNoResetRateLimitCooldown(
+              await this._applyNonQuotaRateLimitCooldown(
                 accountId,
                 accountType,
                 sessionHash,
-                'Non-quota stream 429'
+                'Non-quota stream 429',
+                res.headers
               )
             } else if (
               requestModelFamily &&
@@ -4454,13 +4542,14 @@ class ClaudeRelayService {
 
             if (this._shouldSkipLongCapRateLimit(res.headers, parsedResetTimestamp)) {
               logger.warn(
-                `⚠️ [Stream-end] 429 for account ${accountId} is not a usage-window cap (5h=${this._getUnifiedRateLimitStatus(res.headers, '5h') || 'missing'}, 7d=${this._getUnifiedRateLimitStatus(res.headers, '7d') || 'missing'}, reset=${Number.isNaN(parsedResetTimestamp) ? 'missing' : new Date(parsedResetTimestamp * 1000).toISOString()}); applying short cooldown`
+                `⚠️ [Stream-end] 429 for account ${accountId} is not a usage-window cap (5h=${this._getUnifiedRateLimitStatus(res.headers, '5h') || 'missing'}, 7d=${this._getUnifiedRateLimitStatus(res.headers, '7d') || 'missing'}, reset=${Number.isNaN(parsedResetTimestamp) ? 'missing' : new Date(parsedResetTimestamp * 1000).toISOString()}); checking OAuth usage before cooldown`
               )
-              await this._applyNoResetRateLimitCooldown(
+              await this._applyNonQuotaRateLimitCooldown(
                 accountId,
                 accountType,
                 sessionHash,
-                'Non-quota stream-end 429'
+                'Non-quota stream-end 429',
+                res.headers
               )
             } else if (
               requestModelFamily &&
