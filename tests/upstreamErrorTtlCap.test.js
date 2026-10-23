@@ -75,9 +75,11 @@ describe('markTempUnavailable clamps upstream retry-after', () => {
       temporaryUnavailableUntil: '2026-09-01T00:00:07.000Z'
     })
 
-    expect(response.statusCode).toBe(503)
+    expect(response.statusCode).toBe(429)
     expect(response.headers['Retry-After']).toBe('7')
-    expect(JSON.parse(response.body).error.metadata).toEqual(
+    const body = JSON.parse(response.body)
+    expect(body.error.type).toBe('rate_limit_error')
+    expect(body.error.metadata).toEqual(
       expect.objectContaining({
         retryable: true,
         disable_channel: false,
@@ -100,7 +102,11 @@ describe('long upstream cooldown (>1h) marks account unschedulable', () => {
   it('stops scheduling instead of writing a temp_unavailable key', async () => {
     const result = await upstreamErrorHelper.markTempUnavailable(ACCOUNT, TYPE, 429, 360117)
     expect(result).toEqual(
-      expect.objectContaining({ success: true, skipped: true, reason: 'long_cooldown_unschedulable' })
+      expect.objectContaining({
+        success: true,
+        skipped: true,
+        reason: 'long_cooldown_unschedulable'
+      })
     )
     const update = mockSetClaudeAccount.mock.calls[0][1]
     expect(update).toEqual(
@@ -152,7 +158,11 @@ describe('long upstream cooldown (>1h) marks account unschedulable', () => {
   })
 
   it('is a no-op for an already auto-stopped account', async () => {
-    mockHgetall.mockResolvedValue({ name: 'acct-1', schedulable: 'false', fiveHourAutoStopped: 'true' })
+    mockHgetall.mockResolvedValue({
+      name: 'acct-1',
+      schedulable: 'false',
+      fiveHourAutoStopped: 'true'
+    })
     const result = await upstreamErrorHelper.markTempUnavailable(ACCOUNT, TYPE, 429, 360117)
     expect(result.reason).toBe('long_cooldown_unschedulable')
     expect(mockSetClaudeAccount).not.toHaveBeenCalled()

@@ -335,7 +335,8 @@ const markTempUnavailable = async (
 
     const ttlConfig = getTtlConfig()
     const parsedCustomTtl = Number(customTtl)
-    const requestedTtl = Number.isFinite(parsedCustomTtl) && parsedCustomTtl > 0 ? Math.ceil(parsedCustomTtl) : 0
+    const requestedTtl =
+      Number.isFinite(parsedCustomTtl) && parsedCustomTtl > 0 ? Math.ceil(parsedCustomTtl) : 0
     let ttlSeconds
     if (requestedTtl > 0) {
       // 上游 retry-after 可能是周级限额（数天），必须钳制，否则账号会被长时间下线
@@ -444,10 +445,7 @@ const markAccountUnschedulableForLongCooldown = async (
   if (!accountData || Object.keys(accountData).length === 0) {
     return false
   }
-  if (
-    accountData.disableAutoProtection === true ||
-    accountData.disableAutoProtection === 'true'
-  ) {
+  if (accountData.disableAutoProtection === true || accountData.disableAutoProtection === 'true') {
     logger.info(
       `🛡️ [UpstreamError] Account ${accountData.name || accountId} (${accountId}) has auto-protection disabled, skipping long-cooldown unschedulable`
     )
@@ -579,8 +577,10 @@ const isTempUnavailableSchedulerError = (error) =>
 const buildTempUnavailableHttpResponse = (error) => {
   const retryAfterSeconds = Math.max(1, Math.ceil(Number(error?.retryAfterSeconds) || 1))
   const retryAt = error?.temporaryUnavailableUntil || null
+  // 账号只是临时冷却，不是渠道失效。new-api 按状态码自动禁用时，503 会把渠道关掉；
+  // 回 429 + disable_channel:false，让它换渠道重试，而不是自动禁用。
   return {
-    statusCode: 503,
+    statusCode: 429,
     headers: {
       'Content-Type': 'application/json',
       'Retry-After': String(retryAfterSeconds),
@@ -588,7 +588,7 @@ const buildTempUnavailableHttpResponse = (error) => {
     },
     body: JSON.stringify({
       error: {
-        type: 'service_unavailable',
+        type: 'rate_limit_error',
         code: 'accounts_temporarily_unavailable',
         message: 'All available Claude accounts are temporarily unavailable.',
         metadata: {

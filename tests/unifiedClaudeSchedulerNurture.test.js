@@ -260,7 +260,7 @@ describe('UnifiedClaudeScheduler nurture handling for auto-stopped accounts', ()
       unifiedClaudeScheduler.selectAccountForApiKey({}, null, 'claude-sonnet-4-6')
     ).rejects.toMatchObject({
       code: 'CLAUDE_ALL_TEMPORARILY_UNAVAILABLE',
-      statusCode: 503,
+      statusCode: 429,
       retryAfterSeconds: 15,
       temporaryUnavailableUntil: '2026-09-01T00:00:15.000Z'
     })
