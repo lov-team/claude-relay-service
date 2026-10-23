@@ -48,6 +48,7 @@ const MID_CONVERSATION_OUTPUT_CONFIG_BETA = 'mid-conversation-output-config-2026
 const VALID_CACHE_CONTROL_TTLS = new Set(['5m', '1h'])
 const CACHE_DEBUG_ENV = 'ANTHROPIC_CACHE_DEBUG'
 const SHARED_ACCOUNT_FAILOVER_MAX_ATTEMPTS = 2
+const TOOL_USE_ID_PATTERN = /^[a-zA-Z0-9_-]+$/
 // 只服务于未建立 pinned 身份的存量账号；新账号默认版本见 userAgentPoolService。
 const LEGACY_CLAUDE_USER_AGENT_FALLBACK = userAgentPoolService.DEFAULT_CLAUDE_USER_AGENT
 
@@ -919,10 +920,7 @@ class ClaudeRelayService {
     context = '',
     headers = null
   ) {
-    const usageResetTimestamp = await this._resolveUsageCapResetTimestamp(
-      accountId,
-      accountType
-    )
+    const usageResetTimestamp = await this._resolveUsageCapResetTimestamp(accountId, accountType)
     if (usageResetTimestamp) {
       await unifiedClaudeScheduler.markAccountRateLimited(
         accountId,
@@ -940,12 +938,7 @@ class ClaudeRelayService {
         .catch(() => {})
       return { success: true, usageCapConfirmed: true }
     }
-    return await this._applyNoResetRateLimitCooldown(
-      accountId,
-      accountType,
-      sessionHash,
-      context
-    )
+    return await this._applyNoResetRateLimitCooldown(accountId, accountType, sessionHash, context)
   }
 
   _toPascalCaseToolName(name) {
@@ -1996,6 +1989,141 @@ class ClaudeRelayService {
     }
   }
 
+  _isValidToolUseId(id) {
+    return typeof id === 'string' && TOOL_USE_ID_PATTERN.test(id)
+  }
+
+  _hasThinkingSignature(block) {
+    return typeof block?.signature === 'string' && block.signature.trim().length > 0
+  }
+
+  // 上游对 tool_use.id / tool_result.tool_use_id 只接受 [a-zA-Z0-9_-]。
+  // 非法字符替换成下划线，并同步改写配对的 tool_result。
+  _sanitizeToolUseIds(messages) {
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return messages
+    }
+
+    const usedIds = new Set()
+    const idMap = new Map()
+
+    for (const message of messages) {
+      if (!Array.isArray(message?.content)) {
+        continue
+      }
+      for (const block of message.content) {
+        if (block?.type === 'tool_use' && this._isValidToolUseId(block.id)) {
+          usedIds.add(block.id)
+          idMap.set(block.id, block.id)
+        }
+      }
+    }
+
+    const allocate = (original) => {
+      if (idMap.has(original)) {
+        return idMap.get(original)
+      }
+      const raw = typeof original === 'string' ? original : ''
+      let base = raw.replace(/[^a-zA-Z0-9_-]/g, '_')
+      if (!base) {
+        base = 'toolu_sanitized'
+      }
+      let candidate = base
+      let suffix = 2
+      while (usedIds.has(candidate)) {
+        candidate = `${base}_${suffix}`
+        suffix += 1
+      }
+      usedIds.add(candidate)
+      idMap.set(original, candidate)
+      return candidate
+    }
+
+    let rewritten = 0
+    for (const message of messages) {
+      if (!Array.isArray(message?.content)) {
+        continue
+      }
+      for (const block of message.content) {
+        if (block?.type !== 'tool_use' || this._isValidToolUseId(block.id)) {
+          continue
+        }
+        if (typeof block.id !== 'string') {
+          continue
+        }
+        const nextId = allocate(block.id)
+        if (nextId !== block.id) {
+          block.id = nextId
+          rewritten += 1
+        }
+      }
+    }
+
+    for (const message of messages) {
+      if (!Array.isArray(message?.content)) {
+        continue
+      }
+      for (const block of message.content) {
+        if (block?.type !== 'tool_result' || typeof block.tool_use_id !== 'string') {
+          continue
+        }
+        const mapped = idMap.get(block.tool_use_id)
+        if (mapped && mapped !== block.tool_use_id) {
+          block.tool_use_id = mapped
+          continue
+        }
+        if (!this._isValidToolUseId(block.tool_use_id)) {
+          block.tool_use_id = allocate(block.tool_use_id)
+          rewritten += 1
+        }
+      }
+    }
+
+    if (rewritten > 0) {
+      logger.warn(`🧹 Rewrote ${rewritten} tool_use id(s) to match upstream pattern`)
+    }
+    return messages
+  }
+
+  // thinking / redacted_thinking 的 signature 由上游签发，缺了无法伪造。
+  // 原样转发会 400：thinking.signature Field required。没有签名就丢掉该块。
+  _sanitizeUnsignedThinkingBlocks(messages) {
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return messages
+    }
+
+    let stripped = 0
+    for (const message of messages) {
+      if (!message || !Array.isArray(message.content)) {
+        continue
+      }
+      const nextContent = []
+      for (const block of message.content) {
+        if (
+          block &&
+          (block.type === 'thinking' || block.type === 'redacted_thinking') &&
+          !this._hasThinkingSignature(block)
+        ) {
+          stripped += 1
+          continue
+        }
+        nextContent.push(block)
+      }
+      if (nextContent.length === message.content.length) {
+        continue
+      }
+      message.content =
+        nextContent.length > 0
+          ? nextContent
+          : [{ type: 'text', text: '[unsigned thinking omitted]' }]
+    }
+
+    if (stripped > 0) {
+      logger.warn(`🧹 Dropped ${stripped} unsigned thinking block(s) before forwarding`)
+    }
+    return messages
+  }
+
   // 🔧 修补孤立的 tool_use（缺少对应 tool_result）
   // 客户端在长对话中可能截断历史消息，导致 tool_use 丢失对应的 tool_result，
   // 上游 Claude API 严格校验每个 tool_use 必须紧跟 tool_result，否则返回 400。
@@ -2093,6 +2221,8 @@ class ClaudeRelayService {
     // 使用 safeClone 替代 JSON.parse(JSON.stringify()) 提升性能
     const processedBody = safeClone(body)
 
+    processedBody.messages = this._sanitizeToolUseIds(processedBody.messages)
+    processedBody.messages = this._sanitizeUnsignedThinkingBlocks(processedBody.messages)
     processedBody.messages = this._patchOrphanedToolUse(processedBody.messages)
 
     // 验证并限制max_tokens参数
@@ -4210,6 +4340,30 @@ class ClaudeRelayService {
                 }
               } catch {
                 // 使用默认错误消息
+              }
+
+              // 4xx 在响应头尚未发出时按上游状态码回 JSON。
+              // 否则流式会先落到 200，调用方无法识别自定义 SSE error，表现为 500。
+              if (
+                !toolNameStreamTransformer &&
+                !responseStream.headersSent &&
+                res.statusCode >= 400 &&
+                res.statusCode < 500
+              ) {
+                const payload =
+                  errorData ||
+                  JSON.stringify({
+                    type: 'error',
+                    error: {
+                      type: 'invalid_request_error',
+                      message: errorMessage
+                    }
+                  })
+                responseStream.status(res.statusCode)
+                responseStream.setHeader('Content-Type', 'application/json')
+                responseStream.end(payload)
+                reject(new Error(`Claude API error: ${res.statusCode}`))
+                return
               }
 
               // 如果有 streamTransformer（如测试请求），使用前端期望的格式
