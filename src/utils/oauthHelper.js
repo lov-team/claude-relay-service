@@ -12,7 +12,8 @@ const config = require('../../config/config')
 // OAuth 配置常量 - 从claude-code-login.js提取
 // 注：console.anthropic.com 已迁移至 platform.claude.com，旧域名对 refresh_token grant 返回 404
 const OAUTH_CONFIG = {
-  AUTHORIZE_URL: 'https://claude.ai/oauth/authorize',
+  // claude.ai/oauth/authorize 已下线（403）；官方 CLI 现用 claude.com/cai/oauth/authorize
+  AUTHORIZE_URL: 'https://claude.com/cai/oauth/authorize',
   TOKEN_URL: config.claude?.oauthTokenUrl || 'https://platform.claude.com/v1/oauth/token',
   CLIENT_ID: '9d1c250a-e61b-44d9-88ed-5944d1962f5e',
   REDIRECT_URI: 'https://platform.claude.com/oauth/code/callback',
@@ -147,6 +148,20 @@ function createProxyAgent(proxyConfig) {
 }
 
 /**
+ * 解析授权码，支持 Anthropic 新版 "code#state" 拼接格式
+ * 新流程中授权码可能内嵌服务端返回的 state，token 请求必须原样回传该 state
+ * @param {string} authorizationCode - 授权码（可能是 code 或 code#state）
+ * @returns {{code: string, state: string|undefined}}
+ */
+function splitCodeAndState(authorizationCode) {
+  const [codePart, ...rest] = String(authorizationCode).split('#')
+  return {
+    code: codePart.split('&')[0],
+    state: rest.length ? rest.join('#').split('&')[0] : undefined
+  }
+}
+
+/**
  * 使用授权码交换访问令牌
  * @param {string} authorizationCode - 授权码
  * @param {string} codeVerifier - PKCE code verifier
@@ -155,8 +170,10 @@ function createProxyAgent(proxyConfig) {
  * @returns {Promise<object>} Claude格式的token响应
  */
 async function exchangeCodeForTokens(authorizationCode, codeVerifier, state, proxyConfig = null) {
-  // 清理授权码，移除URL片段
-  const cleanedCode = authorizationCode.split('#')[0]?.split('&')[0] ?? authorizationCode
+  // 拆分 code#state：新授权流程的授权码内嵌服务端 state，token 请求必须回传该 state
+  // （仅发送会话内生成的 state 会被 platform.claude.com 判为 state mismatch）
+  const parsed = splitCodeAndState(authorizationCode)
+  const cleanedCode = parsed.code
 
   const params = {
     grant_type: 'authorization_code',
@@ -164,7 +181,7 @@ async function exchangeCodeForTokens(authorizationCode, codeVerifier, state, pro
     code: cleanedCode,
     redirect_uri: OAUTH_CONFIG.REDIRECT_URI,
     code_verifier: codeVerifier,
-    state
+    state: parsed.state || state
   }
 
   // 创建代理agent
@@ -190,11 +207,7 @@ async function exchangeCodeForTokens(authorizationCode, codeVerifier, state, pro
     const axiosConfig = {
       headers: {
         'Content-Type': 'application/json',
-        'User-Agent': 'claude-cli/1.0.56 (external, cli)',
-        Accept: 'application/json, text/plain, */*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        Referer: 'https://claude.ai/',
-        Origin: 'https://claude.ai'
+        Accept: 'application/json, text/plain, */*'
       },
       timeout: 30000
     }
@@ -338,7 +351,9 @@ function parseCallbackUrl(input) {
         throw new Error('回调 URL 中未找到授权码 (code 参数)')
       }
 
-      return authorizationCode
+      // 回调 URL 中的 state 参数与授权码同样绑定，拼成 code#state 交给 token 交换
+      const urlState = urlObj.searchParams.get('state')
+      return urlState ? `${authorizationCode}#${urlState}` : authorizationCode
     } catch (error) {
       if (error.message.includes('回调 URL 中未找到授权码')) {
         throw error
@@ -347,8 +362,7 @@ function parseCallbackUrl(input) {
     }
   }
 
-  // 情况2: 直接的授权码（可能包含URL fragments）
-  // 参考claude-code-login.js的处理方式：移除URL fragments和参数
+  // 情况2: 直接的授权码（Anthropic 新格式为 code#state，需保留 # 后的 state 原样传递给 token 交换）
   const cleanedCode = trimmedInput.split('#')[0]?.split('&')[0] ?? trimmedInput
 
   // 验证授权码格式（Claude的授权码通常是base64url格式）
@@ -362,7 +376,8 @@ function parseCallbackUrl(input) {
     throw new Error('授权码包含无效字符，请检查是否复制了正确的 Authorization Code')
   }
 
-  return cleanedCode
+  // 返回包含 #state 的原始输入，由 exchangeCodeForTokens 拆分
+  return trimmedInput
 }
 
 /**
@@ -374,8 +389,9 @@ function parseCallbackUrl(input) {
  * @returns {Promise<object>} Claude格式的token响应
  */
 async function exchangeSetupTokenCode(authorizationCode, codeVerifier, state, proxyConfig = null) {
-  // 清理授权码，移除URL片段
-  const cleanedCode = authorizationCode.split('#')[0]?.split('&')[0] ?? authorizationCode
+  // 拆分 code#state：新授权流程的授权码内嵌服务端 state，token 请求必须回传该 state
+  const parsed = splitCodeAndState(authorizationCode)
+  const cleanedCode = parsed.code
 
   const params = {
     grant_type: 'authorization_code',
@@ -383,7 +399,7 @@ async function exchangeSetupTokenCode(authorizationCode, codeVerifier, state, pr
     code: cleanedCode,
     redirect_uri: OAUTH_CONFIG.REDIRECT_URI,
     code_verifier: codeVerifier,
-    state,
+    state: parsed.state || state,
     expires_in: 31536000 // Setup Token 可以设置较长的过期时间
   }
 
@@ -410,11 +426,7 @@ async function exchangeSetupTokenCode(authorizationCode, codeVerifier, state, pr
     const axiosConfig = {
       headers: {
         'Content-Type': 'application/json',
-        'User-Agent': 'claude-cli/1.0.56 (external, cli)',
-        Accept: 'application/json, text/plain, */*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        Referer: 'https://claude.ai/',
-        Origin: 'https://claude.ai'
+        Accept: 'application/json, text/plain, */*'
       },
       timeout: 30000
     }
