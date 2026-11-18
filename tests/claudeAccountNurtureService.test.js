@@ -464,6 +464,31 @@ describe('claudeAccountNurtureService.evaluate', () => {
     expect(result.reason).toBe('seven_day_pace')
   })
 
+  test('max20x does not block 1% at the start of a fresh seven-day window', async () => {
+    const config = cloneDefaultConfig()
+    const resetsAt = new Date(FIXED_NOW + 7 * 24 * 60 * 60 * 1000 - 60 * 1000).toISOString()
+    redis.getClaudeAccount.mockResolvedValue(
+      buildAccount({
+        nurtureTier: 'max20x',
+        subscriptionInfo: JSON.stringify({ accountType: 'claude_max_20x', hasClaudeMax: true }),
+        nurturePhase: 'nurturing',
+        nurtureDayIndex: '1',
+        claudeFiveHourUtilization: '1',
+        claudeSevenDayUtilization: '1',
+        claudeSevenDayOpusUtilization: '1',
+        claudeSevenDayResetsAt: resetsAt,
+        claudeSevenDayOpusResetsAt: resetsAt
+      })
+    )
+
+    const result = await claudeAccountNurtureService.evaluate('acc-pro-1', {
+      skipUsageRefresh: true
+    })
+    expect(result.blocked).toBe(false)
+    expect(result.tier).toBe('max20x')
+    expect(result.limits.paceSevenDay).toBe(config.max20xDayPlans[0].sevenDayMin)
+  })
+
   test('allows seven_day usage under pace limit in young window', async () => {
     setupRedisClient({ sevenDayBaseline: 18 })
     redis.getClaudeAccount.mockResolvedValue(

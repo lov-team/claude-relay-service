@@ -169,6 +169,8 @@ class ClaudeAccountNurtureService {
     const steady = config.steadyCaps[tier]
 
     const dayPlan = this.getDayPlan(config, tier, dayIndex)
+    const firstDayPlan = this.getDayPlan(config, tier, 1)
+    const nurturePaceFloor = firstDayPlan?.sevenDayMin ?? 0
     const curve = {
       rpm: dayPlan.rpm,
       fiveHour: pickInRange(dayPlan.fiveHourMin, dayPlan.fiveHourMax, seed, account.id, 'fiveHour'),
@@ -193,7 +195,14 @@ class ClaudeAccountNurtureService {
             account.claudeSevenDayResetsAt,
             config.paceBuffer
           )
-        : calcSevenDayPaceLimit(steady.sevenDay, account.claudeSevenDayResetsAt, config.paceBuffer)
+        : Math.max(
+            calcSevenDayPaceLimit(
+              steady.sevenDay,
+              account.claudeSevenDayResetsAt,
+              config.paceBuffer
+            ) ?? 0,
+            nurturePaceFloor
+          )
     const paceSevenDayOpus =
       phase === 'steady'
         ? calcSevenDaySteadyPaceLimit(
@@ -202,10 +211,13 @@ class ClaudeAccountNurtureService {
             account.claudeSevenDayOpusResetsAt,
             config.paceBuffer
           )
-        : calcSevenDayPaceLimit(
-            steady.sevenDayOpus,
-            account.claudeSevenDayOpusResetsAt,
-            config.paceBuffer
+        : Math.max(
+            calcSevenDayPaceLimit(
+              steady.sevenDayOpus,
+              account.claudeSevenDayOpusResetsAt,
+              config.paceBuffer
+            ) ?? 0,
+            nurturePaceFloor
           )
 
     const effectiveSevenDay = Math.min(
