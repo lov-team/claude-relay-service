@@ -6,10 +6,17 @@ const { parseVendorPrefixedModel } = require('../../utils/modelHelper')
 const userMessageQueueService = require('../userMessageQueueService')
 const { isStreamWritable } = require('../../utils/streamHelper')
 const upstreamErrorHelper = require('../../utils/upstreamErrorHelper')
+const requestIdentityService = require('../requestIdentityService')
+const { normalizeDateline } = require('../../utils/anthropicFingerprint')
+const {
+  getHttpsAgentForStream,
+  getHttpsAgentForNonStream
+} = require('../../utils/performanceOptimizer')
+const userAgentPoolService = require('../userAgentPoolService')
 
 class CcrRelayService {
   constructor() {
-    this.defaultUserAgent = 'claude-relay-service/1.0.0'
+    this.defaultUserAgent = userAgentPoolService.DEFAULT_CLAUDE_USER_AGENT
   }
 
   // 🚀 转发请求到CCR API
@@ -121,6 +128,15 @@ class CcrRelayService {
         ...requestBody,
         model: mappedModel
       }
+      const normalizedBody = normalizeDateline(modifiedRequestBody).body
+      const identityResult = await requestIdentityService.transform({
+        body: normalizedBody,
+        headers: {},
+        accountId,
+        account
+      })
+      const upstreamBody = identityResult.body || normalizedBody
+      const identityHeaders = identityResult.headers || {}
 
       // 创建代理agent
       const proxyAgent = ccrAccountService._createProxyAgent(account.proxy)
@@ -159,24 +175,22 @@ class CcrRelayService {
 
       logger.debug(`🎯 Final API endpoint: ${apiEndpoint}`)
       logger.debug(`[DEBUG] Options passed to relayRequest: ${JSON.stringify(options)}`)
-      logger.debug(`[DEBUG] Client headers received: ${JSON.stringify(clientHeaders)}`)
-
-      // 过滤客户端请求头
-      const filteredHeaders = this._filterClientHeaders(clientHeaders)
-      logger.debug(`[DEBUG] Filtered client headers: ${JSON.stringify(filteredHeaders)}`)
+      logger.debug(
+        `[DEBUG] Client header names received: ${Object.keys(clientHeaders || {}).join(',')}`
+      )
+      const filteredHeaders = { ...identityHeaders }
 
       // 决定使用的 User-Agent：优先使用账户自定义的，否则透传客户端的，最后才使用默认值
-      const userAgent =
-        account.userAgent ||
-        clientHeaders?.['user-agent'] ||
-        clientHeaders?.['User-Agent'] ||
-        this.defaultUserAgent
+      const accountUserAgent = userAgentPoolService.isClaudeCodeUserAgent(account.userAgent)
+        ? account.userAgent
+        : userAgentPoolService.DEFAULT_CLAUDE_USER_AGENT
+      const userAgent = userAgentPoolService.normalizeClaudeCodeUserAgent(accountUserAgent)
 
       // 准备请求配置
       const requestConfig = {
         method: 'POST',
         url: apiEndpoint,
-        data: modifiedRequestBody,
+        data: upstreamBody,
         headers: {
           'Content-Type': 'application/json',
           'anthropic-version': '2023-06-01',
@@ -185,6 +199,7 @@ class CcrRelayService {
         },
         timeout: config.requestTimeout || 600000,
         signal: abortController.signal,
+        httpsAgent: proxyAgent || getHttpsAgentForNonStream(),
         validateStatus: () => true // 接受所有状态码
       }
 
@@ -206,7 +221,7 @@ class CcrRelayService {
       }
 
       logger.debug(
-        `[DEBUG] Initial headers before beta: ${JSON.stringify(requestConfig.headers, null, 2)}`
+        `[DEBUG] CCR upstream header names: ${Object.keys(requestConfig.headers).join(',')}`
       )
 
       // 添加beta header如果需要
@@ -218,10 +233,7 @@ class CcrRelayService {
       }
 
       // 发送请求
-      logger.debug(
-        '📤 Sending request to CCR API with headers:',
-        JSON.stringify(requestConfig.headers, null, 2)
-      )
+      logger.debug('📤 Sending request to CCR API')
       const response = await axios(requestConfig)
 
       // 📬 请求已发送成功，立即释放队列锁（无需等待响应处理完成）
@@ -570,6 +582,15 @@ class CcrRelayService {
     requestOptions = {},
     onResponseHeaderReceived = null
   ) {
+    const identityResult = await requestIdentityService.transform({
+      body: normalizeDateline(body).body,
+      headers: {},
+      accountId,
+      account
+    })
+    body = identityResult.body || body
+    const identityHeaders = identityResult.headers || {}
+
     return new Promise((resolve, reject) => {
       let aborted = false
 
@@ -579,16 +600,13 @@ class CcrRelayService {
 
       logger.debug(`🎯 Final API endpoint for stream: ${apiEndpoint}`)
 
-      // 过滤客户端请求头
-      const filteredHeaders = this._filterClientHeaders(clientHeaders)
-      logger.debug(`[DEBUG] Filtered client headers: ${JSON.stringify(filteredHeaders)}`)
+      const filteredHeaders = { ...identityHeaders }
 
       // 决定使用的 User-Agent：优先使用账户自定义的，否则透传客户端的，最后才使用默认值
-      const userAgent =
-        account.userAgent ||
-        clientHeaders?.['user-agent'] ||
-        clientHeaders?.['User-Agent'] ||
-        this.defaultUserAgent
+      const accountUserAgent = userAgentPoolService.isClaudeCodeUserAgent(account.userAgent)
+        ? account.userAgent
+        : userAgentPoolService.DEFAULT_CLAUDE_USER_AGENT
+      const userAgent = userAgentPoolService.normalizeClaudeCodeUserAgent(accountUserAgent)
 
       // 准备请求配置
       const requestConfig = {
@@ -603,6 +621,7 @@ class CcrRelayService {
         },
         timeout: config.requestTimeout || 600000,
         responseType: 'stream',
+        httpsAgent: proxyAgent || getHttpsAgentForStream(),
         validateStatus: () => true // 接受所有状态码
       }
 

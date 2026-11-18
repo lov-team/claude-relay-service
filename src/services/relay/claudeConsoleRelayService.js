@@ -14,6 +14,12 @@ const userMessageQueueService = require('../userMessageQueueService')
 const { isStreamWritable } = require('../../utils/streamHelper')
 const { filterForClaude } = require('../../utils/headerFilter')
 const userAgentPoolService = require('../userAgentPoolService')
+const requestIdentityService = require('../requestIdentityService')
+const { normalizeDateline } = require('../../utils/anthropicFingerprint')
+const {
+  getHttpsAgentForStream,
+  getHttpsAgentForNonStream
+} = require('../../utils/performanceOptimizer')
 
 function removeClaudeCodeBillingHeader(body) {
   if (!body || typeof body !== 'object' || !body.system) {
@@ -188,6 +194,15 @@ class ClaudeConsoleRelayService {
         ...requestBody,
         model: mappedModel
       })
+      const normalizedBody = normalizeDateline(modifiedRequestBody).body
+      const identityResult = await requestIdentityService.transform({
+        body: normalizedBody,
+        headers: {},
+        accountId,
+        account
+      })
+      const upstreamBody = identityResult.body || normalizedBody
+      const identityHeaders = identityResult.headers || {}
 
       // 模型兼容性检查已经在调度器中完成，这里不需要再检查
 
@@ -228,19 +243,18 @@ class ClaudeConsoleRelayService {
 
       logger.debug(`🎯 Final API endpoint: ${apiEndpoint}`)
       logger.debug(`[DEBUG] Options passed to relayRequest: ${JSON.stringify(options)}`)
-      logger.debug(`[DEBUG] Client headers received: ${JSON.stringify(clientHeaders)}`)
+      logger.debug(
+        `[DEBUG] Client header names received: ${Object.keys(clientHeaders || {}).join(',')}`
+      )
 
-      // 过滤客户端请求头
-      const filteredHeaders = this._filterClientHeaders(clientHeaders)
-      logger.debug(`[DEBUG] Filtered client headers: ${JSON.stringify(filteredHeaders)}`)
+      // Console 账号身份固定在账号上，不透传客户端 Claude 指纹。
+      const filteredHeaders = { ...identityHeaders }
 
       // 决定使用的 User-Agent：优先使用账户自定义的，否则透传客户端的，最后才使用默认值
-      const userAgent = userAgentPoolService.normalizeClaudeCodeUserAgent(
-        account.userAgent ||
-          clientHeaders?.['user-agent'] ||
-          clientHeaders?.['User-Agent'] ||
-          this.defaultUserAgent
-      )
+      const accountUserAgent = userAgentPoolService.isClaudeCodeUserAgent(account.userAgent)
+        ? account.userAgent
+        : this.defaultUserAgent
+      const userAgent = userAgentPoolService.normalizeClaudeCodeUserAgent(accountUserAgent)
       delete filteredHeaders['user-agent']
       delete filteredHeaders['User-Agent']
 
@@ -248,7 +262,7 @@ class ClaudeConsoleRelayService {
       const requestConfig = {
         method: 'POST',
         url: apiEndpoint,
-        data: modifiedRequestBody,
+        data: upstreamBody,
         headers: {
           ...filteredHeaders,
           'Content-Type': 'application/json',
@@ -257,6 +271,7 @@ class ClaudeConsoleRelayService {
         },
         timeout: config.requestTimeout || 600000,
         signal: abortController.signal,
+        httpsAgent: proxyAgent || getHttpsAgentForNonStream(),
         validateStatus: () => true // 接受所有状态码
       }
 
@@ -278,7 +293,7 @@ class ClaudeConsoleRelayService {
       }
 
       logger.debug(
-        `[DEBUG] Initial headers before beta: ${JSON.stringify(requestConfig.headers, null, 2)}`
+        `[DEBUG] Console upstream header names: ${Object.keys(requestConfig.headers).join(',')}`
       )
 
       // 添加beta header如果需要
@@ -290,10 +305,7 @@ class ClaudeConsoleRelayService {
       }
 
       // 发送请求
-      logger.debug(
-        '📤 Sending request to Claude Console API with headers:',
-        JSON.stringify(requestConfig.headers, null, 2)
-      )
+      logger.debug('📤 Sending request to Claude Console API')
       const response = await axios(requestConfig)
 
       // 📬 请求已发送成功，立即释放队列锁（无需等待响应处理完成）
@@ -782,6 +794,16 @@ class ClaudeConsoleRelayService {
     requestOptions = {},
     onResponseHeaderReceived = null
   ) {
+    const normalizedBody = normalizeDateline(body).body
+    const identityResult = await requestIdentityService.transform({
+      body: normalizedBody,
+      headers: {},
+      accountId,
+      account
+    })
+    body = identityResult.body || normalizedBody
+    const identityHeaders = identityResult.headers || {}
+
     return new Promise((resolve, reject) => {
       let aborted = false
 
@@ -791,17 +813,13 @@ class ClaudeConsoleRelayService {
 
       logger.debug(`🎯 Final API endpoint for stream: ${apiEndpoint}`)
 
-      // 过滤客户端请求头
-      const filteredHeaders = this._filterClientHeaders(clientHeaders)
-      logger.debug(`[DEBUG] Filtered client headers: ${JSON.stringify(filteredHeaders)}`)
+      const filteredHeaders = { ...identityHeaders }
 
       // 决定使用的 User-Agent：优先使用账户自定义的，否则透传客户端的，最后才使用默认值
-      const userAgent = userAgentPoolService.normalizeClaudeCodeUserAgent(
-        account.userAgent ||
-          clientHeaders?.['user-agent'] ||
-          clientHeaders?.['User-Agent'] ||
-          this.defaultUserAgent
-      )
+      const accountUserAgent = userAgentPoolService.isClaudeCodeUserAgent(account.userAgent)
+        ? account.userAgent
+        : this.defaultUserAgent
+      const userAgent = userAgentPoolService.normalizeClaudeCodeUserAgent(accountUserAgent)
       delete filteredHeaders['user-agent']
       delete filteredHeaders['User-Agent']
 
@@ -818,6 +836,7 @@ class ClaudeConsoleRelayService {
         },
         timeout: config.requestTimeout || 600000,
         responseType: 'stream',
+        httpsAgent: proxyAgent || getHttpsAgentForStream(),
         validateStatus: () => true // 接受所有状态码
       }
 

@@ -283,6 +283,23 @@ describe('Claude relay cache_control ttl handling', () => {
     expect(headers['X-Claude-Code-Session-Id']).toBe('session-123')
   })
 
+  test('replaces an inbound Claude Code session header with the final body session', () => {
+    const headers = { 'x-claude-code-session-id': 'client-session' }
+
+    claudeRelayService._applyClaudeCodeSessionHeaders(headers, {
+      metadata: {
+        user_id: JSON.stringify({
+          device_id: 'device-1',
+          account_uuid: '',
+          session_id: 'account-session'
+        })
+      }
+    })
+
+    expect(headers['x-claude-code-session-id']).toBeUndefined()
+    expect(headers['X-Claude-Code-Session-Id']).toBe('account-session')
+  })
+
   test('merges standard Anthropic cache usage fields from delta usage', () => {
     const target = { model: 'claude-opus-4-7' }
 
@@ -310,15 +327,15 @@ describe('Claude relay cache_control ttl handling', () => {
     })
   })
 
-  test('recognizes modern Claude Code requests by CLI headers when prompt templates change', () => {
-    ClaudeCodeValidator.includesClaudeCodeSystemPrompt.mockReturnValueOnce(false)
+  test('requires the Claude Code prompt and CLI user agent', () => {
+    ClaudeCodeValidator.includesClaudeCodeSystemPrompt.mockReturnValueOnce(true)
 
     const requestBody = {
       model: 'claude-opus-4-7',
       messages: [{ role: 'user', content: 'hello' }]
     }
     const headers = {
-      'user-agent': 'Go-http-client/2.0',
+      'user-agent': 'claude-cli/2.1.255 (external, cli)',
       'x-app': 'cli',
       'x-claude-code-session-id': 'session-123',
       'anthropic-beta': 'claude-code-20250219,context-management-2025-06-27'

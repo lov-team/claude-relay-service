@@ -1,3 +1,5 @@
+const crypto = require('crypto')
+
 jest.mock('../src/utils/logger', () => ({
   debug: jest.fn(),
   info: jest.fn(),
@@ -229,6 +231,38 @@ describe('requestIdentityService.transform', () => {
     expect(mockRedisSet).toHaveBeenCalled()
   })
 
+  it('overwrites a complete inbound Stainless fingerprint with the account fingerprint', async () => {
+    const result = await requestIdentityService.transform({
+      body: {},
+      headers: {
+        'x-stainless-os': 'Windows',
+        'x-stainless-runtime': 'deno',
+        'x-stainless-runtime-version': 'v99.0.0'
+      },
+      accountId: ACCOUNT_ID,
+      account: { id: ACCOUNT_ID, userAgentPlatform: 'linux' },
+      isRealClaudeCode: true
+    })
+
+    expect(result.headers['X-Stainless-OS']).toBe('Linux')
+    expect(result.headers['X-Stainless-Runtime']).toBe('node')
+    expect(result.headers['X-Stainless-Runtime-Version']).toBe('v22.18.0')
+  })
+
+  it('replaces malformed metadata user ids instead of forwarding client identity', async () => {
+    const result = await requestIdentityService.transform({
+      body: { metadata: { user_id: 'client-device-identity' } },
+      headers: {},
+      accountId: ACCOUNT_ID,
+      account: { id: ACCOUNT_ID, extInfo: { account_uuid: ACCOUNT_UUID } },
+      sessionHash: 'conv-hash-aaa'
+    })
+
+    const userId = JSON.parse(result.body.metadata.user_id)
+    expect(userId.account_uuid).toBe(ACCOUNT_UUID)
+    expect(userId.device_id).not.toBe('client-device-identity')
+  })
+
   it('locks session_id to the conversation hash and keeps account-level device and uuid', async () => {
     const account = {
       id: ACCOUNT_ID,
@@ -284,7 +318,7 @@ describe('requestIdentityService.transform', () => {
     expect(otherId.session_id).not.toBe(firstId.session_id)
   })
 
-  it('keeps a real Claude Code session derived from the inbound session, not the scheduler hash', async () => {
+  it('keeps the session seed but replaces inbound device identity with the account identity', async () => {
     const inboundSession = 'c72554f2-d198-4fd4-99c8-81e46410a1c5'
     const result = await requestIdentityService.transform({
       body: {
@@ -308,7 +342,9 @@ describe('requestIdentityService.transform', () => {
 
     const userId = JSON.parse(result.body.metadata.user_id)
     expect(userId.account_uuid).toBe(ACCOUNT_UUID)
-    expect(userId.device_id).toBe('d'.repeat(64))
+    expect(userId.device_id).toBe(
+      crypto.createHash('sha256').update(`relay-generated-device:${ACCOUNT_ID}`).digest('hex')
+    )
     expect(userId.session_id).toBe(
       requestIdentityService._internal.formatUuidFromSeed(`${ACCOUNT_ID}::${inboundSession}`)
     )

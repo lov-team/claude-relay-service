@@ -32,7 +32,9 @@ const STAINLESS_HEADER_CASE_MAP = {
   'x-stainless-runtime': 'X-Stainless-Runtime',
   'x-stainless-runtime-version': 'X-Stainless-Runtime-Version'
 }
-const REDIS_KEY_PREFIX = 'fmt_claude_req:stainless_headers:'
+// v2 deliberately ignores the pre-fix cache, which could contain a complete
+// client-supplied Stainless fingerprint captured before account pinning was enforced.
+const REDIS_KEY_PREFIX = 'fmt_claude_req:stainless_headers:v2:'
 const ACCOUNT_FINGERPRINT_DEFAULTS = {
   macos: {
     'x-stainless-retry-count': '0',
@@ -342,13 +344,7 @@ function resolveAccountId(payload) {
   return null
 }
 
-async function resolveCompleteAccountFingerprint({
-  accountId,
-  account,
-  accountFingerprint,
-  incomingHeaders,
-  isRealClaudeCode = false
-}) {
+async function resolveCompleteAccountFingerprint({ accountId, account, accountFingerprint }) {
   const pinnedFingerprint = sanitizeFingerprint(accountFingerprint)
   if (hasCompleteFingerprint(pinnedFingerprint)) {
     return { fingerprint: pinnedFingerprint, source: 'account_pinned' }
@@ -364,11 +360,6 @@ async function resolveCompleteAccountFingerprint({
     logger.error(`requestIdentityService: 读取指纹失败 (${accountId}): ${error.message}`)
   }
 
-  const incomingFingerprint = collectFingerprintFromHeaders(incomingHeaders)
-  if (isRealClaudeCode && hasCompleteFingerprint(incomingFingerprint)) {
-    return { fingerprint: incomingFingerprint, source: 'request_headers', persist: true }
-  }
-
   const forgedFingerprint = completeAccountFingerprint(
     { ...persistedFingerprint, ...pinnedFingerprint },
     account
@@ -376,13 +367,7 @@ async function resolveCompleteAccountFingerprint({
   return { fingerprint: forgedFingerprint, source: 'account_forged', persist: true }
 }
 
-async function rewriteHeaders(
-  headers,
-  accountId,
-  accountFingerprint = {},
-  account = null,
-  options = {}
-) {
+async function rewriteHeaders(headers, accountId, accountFingerprint = {}, account = null) {
   if (!headers || typeof headers !== 'object') {
     return { nextHeaders: headers, changed: false }
   }
@@ -395,9 +380,7 @@ async function rewriteHeaders(
   const resolved = await resolveCompleteAccountFingerprint({
     accountId,
     account,
-    accountFingerprint,
-    incomingHeaders: workingHeaders,
-    isRealClaudeCode: options.isRealClaudeCode === true
+    accountFingerprint
   })
 
   if (resolved.persist) {
@@ -545,16 +528,11 @@ function rewriteUserId(body, accountId, accountUuid, sessionHash = null, options
   }
 
   const account = options.account && typeof options.account === 'object' ? options.account : null
-  const accountDeviceId =
-    account &&
-    (account.useUnifiedClientId === true || account.useUnifiedClientId === 'true') &&
-    account.unifiedClientId
-      ? resolveAccountDeviceId(account, accountId)
-      : parsed.deviceId
+  const accountDeviceId = resolveAccountDeviceId(account, accountId)
 
   const nextUserId = metadataUserIdHelper.build({
     deviceId: accountDeviceId,
-    accountUuid: normalizeAccountUuid(accountUuid) || parsed.accountUuid || '',
+    accountUuid: normalizeAccountUuid(accountUuid) || '',
     sessionId: resolveSessionId(parsed, accountId, sessionHash, options.isRealClaudeCode === true),
     isJsonFormat: parsed.isJsonFormat
   })
@@ -579,7 +557,7 @@ function rewriteUserId(body, accountId, accountUuid, sessionHash = null, options
  * @returns {Object} 转换后的 { body, headers, abortResponse? }
  */
 async function transform(payload = {}) {
-  const currentBody = payload.body
+  let currentBody = payload.body
   const currentHeaders = payload.headers
 
   if (!payload.accountId) {
@@ -593,6 +571,24 @@ async function transform(payload = {}) {
   const accountIdForHeaders = resolveAccountId(payload)
   const accountFingerprint = extractAccountFingerprint(payload.account)
   const isRealClaudeCode = payload.isRealClaudeCode === true
+
+  if (
+    currentBody &&
+    typeof currentBody === 'object' &&
+    (!currentBody.metadata ||
+      typeof currentBody.metadata.user_id !== 'string' ||
+      !metadataUserIdHelper.parse(currentBody.metadata.user_id))
+  ) {
+    currentBody = {
+      ...currentBody,
+      metadata: {
+        ...(currentBody.metadata && typeof currentBody.metadata === 'object'
+          ? currentBody.metadata
+          : {}),
+        user_id: buildRelayGeneratedUserId(payload.account, payload.sessionHash)
+      }
+    }
+  }
 
   const { nextBody } = rewriteUserId(
     currentBody,
@@ -608,8 +604,7 @@ async function transform(payload = {}) {
     currentHeaders,
     accountIdForHeaders,
     accountFingerprint,
-    payload.account,
-    { isRealClaudeCode }
+    payload.account
   )
 
   const nextHeaders = headerResult ? headerResult.nextHeaders : currentHeaders

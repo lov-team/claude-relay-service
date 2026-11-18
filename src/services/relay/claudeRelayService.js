@@ -666,11 +666,7 @@ class ClaudeRelayService {
   }
 
   _isActualClaudeCodeRequest(requestBody, clientHeaders) {
-    if (this.isRealClaudeCodeRequest(requestBody)) {
-      return true
-    }
-
-    return this._hasClaudeCodeIdentityHeaders(clientHeaders)
+    return this.isRealClaudeCodeRequest(requestBody) && this._isClaudeCodeUserAgent(clientHeaders)
   }
 
   _getHeaderValueCaseInsensitive(headers, key) {
@@ -2583,13 +2579,11 @@ class ClaudeRelayService {
   }
 
   _applyClaudeCodeSessionHeaders(headers, requestPayload) {
-    const existingSessionId = this._getHeaderValueCaseInsensitive(
-      headers,
-      'x-claude-code-session-id'
-    )
-    if (existingSessionId) {
-      return
-    }
+    Object.keys(headers || {}).forEach((key) => {
+      if (key.toLowerCase() === 'x-claude-code-session-id') {
+        delete headers[key]
+      }
+    })
 
     const sessionId = metadataUserIdHelper.extractSessionId(requestPayload?.metadata?.user_id)
     if (!sessionId) {
@@ -2951,7 +2945,7 @@ class ClaudeRelayService {
 
     const isRealClaudeCode =
       requestOptions.isRealClaudeCodeRequest === undefined
-        ? this.isRealClaudeCodeRequest(body)
+        ? this._isActualClaudeCodeRequest(body, clientHeaders)
         : requestOptions.isRealClaudeCodeRequest === true
 
     // 如果不是真实的 Claude Code 请求，需要使用从账户获取的 Claude Code headers
