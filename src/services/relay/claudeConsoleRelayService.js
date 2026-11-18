@@ -20,6 +20,7 @@ const {
   getHttpsAgentForStream,
   getHttpsAgentForNonStream
 } = require('../../utils/performanceOptimizer')
+const { logUpstreamRequest } = require('../../utils/upstreamRequestLogger')
 
 function removeClaudeCodeBillingHeader(body) {
   if (!body || typeof body !== 'object' || !body.system) {
@@ -306,6 +307,17 @@ class ClaudeConsoleRelayService {
 
       // 发送请求
       logger.debug('📤 Sending request to Claude Console API')
+      logUpstreamRequest({
+        channel: 'claude-console',
+        accountId,
+        accountName: account?.name,
+        method: 'POST',
+        url: requestConfig.url,
+        headers: requestConfig.headers,
+        body: upstreamBody,
+        stream: false,
+        extra: { model: upstreamBody?.model }
+      })
       const response = await axios(requestConfig)
 
       // 📬 请求已发送成功，立即释放队列锁（无需等待响应处理完成）
@@ -863,6 +875,17 @@ class ClaudeConsoleRelayService {
       }
 
       // 发送请求
+      logUpstreamRequest({
+        channel: 'claude-console',
+        accountId,
+        accountName: account?.name,
+        method: 'POST',
+        url: requestConfig.url,
+        headers: requestConfig.headers,
+        body,
+        stream: true,
+        extra: { model: body?.model }
+      })
       const request = axios(requestConfig)
 
       // 注意：使用 .then(async ...) 模式处理响应

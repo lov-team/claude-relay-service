@@ -26,6 +26,7 @@ const metadataUserIdHelper = require('../../utils/metadataUserIdHelper')
 const { normalizeDateline } = require('../../utils/anthropicFingerprint')
 const { syncBillingHeaderVersion } = require('../../utils/claudeBillingFingerprint')
 const { normalizeClaudeSseLine } = require('../../utils/claudeStreamSanitizer')
+const { logUpstreamRequest } = require('../../utils/upstreamRequestLogger')
 const {
   classifyClaudeOAuthError,
   extractClaudeOAuthError
@@ -3158,6 +3159,18 @@ class ClaudeRelayService {
         timeout: config.requestTimeout || 600000
       }
 
+      logUpstreamRequest({
+        channel: 'claude-official',
+        accountId,
+        accountName: account?.name,
+        method: 'POST',
+        url: `https://${options.hostname}${options.path}`,
+        headers: options.headers,
+        body: bodyString,
+        stream: false,
+        extra: { model: body?.model, isRealClaudeCode }
+      })
+
       const req = https.request(options, (res) => {
         // 使用数组收集 chunks，避免 O(n²) 的 Buffer.concat
         const chunks = []
@@ -3703,7 +3716,7 @@ class ClaudeRelayService {
     }
 
     let { bodyString } = prepared
-    const { headers, toolNameMap } = prepared
+    const { headers, toolNameMap, requestPayload: upstreamPayload, isRealClaudeCode } = prepared
     const toolNameStreamTransformer = this._createToolNameStripperStreamTransformer(
       streamTransformer,
       toolNameMap
@@ -3720,6 +3733,18 @@ class ClaudeRelayService {
         agent: proxyAgent || getHttpsAgentForStream(),
         timeout: config.requestTimeout || 600000
       }
+
+      logUpstreamRequest({
+        channel: 'claude-official',
+        accountId,
+        accountName: account?.name,
+        method: 'POST',
+        url: `https://${options.hostname}${options.path}`,
+        headers: options.headers,
+        body: bodyString,
+        stream: true,
+        extra: { model: upstreamPayload?.model || body?.model, isRealClaudeCode }
+      })
 
       const req = https.request(options, async (res) => {
         logger.debug(`🌊 Claude stream response status: ${res.statusCode}`)
