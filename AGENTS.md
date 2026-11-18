@@ -18,7 +18,7 @@
 
 | 项 | 值 |
 |----|-----|
-| 服务器 | `ubuntu@47.128.78.22` |
+| 服务器 | `ubuntu@18.143.117.1` |
 | 部署目录 | `/opt/claude-relay-service-old`（符号链接 → `/mnt/data50/claude-relay-service-old`） |
 | 容器 | `claude-relay-service-old-claude-relay-1` |
 | 监听 | `127.0.0.1:3007` → 容器 `3000` |
@@ -66,7 +66,7 @@ rsync -az \
   --exclude 'temp' \
   --exclude 'redis_data' \
   ./ \
-  ubuntu@47.128.78.22:/mnt/data50/claude-relay-service-old/
+  ubuntu@18.143.117.1:/mnt/data50/claude-relay-service-old/
 ```
 
 注意：
@@ -88,7 +88,7 @@ ENV VITE_APP_BASE_URL=$VITE_APP_BASE_URL
 ### 3. 构建镜像
 
 ```bash
-ssh ubuntu@47.128.78.22 'cd /mnt/data50/claude-relay-service-old && \
+ssh ubuntu@18.143.117.1 'cd /mnt/data50/claude-relay-service-old && \
   sudo docker build \
     --build-arg VITE_APP_BASE_URL=/cc/admin-next/ \
     -t claude-relay-service-old:master-cc-on .'
@@ -107,7 +107,7 @@ services:
 ```
 
 ```bash
-ssh ubuntu@47.128.78.22 'cd /mnt/data50/claude-relay-service-old && \
+ssh ubuntu@18.143.117.1 'cd /mnt/data50/claude-relay-service-old && \
   sudo docker compose -f docker-compose.yml -f docker-compose.override.yml up -d claude-relay'
 ```
 
@@ -115,14 +115,14 @@ ssh ubuntu@47.128.78.22 'cd /mnt/data50/claude-relay-service-old && \
 
 ```bash
 # 本机健康
-ssh ubuntu@47.128.78.22 'curl -s http://127.0.0.1:3007/health'
+ssh ubuntu@18.143.117.1 'curl -s http://127.0.0.1:3007/health'
 
 # 容器状态
-ssh ubuntu@47.128.78.22 'cd /mnt/data50/claude-relay-service-old && \
+ssh ubuntu@18.143.117.1 'cd /mnt/data50/claude-relay-service-old && \
   sudo docker compose -f docker-compose.yml -f docker-compose.override.yml ps'
 
 # 前端资源前缀应为 /cc/admin-next/
-ssh ubuntu@47.128.78.22 'sudo docker run --rm --entrypoint sh claude-relay-service-old:master-cc-on \
+ssh ubuntu@18.143.117.1 'sudo docker run --rm --entrypoint sh claude-relay-service-old:master-cc-on \
   -c "grep -oE \"(src|href)=\\\"[^\\\"]+\\\"\" /app/web/admin-spa/dist/index.html | head -3"'
 
 # 公网
