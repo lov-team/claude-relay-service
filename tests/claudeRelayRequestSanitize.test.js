@@ -151,4 +151,40 @@ describe('Claude relay request sanitization', () => {
       'orphan_id_1'
     ])
   })
+
+  test('preserves server tools and Claude Code tool references during name adaptation', () => {
+    const body = {
+      tools: [
+        { type: 'advisor_20260301', name: 'advisor' },
+        { type: 'custom', name: 'SendMessage' },
+        { type: 'custom', name: 'send_message' }
+      ],
+      tool_choice: { type: 'tool', name: 'SendMessage' },
+      messages: [
+        {
+          role: 'assistant',
+          content: [
+            { type: 'tool_use', name: 'advisor', input: {} },
+            { type: 'tool_use', name: 'SendMessage', input: {} },
+            { type: 'tool_use', name: 'send_message', input: {} }
+          ]
+        }
+      ]
+    }
+
+    const toolNameMap = claudeRelayService._transformToolNamesInRequestBody(body)
+
+    expect(body.tools.map((tool) => tool.name)).toEqual([
+      'advisor',
+      'SendMessage',
+      'SendMessage_tool'
+    ])
+    expect(body.tool_choice.name).toBe('SendMessage')
+    expect(body.messages[0].content.map((block) => block.name)).toEqual([
+      'advisor',
+      'SendMessage',
+      'SendMessage_tool'
+    ])
+    expect(toolNameMap.get('SendMessage_tool')).toBe('send_message')
+  })
 })

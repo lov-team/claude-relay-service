@@ -50,6 +50,19 @@ const VALID_CACHE_CONTROL_TTLS = new Set(['5m', '1h'])
 const CACHE_DEBUG_ENV = 'ANTHROPIC_CACHE_DEBUG'
 const SHARED_ACCOUNT_FAILOVER_MAX_ATTEMPTS = 2
 const TOOL_USE_ID_PATTERN = /^[a-zA-Z0-9_-]+$/
+const SERVER_TOOL_TYPE_PATTERN = /(?:^|_)20\d{6}(?:$|_)/
+const RESERVED_TOOL_NAMES = new Set([
+  'advisor',
+  'web_search',
+  'web_fetch',
+  'code_execution',
+  'computer',
+  'bash',
+  'text_editor',
+  'memory',
+  'container_upload',
+  'tool_search'
+])
 // 只服务于未建立 pinned 身份的存量账号；新账号默认版本见 userAgentPoolService。
 const LEGACY_CLAUDE_USER_AGENT_FALLBACK = userAgentPoolService.DEFAULT_CLAUDE_USER_AGENT
 
@@ -963,6 +976,16 @@ class ClaudeRelayService {
     return `${name}_${suffix}`
   }
 
+  _shouldPreserveToolName(name, tool = null) {
+    if (tool && typeof tool.type === 'string' && SERVER_TOOL_TYPE_PATTERN.test(tool.type)) {
+      return true
+    }
+    if (RESERVED_TOOL_NAMES.has(name)) {
+      return true
+    }
+    return /^[A-Z][A-Za-z0-9]*$/.test(name)
+  }
+
   _transformToolNamesInRequestBody(body, options = {}) {
     if (!body || typeof body !== 'object') {
       return null
@@ -972,8 +995,11 @@ class ClaudeRelayService {
     const forwardMap = new Map()
     const reverseMap = new Map()
 
-    const transformName = (name) => {
+    const transformName = (name, tool = null) => {
       if (typeof name !== 'string' || name.length === 0) {
+        return name
+      }
+      if (this._shouldPreserveToolName(name, tool)) {
         return name
       }
       if (forwardMap.has(name)) {
@@ -992,7 +1018,7 @@ class ClaudeRelayService {
     if (Array.isArray(body.tools)) {
       body.tools.forEach((tool) => {
         if (tool && typeof tool.name === 'string') {
-          tool.name = transformName(tool.name)
+          tool.name = transformName(tool.name, tool)
         }
       })
     }
