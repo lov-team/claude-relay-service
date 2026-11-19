@@ -108,6 +108,92 @@ describe('Claude relay cache_control ttl handling', () => {
     })
   })
 
+  test('downgrades a 1h breakpoint that follows a 5m breakpoint', () => {
+    const body = {
+      model: 'claude-opus-4-7',
+      system: [
+        {
+          type: 'text',
+          text: 'short-lived prefix',
+          cache_control: { type: 'ephemeral', ttl: '5m' }
+        }
+      ],
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: 'long-lived prefix',
+              cache_control: { type: 'ephemeral', ttl: '1h' }
+            }
+          ]
+        }
+      ]
+    }
+
+    const processed = claudeRelayService._processRequestBody(body, null, true)
+
+    expect(processed.system[0].cache_control).toEqual({ type: 'ephemeral', ttl: '5m' })
+    expect(processed.messages[0].content[0].cache_control).toEqual({ type: 'ephemeral' })
+  })
+
+  test('keeps a 1h breakpoint when it precedes 5m breakpoints', () => {
+    const body = {
+      model: 'claude-opus-4-7',
+      system: [
+        {
+          type: 'text',
+          text: 'long-lived prefix',
+          cache_control: { type: 'ephemeral', ttl: '1h' }
+        }
+      ],
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: 'short-lived prefix',
+              cache_control: { type: 'ephemeral', ttl: '5m' }
+            }
+          ]
+        }
+      ]
+    }
+
+    const processed = claudeRelayService._processRequestBody(body, null, true)
+
+    expect(processed.system[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' })
+    expect(processed.messages[0].content[0].cache_control).toEqual({
+      type: 'ephemeral',
+      ttl: '5m'
+    })
+  })
+
+  test('applies the same ordering rule after injecting the mimic system cache breakpoint', () => {
+    const body = {
+      model: 'claude-opus-4-7',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: 'client long-lived prefix',
+              cache_control: { type: 'ephemeral', ttl: '1h' }
+            }
+          ]
+        }
+      ]
+    }
+
+    const processed = claudeRelayService._processRequestBody(body, null, false)
+
+    expect(processed.system[1].cache_control).toEqual({ type: 'ephemeral', ttl: '5m' })
+    expect(processed.messages[0].content[0].cache_control).toEqual({ type: 'ephemeral' })
+  })
+
   test('removes unsupported cache_control ttl values', () => {
     const body = {
       model: 'claude-opus-4-7',

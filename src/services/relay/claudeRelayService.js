@@ -2251,9 +2251,6 @@ class ClaudeRelayService {
     // 验证并限制max_tokens参数
     this._validateAndLimitMaxTokens(processedBody)
 
-    // 保留 Anthropic 支持的 cache_control.ttl（如 1h 扩展缓存），清理非法值
-    this._normalizeCacheControlTtl(processedBody)
-
     // 判断是否是真实的 Claude Code 请求
     // 优先使用调用方传入的值（基于 UA + system prompt 综合判断），
     // 解决原逻辑中仅凭 system prompt 相似度判断导致的不一致问题
@@ -2374,7 +2371,11 @@ class ClaudeRelayService {
       }
     }
 
+    // 注入/改写完成后处理缓存断点。先裁剪超出限制的早期断点，避免被裁掉的
+    // 5m 断点影响后续仍然保留的 1h 断点；再按 tools -> system -> messages 校正 TTL。
     this._enforceCacheControlLimit(processedBody)
+    // Anthropic 不接受 5m 断点之后再出现 1h 断点；后者降级为默认的 5m。
+    this._normalizeCacheControlTtl(processedBody)
 
     // 处理原有的系统提示（如果配置了）
     if (this.systemPrompt && this.systemPrompt.trim()) {
@@ -2548,6 +2549,10 @@ class ClaudeRelayService {
       })
     }
 
+    if (Array.isArray(body.tools)) {
+      processContentArray(body.tools)
+    }
+
     if (Array.isArray(body.system)) {
       processContentArray(body.system)
     }
@@ -2561,21 +2566,38 @@ class ClaudeRelayService {
     }
   }
 
-  // 🧹 规范化 cache_control.ttl，保留合法 TTL 以支持 Anthropic 扩展缓存
+  // 🧹 规范化 cache_control.ttl，保留合法 TTL 并满足 Anthropic 的顺序约束
   _normalizeCacheControlTtl(body) {
+    let hasShortTtl = false
+
     this._forEachCacheControl(body, (cacheControl) => {
       if (!cacheControl || cacheControl.ttl === undefined || cacheControl.ttl === null) {
+        // 没有 ttl 的 ephemeral cache_control 默认是 5m，也会阻止后续 1h。
+        hasShortTtl = true
         return
       }
 
-      const ttl = String(cacheControl.ttl).trim().toLowerCase()
-      if (VALID_CACHE_CONTROL_TTLS.has(ttl)) {
-        cacheControl.ttl = ttl
+      const originalTtl = cacheControl.ttl
+      const ttl = String(originalTtl).trim().toLowerCase()
+      if (!VALID_CACHE_CONTROL_TTLS.has(ttl)) {
+        logger.debug(`🧹 Removed unsupported cache_control ttl: ${originalTtl}`)
+        delete cacheControl.ttl
+        hasShortTtl = true
         return
       }
 
-      logger.debug(`🧹 Removed unsupported cache_control ttl: ${cacheControl.ttl}`)
-      delete cacheControl.ttl
+      if (ttl === '1h' && hasShortTtl) {
+        // 上游按 tools -> system -> messages 处理 cache breakpoint，5m 后的 1h
+        // 会直接导致 400；去掉 ttl 后按 Anthropic 默认值降级为 5m。
+        logger.debug('🧹 Downgraded out-of-order 1h cache_control ttl to default 5m')
+        delete cacheControl.ttl
+        return
+      }
+
+      cacheControl.ttl = ttl
+      if (ttl === '5m') {
+        hasShortTtl = true
+      }
     })
   }
 
