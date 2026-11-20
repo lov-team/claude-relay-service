@@ -547,7 +547,8 @@ class ClaudeRelayService {
     sessionHash = null,
     alreadyRetried = false,
     oauthError = {},
-    detectionSource = 'relay_oauth_401_recovery'
+    detectionSource = 'relay_oauth_401_recovery',
+    rejectedAccessToken = null
   }) {
     if (accountType !== 'claude-official') {
       return { retry: false, handled: false }
@@ -566,6 +567,19 @@ class ClaudeRelayService {
         force: true
       })
       return { retry: false, handled: true }
+    }
+
+    if (rejectedAccessToken && typeof claudeAccountService.getRotatedAccessToken === 'function') {
+      const rotatedToken = await claudeAccountService.getRotatedAccessToken(
+        accountId,
+        rejectedAccessToken
+      )
+      if (rotatedToken) {
+        logger.info(
+          `🔄 OAuth 401 for account ${accountId} recovered from concurrent token rotation without refreshing`
+        )
+        return { retry: true, handled: false, accessToken: rotatedToken, rotated: true }
+      }
     }
 
     logger.warn(`🔄 OAuth 401 for account ${accountId}, forcing one token refresh before stopping`)
@@ -1633,7 +1647,8 @@ class ClaudeRelayService {
             accountType,
             sessionHash,
             oauthError,
-            detectionSource: 'relay_non_stream_401_recovery'
+            detectionSource: 'relay_non_stream_401_recovery',
+            rejectedAccessToken: accessToken
           })
           oauth401Handled = recovery.handled
 
@@ -4455,7 +4470,8 @@ class ClaudeRelayService {
                   sessionHash,
                   alreadyRetried: priorAuthRetries > 0,
                   oauthError,
-                  detectionSource: 'relay_stream_401_recovery'
+                  detectionSource: 'relay_stream_401_recovery',
+                  rejectedAccessToken: accessToken
                 })
                 oauth401Handled = recovery.handled
 

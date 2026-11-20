@@ -791,6 +791,32 @@ class ClaudeAccountService {
     }
   }
 
+  // 🔄 并发 token 轮换恢复：仅在存储中存在活跃且不同于被拒 token 的新 token 时返回
+  async getRotatedAccessToken(accountId, rejectedAccessToken) {
+    if (!accountId || !rejectedAccessToken) {
+      return null
+    }
+    try {
+      const accountData = await redis.getClaudeAccount(accountId)
+      if (
+        !accountData ||
+        Object.keys(accountData).length === 0 ||
+        accountData.status !== 'active' ||
+        accountData.schedulable === 'false'
+      ) {
+        return null
+      }
+      const latestToken = this._decryptSensitiveData(accountData.accessToken)
+      if (!latestToken || !latestToken.trim() || latestToken === rejectedAccessToken) {
+        return null
+      }
+      return latestToken
+    } catch (error) {
+      logger.warn(`Failed to check rotated access token for ${accountId}: ${error.message}`)
+      return null
+    }
+  }
+
   // 📋 获取所有Claude账户
   async getAllAccounts() {
     try {
@@ -1704,8 +1730,8 @@ class ClaudeAccountService {
     const upstreamResetMs = resetTimestamp ? resetTimestamp * 1000 : 0
     try {
       const { getNurtureRateLimitCooldownSeconds } = require('../../utils/accountNurtureDefaults')
-      const config = await accountNurtureConfigService.getConfig()
-      const seconds = getNurtureRateLimitCooldownSeconds(config, accountData)
+      const nurtureConfig = await accountNurtureConfigService.getConfig()
+      const seconds = getNurtureRateLimitCooldownSeconds(nurtureConfig, accountData)
       if (seconds !== null) {
         return new Date(Math.max(upstreamResetMs, Date.now() + seconds * 1000)).toISOString()
       }

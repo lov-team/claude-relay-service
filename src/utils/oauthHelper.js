@@ -12,7 +12,7 @@ const config = require('../../config/config')
 // OAuth 配置常量 - 从claude-code-login.js提取
 // 注：console.anthropic.com 已迁移至 platform.claude.com，旧域名对 refresh_token grant 返回 404
 const OAUTH_CONFIG = {
-  AUTHORIZE_URL: 'https://claude.ai/oauth/authorize',
+  AUTHORIZE_URL: 'https://claude.com/cai/oauth/authorize',
   TOKEN_URL: config.claude?.oauthTokenUrl || 'https://platform.claude.com/v1/oauth/token',
   CLIENT_ID: '9d1c250a-e61b-44d9-88ed-5944d1962f5e',
   REDIRECT_URI: 'https://platform.claude.com/oauth/code/callback',
@@ -146,25 +146,45 @@ function createProxyAgent(proxyConfig) {
   return ProxyHelper.createProxyAgent(proxyConfig)
 }
 
+function splitCodeAndState(authorizationCode) {
+  const raw = String(authorizationCode || '').trim()
+  const hashIndex = raw.indexOf('#')
+  if (hashIndex === -1) {
+    return {
+      code: raw.split('&')[0],
+      state: undefined
+    }
+  }
+  const code = raw.slice(0, hashIndex).split('&')[0]
+  const embeddedState = raw.slice(hashIndex + 1).split('&')[0]
+  return {
+    code,
+    state: embeddedState || undefined
+  }
+}
+
 /**
  * 使用授权码交换访问令牌
  * @param {string} authorizationCode - 授权码
  * @param {string} codeVerifier - PKCE code verifier
- * @param {string} state - state 参数
+ * @param {string} _state - state 参数（保留签名兼容，仅在 code#state 内嵌时回传）
  * @param {object|null} proxyConfig - 代理配置（可选）
  * @returns {Promise<object>} Claude格式的token响应
  */
-async function exchangeCodeForTokens(authorizationCode, codeVerifier, state, proxyConfig = null) {
-  // 清理授权码，移除URL片段
-  const cleanedCode = authorizationCode.split('#')[0]?.split('&')[0] ?? authorizationCode
+async function exchangeCodeForTokens(authorizationCode, codeVerifier, _state, proxyConfig = null) {
+  // 拆分 code#state：仅在授权码内嵌服务端 state 时回传该 state
+  const { code: cleanedCode, state: embeddedState } = splitCodeAndState(authorizationCode)
 
   const params = {
     grant_type: 'authorization_code',
     client_id: OAUTH_CONFIG.CLIENT_ID,
     code: cleanedCode,
     redirect_uri: OAUTH_CONFIG.REDIRECT_URI,
-    code_verifier: codeVerifier,
-    state
+    code_verifier: codeVerifier
+  }
+
+  if (embeddedState) {
+    params.state = embeddedState
   }
 
   // 创建代理agent
@@ -190,11 +210,8 @@ async function exchangeCodeForTokens(authorizationCode, codeVerifier, state, pro
     const axiosConfig = {
       headers: {
         'Content-Type': 'application/json',
-        'User-Agent': 'claude-cli/1.0.56 (external, cli)',
         Accept: 'application/json, text/plain, */*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        Referer: 'https://claude.ai/',
-        Origin: 'https://claude.ai'
+        'User-Agent': 'axios/1.13.6'
       },
       timeout: 30000
     }
@@ -328,6 +345,8 @@ function parseCallbackUrl(input) {
 
   const trimmedInput = input.trim()
 
+  const validTokenPartPattern = /^[A-Za-z0-9_-]+$/
+
   // 情况1: 尝试作为完整URL解析
   if (trimmedInput.startsWith('http://') || trimmedInput.startsWith('https://')) {
     try {
@@ -338,18 +357,30 @@ function parseCallbackUrl(input) {
         throw new Error('回调 URL 中未找到授权码 (code 参数)')
       }
 
+      if (!validTokenPartPattern.test(authorizationCode)) {
+        throw new Error('授权码包含无效字符，请检查是否复制了正确的 Authorization Code')
+      }
+
+      const rawHashState = urlObj.hash ? urlObj.hash.slice(1).split('&')[0] : ''
+      const urlState = urlObj.searchParams.get('state') || rawHashState
+      if (urlState && validTokenPartPattern.test(urlState)) {
+        return `${authorizationCode}#${urlState}`
+      }
+
       return authorizationCode
     } catch (error) {
-      if (error.message.includes('回调 URL 中未找到授权码')) {
+      if (
+        error.message.includes('回调 URL 中未找到授权码') ||
+        error.message.includes('授权码包含无效字符')
+      ) {
         throw error
       }
       throw new Error('无效的 URL 格式，请检查回调 URL 是否正确')
     }
   }
 
-  // 情况2: 直接的授权码（可能包含URL fragments）
-  // 参考claude-code-login.js的处理方式：移除URL fragments和参数
-  const cleanedCode = trimmedInput.split('#')[0]?.split('&')[0] ?? trimmedInput
+  // 情况2: 直接的授权码（支持 code 或 code#state）
+  const { code: cleanedCode, state: embeddedState } = splitCodeAndState(trimmedInput)
 
   // 验证授权码格式（Claude的授权码通常是base64url格式）
   if (!cleanedCode || cleanedCode.length < 10) {
@@ -357,9 +388,15 @@ function parseCallbackUrl(input) {
   }
 
   // 基本格式验证：授权码应该只包含字母、数字、下划线、连字符
-  const validCodePattern = /^[A-Za-z0-9_-]+$/
-  if (!validCodePattern.test(cleanedCode)) {
+  if (!validTokenPartPattern.test(cleanedCode)) {
     throw new Error('授权码包含无效字符，请检查是否复制了正确的 Authorization Code')
+  }
+
+  if (embeddedState !== undefined) {
+    if (!validTokenPartPattern.test(embeddedState)) {
+      throw new Error('授权码包含无效字符，请检查是否复制了正确的 Authorization Code')
+    }
+    return `${cleanedCode}#${embeddedState}`
   }
 
   return cleanedCode
@@ -369,13 +406,13 @@ function parseCallbackUrl(input) {
  * 使用授权码交换Setup Token
  * @param {string} authorizationCode - 授权码
  * @param {string} codeVerifier - PKCE code verifier
- * @param {string} state - state 参数
+ * @param {string} _state - state 参数（保留签名兼容，仅在 code#state 内嵌时回传）
  * @param {object|null} proxyConfig - 代理配置（可选）
  * @returns {Promise<object>} Claude格式的token响应
  */
-async function exchangeSetupTokenCode(authorizationCode, codeVerifier, state, proxyConfig = null) {
-  // 清理授权码，移除URL片段
-  const cleanedCode = authorizationCode.split('#')[0]?.split('&')[0] ?? authorizationCode
+async function exchangeSetupTokenCode(authorizationCode, codeVerifier, _state, proxyConfig = null) {
+  // 拆分 code#state：仅在授权码内嵌服务端 state 时回传该 state
+  const { code: cleanedCode, state: embeddedState } = splitCodeAndState(authorizationCode)
 
   const params = {
     grant_type: 'authorization_code',
@@ -383,8 +420,11 @@ async function exchangeSetupTokenCode(authorizationCode, codeVerifier, state, pr
     code: cleanedCode,
     redirect_uri: OAUTH_CONFIG.REDIRECT_URI,
     code_verifier: codeVerifier,
-    state,
     expires_in: 31536000 // Setup Token 可以设置较长的过期时间
+  }
+
+  if (embeddedState) {
+    params.state = embeddedState
   }
 
   // 创建代理agent
@@ -410,11 +450,8 @@ async function exchangeSetupTokenCode(authorizationCode, codeVerifier, state, pr
     const axiosConfig = {
       headers: {
         'Content-Type': 'application/json',
-        'User-Agent': 'claude-cli/1.0.56 (external, cli)',
         Accept: 'application/json, text/plain, */*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        Referer: 'https://claude.ai/',
-        Origin: 'https://claude.ai'
+        'User-Agent': 'axios/1.13.6'
       },
       timeout: 30000
     }
@@ -644,28 +681,21 @@ async function getOrganizationInfo(sessionKey, proxyConfig = null) {
       throw new Error('获取组织信息失败：响应格式无效')
     }
 
-    // 找到具有chat能力且能力最多的组织
-    let bestOrg = null
-    let maxCapabilities = []
+    const chatOrgs = response.data.filter(
+      (org) => Array.isArray(org?.capabilities) && org.capabilities.includes('chat') && org.uuid
+    )
 
-    for (const org of response.data) {
-      const capabilities = org.capabilities || []
-
-      // 必须有chat能力
-      if (!capabilities.includes('chat')) {
-        continue
-      }
-
-      // 选择能力最多的组织
-      if (capabilities.length > maxCapabilities.length) {
-        bestOrg = org
-        maxCapabilities = capabilities
-      }
-    }
-
-    if (!bestOrg || !bestOrg.uuid) {
+    if (chatOrgs.length === 0) {
       throw new Error('未找到具有chat能力的组织')
     }
+
+    let bestOrg = chatOrgs.length > 1 ? chatOrgs.find((org) => org.raven_type === 'team') : null
+    if (!bestOrg) {
+      bestOrg = chatOrgs.reduce((best, org) =>
+        (org.capabilities || []).length > (best.capabilities || []).length ? org : best
+      )
+    }
+    const maxCapabilities = bestOrg.capabilities || []
 
     logger.success('Found organization', {
       uuid: bestOrg.uuid,
@@ -877,6 +907,7 @@ async function oauthWithCookie(sessionKey, proxyConfig = null, isSetupToken = fa
 module.exports = {
   OAUTH_CONFIG,
   COOKIE_OAUTH_CONFIG,
+  splitCodeAndState,
   generateOAuthParams,
   generateSetupTokenParams,
   exchangeCodeForTokens,
