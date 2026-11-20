@@ -223,11 +223,11 @@ describe('requestIdentityService.transform', () => {
     expect(result.headers['X-Stainless-OS']).toBe('MacOS')
     expect(result.headers['X-Stainless-Arch']).toBe('arm64')
     expect(result.headers['X-Stainless-Lang']).toBe('js')
-    expect(result.headers['X-Stainless-Package-Version']).toBe('0.68.0')
+    expect(result.headers['X-Stainless-Package-Version']).toBe('0.94.0')
     expect(result.headers['X-Stainless-Runtime']).toBe('node')
-    expect(result.headers['X-Stainless-Runtime-Version']).toBe('v22.18.0')
+    expect(result.headers['X-Stainless-Runtime-Version']).toBe('v24.3.0')
     expect(result.headers['X-Stainless-Retry-Count']).toBe('0')
-    expect(result.headers['X-Stainless-Timeout']).toBe('60')
+    expect(result.headers['X-Stainless-Timeout']).toBe('600')
     expect(mockRedisSet).toHaveBeenCalled()
   })
 
@@ -246,7 +246,7 @@ describe('requestIdentityService.transform', () => {
 
     expect(result.headers['X-Stainless-OS']).toBe('Linux')
     expect(result.headers['X-Stainless-Runtime']).toBe('node')
-    expect(result.headers['X-Stainless-Runtime-Version']).toBe('v22.18.0')
+    expect(result.headers['X-Stainless-Runtime-Version']).toBe('v24.3.0')
   })
 
   it('replaces malformed metadata user ids instead of forwarding client identity', async () => {

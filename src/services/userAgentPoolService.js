@@ -7,11 +7,43 @@ const USER_AGENT_POOL_KEY = 'claude:user_agent_pool'
 const USER_AGENT_POOL_METADATA_KEY = 'claude:user_agent_pool:metadata'
 const MAX_POOL_SIZE = 200
 const MAX_USER_AGENT_LENGTH = 1024
-const MIN_CLAUDE_CODE_VERSION = '2.1.255'
+const MIN_CLAUDE_CODE_VERSION = '2.1.321'
 const DEFAULT_CLAUDE_USER_AGENT = `claude-cli/${MIN_CLAUDE_CODE_VERSION} (external, cli)`
 const DEFAULT_CONSOLE_USER_AGENT = DEFAULT_CLAUDE_USER_AGENT
+const STRICT_THREE_PART_SEMVER_RE = /^\d+\.\d+\.\d+$/
 
 class UserAgentPoolService {
+  constructor() {
+    this.syncedVersion = null
+  }
+
+  isStrictThreePartSemver(version) {
+    return typeof version === 'string' && STRICT_THREE_PART_SEMVER_RE.test(version.trim())
+  }
+
+  setSyncedClaudeCodeVersion(version) {
+    if (!this.isStrictThreePartSemver(version)) {
+      return null
+    }
+    const trimmed = version.trim()
+    if (this.compareClaudeCodeVersions(trimmed, MIN_CLAUDE_CODE_VERSION) < 0) {
+      return null
+    }
+    if (this.syncedVersion && this.compareClaudeCodeVersions(trimmed, this.syncedVersion) < 0) {
+      return this.syncedVersion
+    }
+    this.syncedVersion = trimmed
+    return this.syncedVersion
+  }
+
+  getEffectiveMinClaudeCodeVersion() {
+    return this.getConfiguredClaudeCodeVersion() || this.syncedVersion || MIN_CLAUDE_CODE_VERSION
+  }
+
+  getDefaultClaudeUserAgent() {
+    return `claude-cli/${this.getEffectiveMinClaudeCodeVersion()} (external, cli)`
+  }
+
   normalizeUserAgent(userAgent) {
     if (typeof userAgent !== 'string') {
       return ''
@@ -60,17 +92,17 @@ class UserAgentPoolService {
       return normalized
     }
 
-    const configuredVersion = this.getConfiguredClaudeCodeVersion()
-    const targetVersion =
-      configuredVersion ||
-      (this.compareClaudeCodeVersions(currentVersion, MIN_CLAUDE_CODE_VERSION) < 0
-        ? MIN_CLAUDE_CODE_VERSION
+    const targetVersion = this.getEffectiveMinClaudeCodeVersion()
+    const resolvedVersion =
+      this.getConfiguredClaudeCodeVersion() ||
+      (this.compareClaudeCodeVersions(currentVersion, targetVersion) < 0
+        ? targetVersion
         : currentVersion)
 
-    if (targetVersion === currentVersion) {
+    if (resolvedVersion === currentVersion) {
       return normalized
     }
-    return normalized.replace(`claude-cli/${currentVersion}`, `claude-cli/${targetVersion}`)
+    return normalized.replace(`claude-cli/${currentVersion}`, `claude-cli/${resolvedVersion}`)
   }
 
   detectPlatform(userAgent, headersOrFingerprint = null) {
@@ -218,7 +250,8 @@ class UserAgentPoolService {
       return latest
     }
 
-    const userAgent = this.normalizeClaudeCodeUserAgent(fallbackUserAgent)
+    const fallback = fallbackUserAgent || this.getDefaultClaudeUserAgent()
+    const userAgent = this.normalizeClaudeCodeUserAgent(fallback)
     return {
       userAgent,
       platform: this.detectPlatform(userAgent),

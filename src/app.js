@@ -140,6 +140,13 @@ class Application {
       const claudeAccountService = require('./services/account/claudeAccountService')
       await claudeAccountService.initializeSessionWindows()
 
+      if (process.env.NODE_ENV !== 'test' && config.claude?.autoSyncCodeVersion !== false) {
+        const claudeCodeVersionSyncService = require('./services/claudeCodeVersionSyncService')
+        claudeCodeVersionSyncService.start().catch((err) => {
+          logger.warn('⚠️ Claude Code version sync startup failed:', err.message)
+        })
+      }
+
       // 📊 初始化费用排序索引服务
       logger.info('📊 Initializing cost rank service...')
       const costRankService = require('./services/costRankService')

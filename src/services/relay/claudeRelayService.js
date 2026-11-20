@@ -33,6 +33,12 @@ const {
 } = require('../../utils/claudeOAuthErrorClassifier')
 const { evaluateClaudeTrafficGuardrail } = require('../../utils/claudeTrafficGuardrail')
 const {
+  rejectsTemperature,
+  adaptClaude55Thinking,
+  sanitizeOpenCodeSystemPrompt,
+  isClaudeCodeCompactionRequest
+} = require('../../utils/claudeRequestCompat')
+const {
   getHttpsAgentForStream,
   getHttpsAgentForNonStream,
   getPricingData
@@ -626,6 +632,10 @@ class ClaudeRelayService {
     accountUserAgentMode = ''
   ) {
     let resolved
+    const defaultUA =
+      typeof userAgentPoolService.getDefaultClaudeUserAgent === 'function'
+        ? userAgentPoolService.getDefaultClaudeUserAgent()
+        : LEGACY_CLAUDE_USER_AGENT_FALLBACK
     if (accountUserAgentMode === 'pinned' && typeof accountUA === 'string' && accountUA.trim()) {
       resolved = userAgentPoolService.normalizeClaudeCodeUserAgent(accountUA)
     } else if (unifiedUA) {
@@ -637,11 +647,10 @@ class ClaudeRelayService {
         resolved = userAgentPoolService.normalizeClaudeCodeUserAgent(userAgent)
       } else if (isRealClaudeCode) {
         resolved = userAgentPoolService.normalizeClaudeCodeUserAgent(
-          this._extractClaudeCodeUserAgentFromBillingHeader(requestPayload) ||
-            LEGACY_CLAUDE_USER_AGENT_FALLBACK
+          this._extractClaudeCodeUserAgentFromBillingHeader(requestPayload) || defaultUA
         )
       } else {
-        resolved = userAgent || LEGACY_CLAUDE_USER_AGENT_FALLBACK
+        resolved = userAgent || defaultUA
       }
     }
 
@@ -2413,6 +2422,8 @@ class ClaudeRelayService {
       processedBody.messages = datelineResult.body.messages
     }
 
+    sanitizeOpenCodeSystemPrompt(processedBody)
+
     // 非 Claude Code 请求只补身份前缀，不伪造计费指纹。
     // 本地重算的 cc_version.{fp} 对不上上游校验时，本身就是第三方信号。
     // 客户端自己带来的指纹在真实 CC 路径上原样保留。
@@ -2478,6 +2489,8 @@ class ClaudeRelayService {
     // 改版本或重算指纹都会拆开客户端已经算好的一对。
     // 非 CC 路径上面没有写入 billing 块；若原始 system 被整段替换，也不会带上。
 
+    adaptClaude55Thinking(processedBody)
+
     // CLI 形态补全（仅伪装路径）：真实 Claude Code 总是携带
     // tools 数组（可为空）、temperature（默认 1）、max_tokens
     // （默认 128000）；thinking 开启时自动附带 context_management。
@@ -2486,7 +2499,7 @@ class ClaudeRelayService {
       if (!Array.isArray(processedBody.tools)) {
         processedBody.tools = []
       }
-      if (processedBody.temperature === undefined) {
+      if (processedBody.temperature === undefined && !rejectsTemperature(processedBody.model)) {
         processedBody.temperature = 1
       }
       if (processedBody.max_tokens === undefined) {
@@ -2509,6 +2522,18 @@ class ClaudeRelayService {
       if (processedBody.tools.length === 0 && processedBody.tool_choice !== undefined) {
         delete processedBody.tool_choice
       }
+    }
+
+    if (rejectsTemperature(processedBody.model) && processedBody.temperature !== undefined) {
+      delete processedBody.temperature
+    }
+
+    if (isClaudeCodeCompactionRequest(processedBody)) {
+      this._forEachCacheControl(processedBody, (cacheControl) => {
+        if (cacheControl && typeof cacheControl === 'object') {
+          cacheControl.ttl = '5m'
+        }
+      })
     }
 
     // 注入/改写完成后处理缓存断点。先裁剪超出限制的早期断点，避免被裁掉的

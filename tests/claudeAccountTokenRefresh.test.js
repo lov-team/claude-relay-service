@@ -298,19 +298,19 @@ describe('claudeAccountService token refresh hardening', () => {
 
   test('pins the complete successful outbound identity atomically', async () => {
     const headers = {
-      'User-Agent': 'claude-cli/2.1.255 (external, cli)',
+      'User-Agent': 'claude-cli/2.1.321 (external, cli)',
       'X-Stainless-Retry-Count': '0',
-      'X-Stainless-Timeout': '60',
+      'X-Stainless-Timeout': '600',
       'X-Stainless-Lang': 'js',
-      'X-Stainless-Package-Version': '0.68.0',
+      'X-Stainless-Package-Version': '0.94.0',
       'X-Stainless-OS': 'MacOS',
       'X-Stainless-Arch': 'arm64',
       'X-Stainless-Runtime': 'node',
-      'X-Stainless-Runtime-Version': 'v22.18.0'
+      'X-Stainless-Runtime-Version': 'v24.3.0'
     }
     mockPinIdentity.mockResolvedValue({
       status: 1,
-      userAgent: 'claude-cli/2.1.255 (external, cli)'
+      userAgent: 'claude-cli/2.1.321 (external, cli)'
     })
 
     await expect(
@@ -324,7 +324,7 @@ describe('claudeAccountService token refresh hardening', () => {
     expect(mockPinIdentity).toHaveBeenCalledWith(
       baseAccount.id,
       expect.objectContaining({
-        userAgent: 'claude-cli/2.1.255 (external, cli)',
+        userAgent: 'claude-cli/2.1.321 (external, cli)',
         userAgentPlatform: 'mac',
         detectionSource: 'relay_stream_success',
         stainlessFingerprint: expect.stringContaining('x-stainless-runtime-version')

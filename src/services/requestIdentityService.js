@@ -38,33 +38,33 @@ const REDIS_KEY_PREFIX = 'fmt_claude_req:stainless_headers:v2:'
 const ACCOUNT_FINGERPRINT_DEFAULTS = {
   macos: {
     'x-stainless-retry-count': '0',
-    'x-stainless-timeout': '60',
+    'x-stainless-timeout': '600',
     'x-stainless-lang': 'js',
-    'x-stainless-package-version': '0.68.0',
+    'x-stainless-package-version': '0.94.0',
     'x-stainless-os': 'MacOS',
     'x-stainless-arch': 'arm64',
     'x-stainless-runtime': 'node',
-    'x-stainless-runtime-version': 'v22.18.0'
+    'x-stainless-runtime-version': 'v24.3.0'
   },
   windows: {
     'x-stainless-retry-count': '0',
-    'x-stainless-timeout': '60',
+    'x-stainless-timeout': '600',
     'x-stainless-lang': 'js',
-    'x-stainless-package-version': '0.55.1',
+    'x-stainless-package-version': '0.94.0',
     'x-stainless-os': 'Windows',
     'x-stainless-arch': 'x64',
     'x-stainless-runtime': 'node',
-    'x-stainless-runtime-version': 'v20.19.2'
+    'x-stainless-runtime-version': 'v24.3.0'
   },
   linux: {
     'x-stainless-retry-count': '0',
-    'x-stainless-timeout': '60',
+    'x-stainless-timeout': '600',
     'x-stainless-lang': 'js',
-    'x-stainless-package-version': '0.68.0',
+    'x-stainless-package-version': '0.94.0',
     'x-stainless-os': 'Linux',
     'x-stainless-arch': 'x64',
     'x-stainless-runtime': 'node',
-    'x-stainless-runtime-version': 'v22.18.0'
+    'x-stainless-runtime-version': 'v24.3.0'
   }
 }
 

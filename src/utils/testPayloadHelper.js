@@ -1,5 +1,6 @@
 const crypto = require('crypto')
 const { mapToErrorCode } = require('./errorSanitizer')
+const { rejectsTemperature } = require('./claudeRequestCompat')
 
 // 将原始错误信息映射为安全的标准错误码消息
 const sanitizeErrorMsg = (msg) => {
@@ -65,8 +66,11 @@ function createClaudeTestPayload(model = 'claude-opus-4-6', options = {}) {
     metadata: {
       user_id: generateSessionString()
     },
-    max_tokens: maxTokens,
-    temperature: 1
+    max_tokens: maxTokens
+  }
+
+  if (!rejectsTemperature(model)) {
+    payload.temperature = 1
   }
 
   if (stream) {
