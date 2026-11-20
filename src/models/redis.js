@@ -2451,6 +2451,72 @@ class RedisClient {
     return await this.client.hgetall(key)
   }
 
+  async updateClaudeAccountPassiveUsage(accountId, fields = {}, nowMs = Date.now()) {
+    const key = `claude:account:${accountId}`
+    const client = this.getClientSafe()
+    const entries = Object.entries(fields || {})
+      .filter(([, value]) => value !== undefined && value !== null)
+      .flatMap(([field, value]) => [field, String(value)])
+
+    if (entries.length === 0) {
+      return { updated: false, fableRateLimitEndAt: '' }
+    }
+
+    const nowIso = new Date(nowMs).toISOString()
+    const nextFiveHourReset = fields.claudeFiveHourResetsAt
+      ? String(fields.claudeFiveHourResetsAt)
+      : ''
+
+    const script = `
+      if redis.call('EXISTS', KEYS[1]) == 0 then
+        return {0, ''}
+      end
+
+      local nowIso = ARGV[1]
+      local nextFiveHourReset = ARGV[2]
+      local prevFiveHourReset = redis.call('HGET', KEYS[1], 'claudeFiveHourResetsAt') or ''
+
+      local incoming = {}
+      for i = 3, #ARGV, 2 do
+        local field = ARGV[i]
+        local value = ARGV[i + 1]
+        incoming[field] = value
+      end
+
+      if nextFiveHourReset ~= '' and prevFiveHourReset ~= '' and nextFiveHourReset ~= prevFiveHourReset then
+        local weeklyPairs = {
+          {'claudeSevenDayUtilization', 'claudeSevenDayResetsAt'},
+          {'claudeSevenDayOpusUtilization', 'claudeSevenDayOpusResetsAt'},
+          {'claudeSevenDayFableUtilization', 'claudeSevenDayFableResetsAt'}
+        }
+        for _, pair in ipairs(weeklyPairs) do
+          local utilField = pair[1]
+          local resetField = pair[2]
+          if incoming[utilField] == nil and incoming[resetField] == nil then
+            local storedReset = redis.call('HGET', KEYS[1], resetField) or ''
+            if storedReset ~= '' and string.len(storedReset) == string.len(nowIso) and
+              string.sub(storedReset, -1) == 'Z' and storedReset <= nowIso then
+              redis.call('HDEL', KEYS[1], utilField, resetField)
+            end
+          end
+        end
+      end
+
+      for i = 3, #ARGV, 2 do
+        redis.call('HSET', KEYS[1], ARGV[i], ARGV[i + 1])
+      end
+
+      local fableRateLimitEndAt = redis.call('HGET', KEYS[1], 'fableRateLimitEndAt') or ''
+      return {1, fableRateLimitEndAt}
+    `
+
+    const result = await client.eval(script, 1, key, nowIso, nextFiveHourReset, ...entries)
+    return {
+      updated: Number(result?.[0]) === 1,
+      fableRateLimitEndAt: result?.[1] || ''
+    }
+  }
+
   async pinClaudeAccountIdentityIfAbsent(accountId, identity = {}) {
     const key = `claude:account:${accountId}`
     const client = this.getClientSafe()

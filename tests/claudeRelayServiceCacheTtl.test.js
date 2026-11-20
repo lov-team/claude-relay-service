@@ -561,6 +561,22 @@ describe('Claude relay CC rate-limit policy', () => {
     ).toBe(true)
   })
 
+  test('treats 7d_oi=rejected as a fable model-family limit even when 5h and 7d are allowed', () => {
+    const sevenDayOiReset = Math.floor(Date.now() / 1000) + 2 * 24 * 60 * 60
+    const headers = {
+      'anthropic-ratelimit-unified-5h-status': 'allowed',
+      'anthropic-ratelimit-unified-7d-status': 'allowed',
+      'anthropic-ratelimit-unified-7d_oi-status': 'rejected',
+      'anthropic-ratelimit-unified-7d_oi-reset': String(sevenDayOiReset),
+      'anthropic-ratelimit-unified-reset': String(Math.floor(Date.now() / 1000) + 300)
+    }
+
+    const resolvedReset = claudeRelayService._resolveEffective429ResetTimestamp(headers, 'fable')
+    expect(resolvedReset).toBe(sevenDayOiReset)
+    expect(claudeRelayService._areUsageWindowsStillAllowed(headers)).toBe(false)
+    expect(claudeRelayService._isModelFamilyRateLimit(headers, resolvedReset)).toBe(true)
+  })
+
   test('treats an explicit non-allowed 5h status as an account-wide limit', () => {
     const resetTimestamp = Math.floor(Date.now() / 1000) + 6 * 24 * 60 * 60
     expect(

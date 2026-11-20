@@ -802,10 +802,12 @@ class ClaudeRelayService {
 
   // 5h 和 7d 用量窗口都还 allowed 时，这次 429 不是窗口耗尽
   // （常见于 extra usage / overage / 组织策略），不能按周限额去封模型或整号。
+  // 7d_oi=rejected 除外：那是 Fable 专属周限额。
   _areUsageWindowsStillAllowed(headers) {
     return (
       this._getUnifiedRateLimitStatus(headers, '5h') === 'allowed' &&
-      this._getUnifiedRateLimitStatus(headers, '7d') === 'allowed'
+      this._getUnifiedRateLimitStatus(headers, '7d') === 'allowed' &&
+      this._getUnifiedRateLimitStatus(headers, '7d_oi') !== 'rejected'
     )
   }
 
@@ -822,6 +824,28 @@ class ClaudeRelayService {
     return (
       this._areUsageWindowsStillAllowed(headers) || this._isImplausibleWeeklyReset(resetTimestamp)
     )
+  }
+
+  _resolveEffective429ResetTimestamp(headers, requestModelFamily = null) {
+    if (
+      requestModelFamily === 'fable' &&
+      this._getUnifiedRateLimitStatus(headers, '7d_oi') === 'rejected'
+    ) {
+      const fableResetHeader = this._getHeaderValueCaseInsensitive(
+        headers,
+        'anthropic-ratelimit-unified-7d_oi-reset'
+      )
+      const parsedFableReset = fableResetHeader ? parseInt(fableResetHeader, 10) : NaN
+      if (!Number.isNaN(parsedFableReset)) {
+        return parsedFableReset
+      }
+    }
+
+    const resetHeader = this._getHeaderValueCaseInsensitive(
+      headers,
+      'anthropic-ratelimit-unified-reset'
+    )
+    return resetHeader ? parseInt(resetHeader, 10) : NaN
   }
 
   // Anthropic 的 unified-reset 既可能指向 5 小时整号窗口，也可能指向模型家族周限额。
@@ -845,6 +869,9 @@ class ClaudeRelayService {
     // 只要上游明确给出其它 5 小时状态，就保守按整号限流处理。
     if (fiveHourStatus) {
       return false
+    }
+    if (this._getUnifiedRateLimitStatus(headers, '7d_oi') === 'rejected') {
+      return true
     }
 
     const message = this._extractErrorMessage(body).toLowerCase()
@@ -958,6 +985,23 @@ class ClaudeRelayService {
       return { success: true, usageCapConfirmed: true }
     }
     return await this._applyNoResetRateLimitCooldown(accountId, accountType, sessionHash, context)
+  }
+
+  async _recordPassiveUsageSafe(accountId, accountType, headers) {
+    if (
+      accountType !== 'claude-official' ||
+      !headers ||
+      typeof claudeAccountService.recordPassiveUsageFromHeaders !== 'function'
+    ) {
+      return
+    }
+    try {
+      await claudeAccountService.recordPassiveUsageFromHeaders(accountId, headers)
+    } catch (error) {
+      logger.debug(
+        `Passive usage header sampling failed for account ${accountId}: ${error.message}`
+      )
+    }
   }
 
   _toPascalCaseToolName(name) {
@@ -1763,16 +1807,17 @@ class ClaudeRelayService {
         }
         // 检查是否为429状态码
         else if (response.statusCode === 429) {
+          await this._recordPassiveUsageSafe(accountId, accountType, response.headers)
           // 💰 先检查是否为 "Extra usage required" 的非限流 429
           if (this._isExtraUsageRequired429(response.statusCode, response.body)) {
             logger.info(
               `💰 [Non-Stream] "Extra usage required" 429 for account ${accountId}, skipping rate limit marking`
             )
           } else {
-            const resetHeader = response.headers
-              ? response.headers['anthropic-ratelimit-unified-reset']
-              : null
-            const parsedResetTimestamp = resetHeader ? parseInt(resetHeader, 10) : NaN
+            const parsedResetTimestamp = this._resolveEffective429ResetTimestamp(
+              response.headers,
+              requestModelFamily
+            )
             if (this._shouldSkipLongCapRateLimit(response.headers, parsedResetTimestamp)) {
               logger.warn(
                 `⚠️ [Non-Stream] 429 for account ${accountId} is not a usage-window cap (5h=${this._getUnifiedRateLimitStatus(response.headers, '5h') || 'missing'}, 7d=${this._getUnifiedRateLimitStatus(response.headers, '7d') || 'missing'}, reset=${Number.isNaN(parsedResetTimestamp) ? 'missing' : new Date(parsedResetTimestamp * 1000).toISOString()}); checking OAuth usage before cooldown`
@@ -1940,6 +1985,8 @@ class ClaudeRelayService {
           // 保存会话窗口状态到账户数据
           await claudeAccountService.updateSessionWindowStatus(accountId, sessionWindowStatus)
         }
+
+        await this._recordPassiveUsageSafe(accountId, accountType, response.headers)
 
         await claudeAccountNurtureService.recordRequestSuccess(accountId)
 
@@ -3928,6 +3975,8 @@ class ClaudeRelayService {
             })
             const errorBody429 = Buffer.concat(bodyChunks429).toString()
 
+            await this._recordPassiveUsageSafe(accountId, accountType, res.headers)
+
             // 检查是否为 "Extra usage required" 的非限流 429
             if (this._isExtraUsageRequired429(res.statusCode, errorBody429)) {
               logger.info(
@@ -3974,10 +4023,10 @@ class ClaudeRelayService {
             }
 
             // 真正的限流处理
-            const resetHeader = res.headers
-              ? res.headers['anthropic-ratelimit-unified-reset']
-              : null
-            const parsedResetTimestamp = resetHeader ? parseInt(resetHeader, 10) : NaN
+            const parsedResetTimestamp = this._resolveEffective429ResetTimestamp(
+              res.headers,
+              requestModelFamily
+            )
             const isAgentViewAuxiliaryRequest = this._isAgentViewAuxiliaryRequest(
               body,
               clientHeaders
@@ -4873,12 +4922,14 @@ class ClaudeRelayService {
             await claudeAccountService.updateSessionWindowStatus(accountId, sessionWindowStatus)
           }
 
+          await this._recordPassiveUsageSafe(accountId, accountType, res.headers)
+
           // 处理限流状态
           if (rateLimitDetected || res.statusCode === 429) {
-            const resetHeader = res.headers
-              ? res.headers['anthropic-ratelimit-unified-reset']
-              : null
-            const parsedResetTimestamp = resetHeader ? parseInt(resetHeader, 10) : NaN
+            const parsedResetTimestamp = this._resolveEffective429ResetTimestamp(
+              res.headers,
+              requestModelFamily
+            )
 
             if (this._shouldSkipLongCapRateLimit(res.headers, parsedResetTimestamp)) {
               logger.warn(

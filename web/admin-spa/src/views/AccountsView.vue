@@ -1030,6 +1030,43 @@
                         </div>
                       </div>
                       <div
+                        v-for="(scoped, scopedIdx) in account.claudeUsage.sevenDayScopedModels ||
+                        []"
+                        :key="`desktop-scoped-${scoped.modelName || scopedIdx}`"
+                        class="rounded-lg bg-gray-50 p-2 dark:bg-gray-700/70"
+                      >
+                        <div class="flex items-center gap-2">
+                          <span
+                            class="inline-flex min-w-[32px] justify-center rounded-full bg-purple-100 px-2 py-0.5 text-[11px] font-medium text-purple-600 dark:bg-purple-500/20 dark:text-purple-300"
+                          >
+                            {{ scoped.modelName }}
+                          </span>
+                          <div class="flex-1">
+                            <div class="flex items-center gap-2">
+                              <div class="h-2 flex-1 rounded-full bg-gray-200 dark:bg-gray-600">
+                                <div
+                                  :class="[
+                                    'h-2 rounded-full transition-all duration-300',
+                                    getClaudeUsageBarClass(scoped)
+                                  ]"
+                                  :style="{
+                                    width: getClaudeUsageWidth(scoped)
+                                  }"
+                                />
+                              </div>
+                              <span
+                                class="w-16 text-right text-xs font-semibold text-gray-800 dark:text-gray-100"
+                              >
+                                已用 {{ formatClaudeUsagePercent(scoped) }}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                        <div class="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+                          重置剩余 {{ formatClaudeRemaining(scoped) }}
+                        </div>
+                      </div>
+                      <div
                         v-if="
                           formatNurtureVelocityUsage(account) ||
                           formatNurtureLocalRequestUsage(account) ||
@@ -1775,6 +1812,42 @@
                     class="mt-0.5 text-[11px] font-medium text-emerald-700 dark:text-emerald-300"
                   >
                     {{ formatNurtureGuardUsage(account, 'sevenDayOpus') }}
+                  </div>
+                </div>
+                <div
+                  v-for="(scoped, scopedIdx) in account.claudeUsage.sevenDayScopedModels || []"
+                  :key="`mobile-scoped-${scoped.modelName || scopedIdx}`"
+                  class="rounded-lg bg-gray-50 p-2 dark:bg-gray-700/70"
+                >
+                  <div class="flex items-center gap-2">
+                    <span
+                      class="inline-flex min-w-[32px] justify-center rounded-full bg-purple-100 px-2 py-0.5 text-[11px] font-medium text-purple-600 dark:bg-purple-500/20 dark:text-purple-300"
+                    >
+                      {{ scoped.modelName }}
+                    </span>
+                    <div class="flex-1">
+                      <div class="flex items-center gap-2">
+                        <div class="h-2 flex-1 rounded-full bg-gray-200 dark:bg-gray-600">
+                          <div
+                            :class="[
+                              'h-2 rounded-full transition-all duration-300',
+                              getClaudeUsageBarClass(scoped)
+                            ]"
+                            :style="{
+                              width: getClaudeUsageWidth(scoped)
+                            }"
+                          />
+                        </div>
+                        <span
+                          class="w-16 text-right text-xs font-semibold text-gray-800 dark:text-gray-100"
+                        >
+                          已用 {{ formatClaudeUsagePercent(scoped) }}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+                    重置剩余 {{ formatClaudeRemaining(scoped) }}
                   </div>
                 </div>
                 <div

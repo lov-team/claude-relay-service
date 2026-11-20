@@ -26,6 +26,7 @@ const {
   normalizeTempUnavailablePolicyInput
 } = require('../../utils/tempUnavailablePolicy')
 const { classifyClaudeOAuthError } = require('../../utils/claudeOAuthErrorClassifier')
+const { parseClaudePassiveUsageHeaders } = require('../../utils/claudePassiveUsageHelper')
 const userAgentPoolService = require('../userAgentPoolService')
 const { DEFAULT_CLAUDE_USER_AGENT } = require('../userAgentPoolService')
 const requestIdentityService = require('../requestIdentityService')
@@ -2515,6 +2516,31 @@ class ClaudeAccountService {
     }
   }
 
+  _extractWeeklyScopedModels(limits) {
+    if (!Array.isArray(limits)) {
+      return []
+    }
+
+    const result = []
+    for (const limit of limits) {
+      if (!limit || limit.kind !== 'weekly_scoped') {
+        continue
+      }
+      const modelName = limit.scope?.model?.display_name
+      if (!modelName) {
+        continue
+      }
+      result.push({
+        modelName: String(modelName),
+        utilization: this._toNumberOrNull(limit.percent),
+        resetsAt: limit.resets_at || null,
+        severity: limit.severity || null,
+        isActive: limit.is_active === true
+      })
+    }
+    return result
+  }
+
   // 📊 构建 Claude Usage 快照（从 Redis 数据）
   buildClaudeUsageSnapshot(accountData) {
     const updatedAt = accountData.claudeUsageUpdatedAt
@@ -2525,40 +2551,91 @@ class ClaudeAccountService {
     const sevenDayResetsAt = accountData.claudeSevenDayResetsAt
     const sevenDayOpusUtilization = this._toNumberOrNull(accountData.claudeSevenDayOpusUtilization)
     const sevenDayOpusResetsAt = accountData.claudeSevenDayOpusResetsAt
+    const sevenDayFableUtilization = this._toNumberOrNull(
+      accountData.claudeSevenDayFableUtilization
+    )
+    const sevenDayFableResetsAt = accountData.claudeSevenDayFableResetsAt
+
+    let scopedModels = []
+    if (accountData.claudeWeeklyScopedModels) {
+      try {
+        const parsed = JSON.parse(accountData.claudeWeeklyScopedModels)
+        if (Array.isArray(parsed)) {
+          scopedModels = parsed.filter((item) => item && typeof item === 'object')
+        }
+      } catch {
+        scopedModels = []
+      }
+    }
+
+    const now = Date.now()
+    const fableResetMs = sevenDayFableResetsAt ? Date.parse(sevenDayFableResetsAt) : NaN
+    const hasActivePassiveFable =
+      (sevenDayFableUtilization !== null || Boolean(sevenDayFableResetsAt)) &&
+      (!sevenDayFableResetsAt || (Number.isFinite(fableResetMs) && fableResetMs > now))
+
+    const hasFableScoped = scopedModels.some(
+      (item) => String(item.modelName || '').toLowerCase() === 'fable'
+    )
+    if (hasActivePassiveFable && !hasFableScoped) {
+      scopedModels.push({
+        modelName: 'Fable',
+        utilization: sevenDayFableUtilization,
+        resetsAt: sevenDayFableResetsAt || null,
+        severity: null,
+        isActive: true,
+        source: 'passive'
+      })
+    }
 
     const hasFiveHourData = fiveHourUtilization !== null || fiveHourResetsAt
     const hasSevenDayData = sevenDayUtilization !== null || sevenDayResetsAt
     const hasSevenDayOpusData = sevenDayOpusUtilization !== null || sevenDayOpusResetsAt
 
-    if (!updatedAt && !hasFiveHourData && !hasSevenDayData && !hasSevenDayOpusData) {
+    if (
+      !updatedAt &&
+      !hasFiveHourData &&
+      !hasSevenDayData &&
+      !hasSevenDayOpusData &&
+      scopedModels.length === 0
+    ) {
       return null
     }
 
-    const now = Date.now()
+    const remainingFrom = (resetsAt) => {
+      if (!resetsAt) {
+        return null
+      }
+      const resetMs = new Date(resetsAt).getTime()
+      return Number.isFinite(resetMs) ? Math.max(0, Math.floor((resetMs - now) / 1000)) : null
+    }
 
     return {
       updatedAt,
       fiveHour: {
         utilization: fiveHourUtilization,
         resetsAt: fiveHourResetsAt,
-        remainingSeconds: fiveHourResetsAt
-          ? Math.max(0, Math.floor((new Date(fiveHourResetsAt).getTime() - now) / 1000))
-          : null
+        remainingSeconds: remainingFrom(fiveHourResetsAt)
       },
       sevenDay: {
         utilization: sevenDayUtilization,
         resetsAt: sevenDayResetsAt,
-        remainingSeconds: sevenDayResetsAt
-          ? Math.max(0, Math.floor((new Date(sevenDayResetsAt).getTime() - now) / 1000))
-          : null
+        remainingSeconds: remainingFrom(sevenDayResetsAt)
       },
       sevenDayOpus: {
         utilization: sevenDayOpusUtilization,
         resetsAt: sevenDayOpusResetsAt,
-        remainingSeconds: sevenDayOpusResetsAt
-          ? Math.max(0, Math.floor((new Date(sevenDayOpusResetsAt).getTime() - now) / 1000))
-          : null
-      }
+        remainingSeconds: remainingFrom(sevenDayOpusResetsAt)
+      },
+      sevenDayScopedModels: scopedModels.map((item) => ({
+        modelName: item.modelName,
+        utilization: this._toNumberOrNull(item.utilization),
+        resetsAt: item.resetsAt || null,
+        severity: item.severity || null,
+        isActive: item.isActive === true,
+        source: item.source || 'oauth_usage',
+        remainingSeconds: remainingFrom(item.resetsAt)
+      }))
     }
   }
 
@@ -2600,21 +2677,145 @@ class ClaudeAccountService {
       }
     }
 
-    if (Object.keys(updates).length === 0) {
+    const scopedModels = this._extractWeeklyScopedModels(usageData.limits)
+
+    if (Object.keys(updates).length === 0 && scopedModels.length === 0) {
       return
     }
 
+    updates.claudeWeeklyScopedModels = JSON.stringify(scopedModels)
+    const fableEntry = scopedModels.find(
+      (item) => String(item.modelName || '').toLowerCase() === 'fable'
+    )
+    if (fableEntry) {
+      if (fableEntry.utilization !== null) {
+        updates.claudeSevenDayFableUtilization = String(fableEntry.utilization)
+      }
+      if (fableEntry.resetsAt) {
+        updates.claudeSevenDayFableResetsAt = fableEntry.resetsAt
+      }
+    }
+
     updates.claudeUsageUpdatedAt = new Date().toISOString()
+    updates.claudeUsageSource = 'oauth_usage'
 
     const accountData = await redis.getClaudeAccount(accountId)
     if (accountData && Object.keys(accountData).length > 0) {
+      const existingOpusRateLimitEndAt = accountData.opusRateLimitEndAt
+      const existingFableRateLimitEndAt = accountData.fableRateLimitEndAt
+      const existingRateLimitStatus = accountData.rateLimitStatus
+      const existingRateLimitAutoStopped = accountData.rateLimitAutoStopped
+
       Object.assign(accountData, updates)
       await redis.setClaudeAccount(accountId, accountData)
       logger.debug(
         `📊 Updated Claude usage snapshot for account ${accountId}:`,
         Object.keys(updates)
       )
+
+      const opusUtil = this._toNumberOrNull(usageData.seven_day_sonnet?.utilization)
+      if (opusUtil !== null && opusUtil < 95 && existingOpusRateLimitEndAt) {
+        await this.clearAccountModelRateLimit(accountId, 'opus').catch((err) => {
+          logger.warn(`Failed to auto-recover opus rate limit for ${accountId}: ${err.message}`)
+        })
+      }
+
+      if (
+        fableEntry &&
+        fableEntry.utilization !== null &&
+        fableEntry.utilization < 95 &&
+        existingFableRateLimitEndAt
+      ) {
+        await this.clearAccountModelRateLimit(accountId, 'fable').catch((err) => {
+          logger.warn(`Failed to auto-recover fable rate limit for ${accountId}: ${err.message}`)
+        })
+      }
+
+      const fiveHourUtil = this._toNumberOrNull(usageData.five_hour?.utilization)
+      const sevenDayUtil = this._toNumberOrNull(usageData.seven_day?.utilization)
+      if (
+        fiveHourUtil !== null &&
+        fiveHourUtil < 95 &&
+        (sevenDayUtil === null || sevenDayUtil < 95) &&
+        existingRateLimitStatus === 'limited' &&
+        existingRateLimitAutoStopped === 'true'
+      ) {
+        await this.removeAccountRateLimit(accountId, { force: true }).catch((err) => {
+          logger.warn(`Failed to auto-recover account rate limit for ${accountId}: ${err.message}`)
+        })
+      }
     }
+  }
+
+  // 📡 从 /v1/messages 响应头被动采样窗口利用率（不额外请求 /api/oauth/usage）
+  async recordPassiveUsageFromHeaders(accountId, headers) {
+    if (!accountId || !headers || typeof headers !== 'object') {
+      return { updated: false }
+    }
+
+    const parsed = parseClaudePassiveUsageHeaders(headers)
+    if (!parsed.hasAny) {
+      return { updated: false }
+    }
+
+    const fields = {}
+    if (parsed.fiveHour) {
+      if (parsed.fiveHour.utilization !== null) {
+        fields.claudeFiveHourUtilization = String(parsed.fiveHour.utilization)
+      }
+      if (parsed.fiveHour.resetsAt) {
+        fields.claudeFiveHourResetsAt = parsed.fiveHour.resetsAt
+      }
+    }
+    if (parsed.sevenDay) {
+      if (parsed.sevenDay.utilization !== null) {
+        fields.claudeSevenDayUtilization = String(parsed.sevenDay.utilization)
+      }
+      if (parsed.sevenDay.resetsAt) {
+        fields.claudeSevenDayResetsAt = parsed.sevenDay.resetsAt
+      }
+    }
+    if (parsed.sevenDayFable) {
+      if (parsed.sevenDayFable.utilization !== null) {
+        fields.claudeSevenDayFableUtilization = String(parsed.sevenDayFable.utilization)
+      }
+      if (parsed.sevenDayFable.resetsAt) {
+        fields.claudeSevenDayFableResetsAt = parsed.sevenDayFable.resetsAt
+      }
+    }
+
+    if (Object.keys(fields).length === 0) {
+      return { updated: false }
+    }
+
+    fields.claudeUsageUpdatedAt = new Date().toISOString()
+    fields.claudeUsageSource = 'passive'
+
+    if (typeof redis.updateClaudeAccountPassiveUsage !== 'function') {
+      return { updated: false }
+    }
+
+    const result = await redis.updateClaudeAccountPassiveUsage(accountId, fields)
+    if (!result?.updated) {
+      return { updated: false }
+    }
+
+    if (
+      parsed.sevenDayFable &&
+      parsed.sevenDayFable.utilization !== null &&
+      parsed.sevenDayFable.utilization < 95 &&
+      parsed.sevenDayFable.status !== 'rejected' &&
+      parsed.sevenDayFable.status !== 'exceeded' &&
+      result.fableRateLimitEndAt
+    ) {
+      await this.clearAccountModelRateLimit(accountId, 'fable').catch((err) => {
+        logger.warn(
+          `Failed to auto-recover passive fable rate limit for ${accountId}: ${err.message}`
+        )
+      })
+    }
+
+    return { updated: true }
   }
 
   // 📊 获取账号 Profile 信息并更新账号类型
