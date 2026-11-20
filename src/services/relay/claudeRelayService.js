@@ -42,6 +42,8 @@ const EXTENDED_CACHE_TTL_BETA = 'extended-cache-ttl-2025-04-11'
 const PROMPT_CACHING_SCOPE_BETA = 'prompt-caching-scope-2026-01-05'
 const CONTEXT_MANAGEMENT_BETA = 'context-management-2025-06-27'
 const THINKING_BINDING_CONTROLS_BETA = 'thinking-binding-controls-2026-08-01'
+const MID_CONVERSATION_TOOL_CHANGES_BETA = 'mid-conversation-tool-changes-2026-07-01'
+const INLINE_TOOLS_BETA = 'inline-tools-2026-09-15'
 const SERVER_SIDE_FALLBACK_BETA = 'server-side-fallback-2026-07-01'
 const FALLBACK_CREDIT_BETA = 'fallback-credit-2026-07-01'
 const FALLBACK_CREDIT_LEGACY_BETA = 'fallback-credit-2026-06-01'
@@ -137,6 +139,13 @@ class ClaudeRelayService {
       typeof requestPayload.context_management === 'object'
     ) {
       addBeta(CONTEXT_MANAGEMENT_BETA)
+    }
+
+    if (this._hasToolChangeBlocks(requestPayload)) {
+      addBeta(MID_CONVERSATION_TOOL_CHANGES_BETA)
+    }
+    if (this._hasInlineToolDefinition(requestPayload)) {
+      addBeta(INLINE_TOOLS_BETA)
     }
 
     return betaList.join(',')
@@ -1037,12 +1046,95 @@ class ClaudeRelayService {
             if (block?.type === 'tool_use' && typeof block.name === 'string') {
               block.name = transformName(block.name)
             }
+            if (
+              (block?.type === 'tool_addition' || block?.type === 'tool_removal') &&
+              block.tool &&
+              typeof block.tool === 'object'
+            ) {
+              if (typeof block.tool.name === 'string') {
+                block.tool.name = transformName(block.tool.name)
+              }
+              if (
+                block.tool.type === 'tool_definition' &&
+                block.tool.definition &&
+                typeof block.tool.definition.name === 'string'
+              ) {
+                block.tool.definition.name = transformName(block.tool.definition.name)
+              }
+            }
           })
         }
       })
     }
 
     return reverseMap.size > 0 ? reverseMap : null
+  }
+
+  _normalizeToolChangeBlocks(body) {
+    if (!body || !Array.isArray(body.messages)) {
+      return body
+    }
+
+    let normalized = 0
+    let dropped = 0
+    const messages = []
+
+    for (const message of body.messages) {
+      if (!message || !Array.isArray(message.content)) {
+        messages.push(message)
+        continue
+      }
+
+      const content = []
+      for (const block of message.content) {
+        if (!block || (block.type !== 'tool_addition' && block.type !== 'tool_removal')) {
+          content.push(block)
+          continue
+        }
+
+        let { tool } = block
+        if (tool && typeof tool === 'object' && !tool.type && typeof tool.name === 'string') {
+          tool = { type: 'tool_reference', name: tool.name }
+          normalized += 1
+        }
+
+        if (!tool || typeof tool !== 'object') {
+          const nameSource = block.name || block.tool_name
+          const name = typeof nameSource === 'string' ? nameSource.trim() : ''
+          if (!name) {
+            dropped += 1
+            continue
+          }
+          const { name: _name, tool_name: _toolName, tool: _tool, ...rest } = block
+          tool = { type: 'tool_reference', name }
+          content.push({ ...rest, tool })
+          normalized += 1
+          continue
+        }
+
+        if (tool !== block.tool) {
+          content.push({ ...block, tool })
+        } else {
+          content.push(block)
+        }
+      }
+
+      if (content.length > 0) {
+        messages.push({ ...message, content })
+      } else if (message.content.length > 0) {
+        dropped += 1
+      } else {
+        messages.push(message)
+      }
+    }
+
+    body.messages = messages
+    if (normalized > 0 || dropped > 0) {
+      logger.warn(
+        `🧹 Normalized ${normalized} malformed tool change block(s) and dropped ${dropped} unrecoverable block(s)`
+      )
+    }
+    return body
   }
 
   _restoreToolName(name, toolNameMap) {
@@ -2244,6 +2336,7 @@ class ClaudeRelayService {
     // 使用 safeClone 替代 JSON.parse(JSON.stringify()) 提升性能
     const processedBody = safeClone(body)
 
+    this._normalizeToolChangeBlocks(processedBody)
     processedBody.messages = this._sanitizeToolUseIds(processedBody.messages)
     processedBody.messages = this._sanitizeUnsignedThinkingBlocks(processedBody.messages)
     processedBody.messages = this._patchOrphanedToolUse(processedBody.messages)
@@ -2625,6 +2718,32 @@ class ClaudeRelayService {
     })
 
     return hasCacheControl
+  }
+
+  _hasToolChangeBlocks(body) {
+    return Boolean(
+      Array.isArray(body?.messages) &&
+        body.messages.some(
+          (message) =>
+            Array.isArray(message?.content) &&
+            message.content.some(
+              (block) => block?.type === 'tool_addition' || block?.type === 'tool_removal'
+            )
+        )
+    )
+  }
+
+  _hasInlineToolDefinition(body) {
+    return Boolean(
+      Array.isArray(body?.messages) &&
+        body.messages.some(
+          (message) =>
+            Array.isArray(message?.content) &&
+            message.content.some(
+              (block) => block?.type === 'tool_addition' && block.tool?.type === 'tool_definition'
+            )
+        )
+    )
   }
 
   _applyClaudeCodeSessionHeaders(headers, requestPayload) {

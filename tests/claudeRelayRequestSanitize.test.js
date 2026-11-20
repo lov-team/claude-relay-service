@@ -187,4 +187,93 @@ describe('Claude relay request sanitization', () => {
     ])
     expect(toolNameMap.get('SendMessage_tool')).toBe('send_message')
   })
+
+  test('normalizes legacy tool change blocks before forwarding', () => {
+    const processed = claudeRelayService._processRequestBody(
+      {
+        model: 'claude-sonnet-5-5',
+        max_tokens: 32,
+        messages: [
+          {
+            role: 'system',
+            content: [
+              { type: 'text', text: 'Tools changed.' },
+              { type: 'tool_addition', name: 'mcp__docs__search' },
+              { type: 'tool_removal', tool: { name: 'mcp__docs__old' } }
+            ]
+          }
+        ]
+      },
+      null,
+      true
+    )
+
+    expect(processed.messages[0].content).toEqual([
+      { type: 'text', text: 'Tools changed.' },
+      {
+        type: 'tool_addition',
+        tool: { type: 'tool_reference', name: 'mcp__docs__search' }
+      },
+      {
+        type: 'tool_removal',
+        tool: { type: 'tool_reference', name: 'mcp__docs__old' }
+      }
+    ])
+  })
+
+  test('drops unrecoverable tool change blocks and adds the required beta', () => {
+    const processed = claudeRelayService._processRequestBody(
+      {
+        model: 'claude-sonnet-5-5',
+        max_tokens: 32,
+        messages: [
+          {
+            role: 'system',
+            content: [{ type: 'tool_addition' }, { type: 'tool_removal', name: 'valid_tool' }]
+          }
+        ]
+      },
+      null,
+      true
+    )
+
+    expect(processed.messages[0].content).toEqual([
+      {
+        type: 'tool_removal',
+        tool: { type: 'tool_reference', name: 'valid_tool' }
+      }
+    ])
+
+    const beta = claudeRelayService._getBetaHeader(processed.model, '', processed)
+    expect(beta).toContain('mid-conversation-tool-changes-2026-07-01')
+    expect(beta).not.toContain('inline-tools-2026-09-15')
+  })
+
+  test('adds inline tools beta only for inline tool definitions', () => {
+    const body = {
+      model: 'claude-opus-5-5',
+      messages: [
+        {
+          role: 'system',
+          content: [
+            {
+              type: 'tool_addition',
+              tool: {
+                type: 'tool_definition',
+                definition: {
+                  name: 'mcp__docs__search',
+                  description: 'Search docs',
+                  input_schema: { type: 'object' }
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+
+    const beta = claudeRelayService._getBetaHeader(body.model, '', body)
+    expect(beta).toContain('mid-conversation-tool-changes-2026-07-01')
+    expect(beta).toContain('inline-tools-2026-09-15')
+  })
 })
