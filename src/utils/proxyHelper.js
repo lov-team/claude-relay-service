@@ -36,6 +36,7 @@ class ProxyHelper {
 
       // 获取 IPv4/IPv6 配置
       const useIPv4 = ProxyHelper._getIPFamilyPreference(options.useIPv4)
+      const applyClaudeTls = options.applyClaudeTls !== false
 
       // 配置连接池与 Keep-Alive
       const proxySettings = config.proxy || {}
@@ -69,7 +70,7 @@ class ProxyHelper {
         agentCommonOptions.timeout = proxySettings.timeout
       }
 
-      // 缓存键：保证相同配置的代理可复用
+      // 缓存键：保证相同配置的代理可复用（区分是否注入 Claude CLI TLS）
       const cacheKey = JSON.stringify({
         type: proxy.type,
         host: proxy.host,
@@ -77,6 +78,7 @@ class ProxyHelper {
         username: proxy.username,
         password: proxy.password,
         family: useIPv4,
+        applyClaudeTls,
         keepAlive: agentCommonOptions.keepAlive,
         maxSockets: agentCommonOptions.maxSockets,
         maxFreeSockets: agentCommonOptions.maxFreeSockets,
@@ -101,7 +103,8 @@ class ProxyHelper {
           socksOptions.family = useIPv4 ? 4 : 6
         }
 
-        agent = applyClaudeTlsToAgent(new SocksProxyAgent(socksUrl, socksOptions))
+        const rawAgent = new SocksProxyAgent(socksUrl, socksOptions)
+        agent = applyClaudeTls ? applyClaudeTlsToAgent(rawAgent) : rawAgent
       } else if (proxy.type === 'http' || proxy.type === 'https') {
         const proxyUrl = `${proxy.type}://${auth}${proxy.host}:${proxy.port}`
         const httpOptions = { ...agentCommonOptions }
@@ -111,7 +114,8 @@ class ProxyHelper {
           httpOptions.family = useIPv4 ? 4 : 6
         }
 
-        agent = applyClaudeTlsToAgent(new HttpsProxyAgent(proxyUrl, httpOptions))
+        const rawAgent = new HttpsProxyAgent(proxyUrl, httpOptions)
+        agent = applyClaudeTls ? applyClaudeTlsToAgent(rawAgent) : rawAgent
       } else {
         logger.warn(`⚠️ Unsupported proxy type: ${proxy.type}`)
         return null
@@ -221,6 +225,34 @@ class ProxyHelper {
       return `${proxy.type}://${proxy.host}:${proxy.port}${hasAuth ? ' (with auth)' : ''}`
     } catch (error) {
       return 'Invalid proxy config'
+    }
+  }
+
+  /**
+   * 规范化代理出口标识（type://host:port，用于同出口复用审计，不含凭据）
+   * @param {object|string|null} proxyConfig
+   * @returns {string|null}
+   */
+  static normalizeProxyEndpoint(proxyConfig) {
+    if (!proxyConfig) {
+      return null
+    }
+
+    try {
+      const proxy = typeof proxyConfig === 'string' ? JSON.parse(proxyConfig) : proxyConfig
+      const type = String(proxy?.type || '')
+        .trim()
+        .toLowerCase()
+      const host = String(proxy?.host || '')
+        .trim()
+        .toLowerCase()
+      const port = Number.parseInt(proxy?.port, 10)
+      if (!type || !host || !Number.isFinite(port) || port <= 0) {
+        return null
+      }
+      return `${type}://${host}:${port}`
+    } catch {
+      return null
     }
   }
 

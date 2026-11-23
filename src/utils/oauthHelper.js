@@ -5,9 +5,26 @@
 
 const crypto = require('crypto')
 const ProxyHelper = require('./proxyHelper')
+const { createClaudeHttpsAgent } = require('./claudeTlsAgent')
 const axios = require('axios')
 const logger = require('./logger')
 const config = require('../../config/config')
+
+let directClaudeHttpsAgent = null
+function getDirectClaudeHttpsAgent() {
+  if (!directClaudeHttpsAgent) {
+    directClaudeHttpsAgent = createClaudeHttpsAgent({ keepAlive: true })
+  }
+  return directClaudeHttpsAgent
+}
+
+function deterministicUuid(seed) {
+  const bytes = Buffer.from(crypto.createHash('sha256').update(String(seed)).digest().subarray(0, 16))
+  bytes[6] = (bytes[6] & 0x0f) | 0x40
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = bytes.toString('hex')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
 
 // OAuth 配置常量 - 从claude-code-login.js提取
 // 注：console.anthropic.com 已迁移至 platform.claude.com，旧域名对 refresh_token grant 返回 404
@@ -146,6 +163,10 @@ function createProxyAgent(proxyConfig) {
   return ProxyHelper.createProxyAgent(proxyConfig)
 }
 
+function createBrowserProxyAgent(proxyConfig) {
+  return ProxyHelper.createProxyAgent(proxyConfig, { applyClaudeTls: false })
+}
+
 function splitCodeAndState(authorizationCode) {
   const raw = String(authorizationCode || '').trim()
   const hashIndex = raw.indexOf('#')
@@ -220,6 +241,8 @@ async function exchangeCodeForTokens(authorizationCode, codeVerifier, _state, pr
       axiosConfig.httpAgent = agent
       axiosConfig.httpsAgent = agent
       axiosConfig.proxy = false
+    } else {
+      axiosConfig.httpsAgent = getDirectClaudeHttpsAgent()
     }
 
     const response = await axios.post(OAUTH_CONFIG.TOKEN_URL, params, axiosConfig)
@@ -460,6 +483,8 @@ async function exchangeSetupTokenCode(authorizationCode, codeVerifier, _state, p
       axiosConfig.httpAgent = agent
       axiosConfig.httpsAgent = agent
       axiosConfig.proxy = false
+    } else {
+      axiosConfig.httpsAgent = getDirectClaudeHttpsAgent()
     }
 
     const response = await axios.post(OAUTH_CONFIG.TOKEN_URL, params, axiosConfig)
@@ -630,16 +655,30 @@ function extractExtInfo(data) {
  * @param {string} sessionKey - sessionKey值
  * @returns {object} 请求头对象
  */
-function buildCookieHeaders(sessionKey) {
+function buildCookieHeaders(sessionKey, options = {}) {
+  const deviceId =
+    options.deviceId || deterministicUuid(`claude-ai-device:${String(sessionKey || '')}`)
+  const activitySessionId =
+    options.activitySessionId ||
+    deterministicUuid(`claude-ai-activity:${String(sessionKey || '')}`)
+
   return {
     Accept: 'application/json',
     'Accept-Language': 'en-US,en;q=0.9',
     'Cache-Control': 'no-cache',
-    Cookie: `sessionKey=${sessionKey}`,
+    Cookie: `sessionKey=${sessionKey}; anthropic-device-id=${deviceId}; activitySessionId=${activitySessionId}`,
     Origin: COOKIE_OAUTH_CONFIG.CLAUDE_AI_URL,
     Referer: `${COOKIE_OAUTH_CONFIG.CLAUDE_AI_URL}/new`,
+    'anthropic-device-id': deviceId,
+    'x-activity-session-id': activitySessionId,
+    'sec-ch-ua': '"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"',
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': '"Windows"',
+    'Sec-Fetch-Dest': 'empty',
+    'Sec-Fetch-Mode': 'cors',
+    'Sec-Fetch-Site': 'same-origin',
     'User-Agent':
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36'
   }
 }
 
@@ -651,7 +690,7 @@ function buildCookieHeaders(sessionKey) {
  */
 async function getOrganizationInfo(sessionKey, proxyConfig = null) {
   const headers = buildCookieHeaders(sessionKey)
-  const agent = createProxyAgent(proxyConfig)
+  const agent = createBrowserProxyAgent(proxyConfig)
 
   try {
     if (agent) {
@@ -764,7 +803,7 @@ async function authorizeWithCookie(sessionKey, organizationUuid, scope, proxyCon
     'Content-Type': 'application/json'
   }
 
-  const agent = createProxyAgent(proxyConfig)
+  const agent = createBrowserProxyAgent(proxyConfig)
 
   try {
     if (agent) {

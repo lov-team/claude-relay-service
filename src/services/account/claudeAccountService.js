@@ -30,6 +30,7 @@ const { parseClaudePassiveUsageHeaders } = require('../../utils/claudePassiveUsa
 const userAgentPoolService = require('../userAgentPoolService')
 const { DEFAULT_CLAUDE_USER_AGENT } = require('../userAgentPoolService')
 const requestIdentityService = require('../requestIdentityService')
+const { createClaudeHttpsAgent } = require('../../utils/claudeTlsAgent')
 
 /**
  * Check if account is Pro (not Max)
@@ -242,6 +243,7 @@ class ClaudeAccountService {
     await redis.setClaudeAccount(accountId, accountData)
 
     logger.success(`🏢 Created Claude account: ${name} (${accountId})`)
+    this._warnOnProxyRisk(accountId, name, proxy).catch(() => {})
 
     // 如果有 OAuth 数据和 accessToken，且包含 user:profile 权限，尝试获取 profile 信息
     if (claudeAiOauth && claudeAiOauth.accessToken) {
@@ -355,17 +357,15 @@ class ClaudeAccountService {
       logRefreshStart(accountId, accountData.name, 'claude', 'manual_refresh')
       logger.info(`🔄 Starting token refresh for account: ${accountData.name} (${accountId})`)
 
-      // 创建代理agent
+      // 创建代理agent（无代理时也保持 Claude CLI TLS 指纹）
       const agent = this._createProxyAgent(accountData.proxy)
 
       const axiosConfig = {
         headers: {
           'Content-Type': 'application/json',
           Accept: 'application/json, text/plain, */*',
-          'User-Agent': accountData.userAgent || 'claude-cli/1.0.56 (external, cli)',
-          'Accept-Language': 'en-US,en;q=0.9',
-          Referer: 'https://claude.ai/',
-          Origin: 'https://claude.ai'
+          'User-Agent': this._resolveControlPlaneUserAgent(accountData),
+          'Accept-Language': 'en-US,en;q=0.9'
         },
         timeout: 30000
       }
@@ -374,6 +374,8 @@ class ClaudeAccountService {
         axiosConfig.httpAgent = agent
         axiosConfig.httpsAgent = agent
         axiosConfig.proxy = false
+      } else {
+        axiosConfig.httpsAgent = this._getDirectControlPlaneHttpsAgent()
       }
 
       const response = await axios.post(
@@ -1551,6 +1553,78 @@ class ClaudeAccountService {
   }
 
   // 🌐 创建代理agent（使用统一的代理工具）
+  _resolveControlPlaneUserAgent(accountData) {
+    const pinned = typeof accountData?.userAgent === 'string' ? accountData.userAgent.trim() : ''
+    return pinned || DEFAULT_CLAUDE_USER_AGENT
+  }
+
+  _getDirectControlPlaneHttpsAgent() {
+    if (!this._directControlPlaneHttpsAgent) {
+      this._directControlPlaneHttpsAgent = createClaudeHttpsAgent({ keepAlive: true })
+    }
+    return this._directControlPlaneHttpsAgent
+  }
+
+  auditAccountProxyRisks(accounts = []) {
+    const endpointToAccountIds = new Map()
+    const directAccountIds = []
+
+    for (const acc of accounts || []) {
+      if (!acc || acc.isActive === false || acc.isActive === 'false') {
+        continue
+      }
+      const endpoint = ProxyHelper.normalizeProxyEndpoint(acc.proxy)
+      if (!endpoint) {
+        directAccountIds.push(acc.id)
+        continue
+      }
+      const list = endpointToAccountIds.get(endpoint) || []
+      list.push(acc.id)
+      endpointToAccountIds.set(endpoint, list)
+    }
+
+    const sharedEndpoints = {}
+    for (const [endpoint, ids] of endpointToAccountIds.entries()) {
+      if (ids.length > 1) {
+        sharedEndpoints[endpoint] = ids
+      }
+    }
+
+    return {
+      directAccountIds,
+      sharedEndpoints
+    }
+  }
+
+  async _warnOnProxyRisk(accountId, accountName, proxyConfig) {
+    const endpoint = ProxyHelper.normalizeProxyEndpoint(proxyConfig)
+    if (!endpoint) {
+      logger.warn(
+        `⚠️ Claude account ${accountName} (${accountId}) has no dedicated proxy configured; outbound traffic will fall back to host datacenter IP`
+      )
+      return
+    }
+
+    if (typeof redis.getAllClaudeAccounts !== 'function') {
+      return
+    }
+
+    const accounts = await redis.getAllClaudeAccounts()
+    const peers = (accounts || []).filter(
+      (acc) =>
+        acc &&
+        acc.id !== accountId &&
+        acc.isActive !== false &&
+        acc.isActive !== 'false' &&
+        ProxyHelper.normalizeProxyEndpoint(acc.proxy) === endpoint
+    )
+    if (peers.length > 0) {
+      logger.warn(
+        `⚠️ Claude account ${accountName} (${accountId}) shares proxy endpoint ${endpoint} with ${peers.length} other active account(s)`
+      )
+    }
+  }
+
   _createProxyAgent(proxyConfig) {
     const proxyAgent = ProxyHelper.createProxyAgent(proxyConfig)
     if (proxyAgent) {
@@ -2461,7 +2535,7 @@ class ClaudeAccountService {
           'Content-Type': 'application/json',
           Accept: 'application/json',
           'anthropic-beta': 'oauth-2025-04-20',
-          'User-Agent': accountData.userAgent || 'claude-cli/2.0.53 (external, cli)',
+          'User-Agent': this._resolveControlPlaneUserAgent(accountData),
           'Accept-Language': 'en-US,en;q=0.9'
         },
         timeout: 15000
@@ -2471,6 +2545,8 @@ class ClaudeAccountService {
         axiosConfig.httpAgent = agent
         axiosConfig.httpsAgent = agent
         axiosConfig.proxy = false
+      } else {
+        axiosConfig.httpsAgent = this._getDirectControlPlaneHttpsAgent()
       }
 
       const response = await axios.get('https://api.anthropic.com/api/oauth/usage', axiosConfig)
@@ -2882,7 +2958,7 @@ class ClaudeAccountService {
           Authorization: `Bearer ${accessToken}`,
           'Content-Type': 'application/json',
           Accept: 'application/json',
-          'User-Agent': accountData.userAgent || 'claude-cli/1.0.56 (external, cli)',
+          'User-Agent': this._resolveControlPlaneUserAgent(accountData),
           'Accept-Language': 'en-US,en;q=0.9'
         },
         timeout: 15000
@@ -2892,6 +2968,8 @@ class ClaudeAccountService {
         axiosConfig.httpAgent = agent
         axiosConfig.httpsAgent = agent
         axiosConfig.proxy = false
+      } else {
+        axiosConfig.httpsAgent = this._getDirectControlPlaneHttpsAgent()
       }
 
       const response = await axios.get('https://api.anthropic.com/api/oauth/profile', axiosConfig)
