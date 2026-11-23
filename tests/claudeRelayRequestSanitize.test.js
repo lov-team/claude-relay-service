@@ -276,4 +276,82 @@ describe('Claude relay request sanitization', () => {
     expect(beta).toContain('mid-conversation-tool-changes-2026-07-01')
     expect(beta).toContain('inline-tools-2026-09-15')
   })
+
+  test('transforms and restores tool_reference tool_name inside tool_result and tool_search_tool_result', () => {
+    const body = {
+      tools: [
+        { type: 'custom', name: 'mcp__mysql_pak_prod_ro__execute_sql', defer_loading: true },
+        { type: 'custom', name: 'SendMessage', defer_loading: true }
+      ],
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'toolu_1',
+              content: [
+                { type: 'tool_reference', tool_name: 'mcp__mysql_pak_prod_ro__execute_sql' },
+                { type: 'tool_reference', tool_name: 'SendMessage' }
+              ]
+            },
+            {
+              type: 'tool_search_tool_result',
+              tool_use_id: 'srvtoolu_1',
+              content: {
+                type: 'tool_search_tool_search_result',
+                tool_references: [
+                  { type: 'tool_reference', tool_name: 'mcp__mysql_pak_prod_ro__execute_sql' }
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+
+    const toolNameMap = claudeRelayService._transformToolNamesInRequestBody(body)
+    const adaptedName = 'McpMysqlPakProdRoExecuteSql_tool'
+
+    expect(body.tools[0].name).toBe(adaptedName)
+    expect(body.messages[0].content[0].content[0].tool_name).toBe(adaptedName)
+    expect(body.messages[0].content[0].content[1].tool_name).toBe('SendMessage')
+    expect(body.messages[0].content[1].content.tool_references[0].tool_name).toBe(adaptedName)
+    expect(toolNameMap.get(adaptedName)).toBe('mcp__mysql_pak_prod_ro__execute_sql')
+
+    const responseBody = {
+      content: [
+        {
+          type: 'tool_search_tool_result',
+          tool_use_id: 'srvtoolu_1',
+          content: {
+            type: 'tool_search_tool_search_result',
+            tool_references: [{ type: 'tool_reference', tool_name: adaptedName }]
+          }
+        },
+        { type: 'tool_use', id: 'toolu_2', name: adaptedName, input: {} }
+      ]
+    }
+    claudeRelayService._restoreToolNamesInResponseBody(responseBody, toolNameMap)
+    expect(responseBody.content[0].content.tool_references[0].tool_name).toBe(
+      'mcp__mysql_pak_prod_ro__execute_sql'
+    )
+    expect(responseBody.content[1].name).toBe('mcp__mysql_pak_prod_ro__execute_sql')
+
+    const streamEvent = {
+      type: 'content_block_start',
+      content_block: {
+        type: 'tool_search_tool_result',
+        tool_use_id: 'srvtoolu_1',
+        content: {
+          type: 'tool_search_tool_search_result',
+          tool_references: [{ type: 'tool_reference', tool_name: adaptedName }]
+        }
+      }
+    }
+    claudeRelayService._restoreToolNamesInStreamEvent(streamEvent, toolNameMap)
+    expect(streamEvent.content_block.content.tool_references[0].tool_name).toBe(
+      'mcp__mysql_pak_prod_ro__execute_sql'
+    )
+  })
 })

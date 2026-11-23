@@ -1105,6 +1105,18 @@ class ClaudeRelayService {
       }
     }
 
+    const transformToolReference = (ref) => {
+      if (!ref || typeof ref !== 'object' || ref.type !== 'tool_reference') {
+        return
+      }
+      if (typeof ref.tool_name === 'string') {
+        ref.tool_name = transformName(ref.tool_name)
+      }
+      if (typeof ref.name === 'string') {
+        ref.name = transformName(ref.name)
+      }
+    }
+
     if (Array.isArray(body.messages)) {
       body.messages.forEach((message) => {
         const content = message?.content
@@ -1112,6 +1124,18 @@ class ClaudeRelayService {
           content.forEach((block) => {
             if (block?.type === 'tool_use' && typeof block.name === 'string') {
               block.name = transformName(block.name)
+            }
+            if (block?.type === 'tool_reference') {
+              transformToolReference(block)
+            }
+            if (block?.type === 'tool_result' && Array.isArray(block.content)) {
+              block.content.forEach(transformToolReference)
+            }
+            if (
+              block?.type === 'tool_search_tool_result' &&
+              Array.isArray(block.content?.tool_references)
+            ) {
+              block.content.tool_references.forEach(transformToolReference)
             }
             if (
               (block?.type === 'tool_addition' || block?.type === 'tool_removal') &&
@@ -1217,8 +1241,28 @@ class ClaudeRelayService {
     }
 
     content.forEach((block) => {
-      if (block?.type === 'tool_use' && typeof block.name === 'string') {
+      if (!block || typeof block !== 'object') {
+        return
+      }
+      if (block.type === 'tool_use' && typeof block.name === 'string') {
         block.name = this._restoreToolName(block.name, toolNameMap)
+      }
+      if (block.type === 'tool_reference') {
+        if (typeof block.tool_name === 'string') {
+          block.tool_name = this._restoreToolName(block.tool_name, toolNameMap)
+        }
+        if (typeof block.name === 'string') {
+          block.name = this._restoreToolName(block.name, toolNameMap)
+        }
+      }
+      if (block.type === 'tool_result' && Array.isArray(block.content)) {
+        this._restoreToolNamesInContentBlocks(block.content, toolNameMap)
+      }
+      if (
+        block.type === 'tool_search_tool_result' &&
+        Array.isArray(block.content?.tool_references)
+      ) {
+        this._restoreToolNamesInContentBlocks(block.content.tool_references, toolNameMap)
       }
     })
   }
@@ -1264,10 +1308,8 @@ class ClaudeRelayService {
       return
     }
 
-    if (event.content_block && event.content_block.type === 'tool_use') {
-      if (typeof event.content_block.name === 'string') {
-        event.content_block.name = this._restoreToolName(event.content_block.name, toolNameMap)
-      }
+    if (event.content_block && typeof event.content_block === 'object') {
+      this._restoreToolNamesInContentBlocks([event.content_block], toolNameMap)
     }
 
     if (event.delta && event.delta.type === 'tool_use') {
